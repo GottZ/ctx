@@ -227,3 +227,111 @@ func TestBackgroundDigestHeldUntilASettingChanges(t *testing.T) {
 		t.Fatalf("the tick after that reached it again (%d in all) — the new generation is held too", got)
 	}
 }
+
+// refuseWith re-points the injected refusal to code.
+func refuseWith(t *testing.T, pool *pgxpool.Pool, code string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `CREATE OR REPLACE TRIGGER trg_digest_refuse BEFORE INSERT OR UPDATE ON context_blocks
+		FOR EACH ROW WHEN (NEW.title LIKE 'topic-map-%') EXECUTE FUNCTION digest_refuse('`+code+`')`); err != nil {
+		t.Fatalf("refuse with %s: %v", code, err)
+	}
+}
+
+// TestBackgroundDigestWriteDuringAHeldRunEndsTheHold: a block written while
+// a held run is under way (after it read the write generation) keeps the
+// digest pending, and the next run tries again — a run in which no tenant
+// succeeded wrote nothing itself, so the write came from elsewhere.
+func TestBackgroundDigestWriteDuringAHeldRunEndsTheHold(t *testing.T) {
+	s, _, attempts, _ := holdFixture(t, "54000")
+	ctx := context.Background()
+
+	s.NotifyWrite()
+	s.runDigest(ctx) // held
+	tenants := s.backgroundTenantsFn
+	s.backgroundTenantsFn = func(c context.Context) []backgroundTenant {
+		s.NotifyWrite() // a write while the run is under way
+		return tenants(c)
+	}
+	s.runDigest(ctx) // skipped: held at the generation it read
+	s.backgroundTenantsFn = tenants
+	if !digestPending(s) {
+		t.Fatal("a write during a held run left the digest not pending — the next tick would not run it")
+	}
+	s.runDigest(ctx)
+	if got := attempts(); got != 2 {
+		t.Fatalf("after a write during the held run the digest reached the database %d times in all, want 2", got)
+	}
+}
+
+// TestBackgroundDigestFailureAfterASettingIsRetried: the run a setting gives
+// a held tenant is pending for real — a failure of the other kind in it is
+// retried on the next tick — and a failure of the first kind after that is
+// not reported a second time: one ERROR for the whole episode.
+func TestBackgroundDigestFailureAfterASettingIsRetried(t *testing.T) {
+	s, pool, attempts, logs := holdFixture(t, "54000")
+	ctx := context.Background()
+
+	s.NotifyWrite()
+	s.mu.Lock()
+	s.lastWriteAt = time.Now().Add(-2 * digestDebounce)
+	s.mu.Unlock()
+	s.digestTick(ctx) // held
+	refuseWith(t, pool, "40P01")
+	next := *s.cfg.Snapshot()
+	if err := s.cfg.Replace(&next); err != nil {
+		t.Fatalf("replace config: %v", err)
+	}
+	s.digestTick(ctx) // the setting's run: a deadlock
+	if got := attempts(); got != 2 || !digestPending(s) {
+		t.Fatalf("after the setting's run failed on a deadlock: %d attempts, pending %v; want 2, true", got, digestPending(s))
+	}
+	s.digestTick(ctx) // retried
+	if got := attempts(); got != 3 {
+		t.Fatalf("the deadlock of the setting's run was not retried: %d attempts, want 3", got)
+	}
+	refuseWith(t, pool, "54000")
+	s.digestTick(ctx) // the first kind again
+	if got := attempts(); got != 4 {
+		t.Fatalf("%d attempts, want 4", got)
+	}
+	if got := logs.count("level=ERROR", "cannot store"); got != 1 {
+		t.Errorf("the failure that cannot heal was reported %d times without a success between, want 1:\n%s", got, logs.buf.String())
+	}
+	s.digestTick(ctx)
+	if got := attempts(); got != 4 {
+		t.Errorf("held again, the next tick still reached the database (%d attempts)", got)
+	}
+}
+
+// TestBackgroundDigestForgetsATenantThatLeft: a held tenant that leaves the
+// background register is forgotten, so its state cannot outlive it (a moving
+// configuration generation of a tenant nobody runs would keep the ticker
+// starting digests); back in the register it starts anew.
+func TestBackgroundDigestForgetsATenantThatLeft(t *testing.T) {
+	s, _, attempts, logs := holdFixture(t, "54000")
+	ctx := context.Background()
+
+	s.NotifyWrite()
+	s.runDigest(ctx) // held
+	tenants := s.backgroundTenantsFn
+	s.backgroundTenantsFn = func(context.Context) []backgroundTenant { return nil }
+	s.runDigest(ctx)
+	s.digestHold.mu.Lock()
+	left := len(s.digestHold.tenants)
+	s.digestHold.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("%d tenants kept after the tenant left the register, want 0", left)
+	}
+	next := *s.cfg.Snapshot()
+	if err := s.cfg.Replace(&next); err != nil {
+		t.Fatalf("replace config: %v", err)
+	}
+	if s.digestHold.configChanged(ctx, s.cfg) {
+		t.Error("a tenant that left still makes a setting change start the digest")
+	}
+	s.backgroundTenantsFn = tenants
+	s.runDigest(ctx)
+	if got, errs := attempts(), logs.count("level=ERROR", "cannot store"); got != 2 || errs != 2 {
+		t.Errorf("back in the register: %d attempts, %d ERROR lines; want 2, 2", got, errs)
+	}
+}

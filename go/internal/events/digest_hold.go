@@ -22,23 +22,26 @@ import (
 // tick included. Such a tenant is held: its digest does not run again until a
 // block is written (the scheduler's write generation moves, NotifyWrite) or
 // the tenant's configuration generation changes (a setting; digestTick looks
-// for that while nothing else is pending). It is logged once when the tenant
-// starts failing this way — an ERROR — and once when its digest writes the map
-// again — an INFO; a held run that fails the same way again after a write logs
-// at DEBUG. Every other failure (the database or a connection gone, a timeout,
-// a lock, an error that is not the database's) can go differently on the next
-// tick: it keeps the retry it always had.
+// for that while nothing else is pending). The failure is reported once — an
+// ERROR when the tenant starts failing this way, an INFO when its digest
+// succeeds again; a run in between that fails the same way logs at DEBUG,
+// also after a failure of the other kind. Every other failure (the database or
+// a connection gone, a timeout, a lock, an error that is not the database's)
+// can go differently on the next tick: it lifts the hold and keeps the retry
+// it always had. A tenant that leaves the background register is forgotten.
 //
 // The process's own state: each ctxd instance holds and logs for itself.
 type digestHold struct {
-	mu   sync.Mutex
-	held map[string]digestHeld // tenant scope → the state its last run failed in
+	mu      sync.Mutex
+	tenants map[string]digestHeld // tenant scope → its reported failure that cannot heal
 }
 
-// digestHeld is the state a tenant's digest failed in for good.
+// digestHeld is a tenant whose digest failed on a value the database cannot
+// store and has not succeeded since.
 type digestHeld struct {
-	gen uint64         // the scheduler's write generation when the run started
-	cfg *config.Config // the tenant's configuration generation the run used
+	held bool           // its last run failed that way: no run until gen or cfg moves
+	gen  uint64         // the scheduler's write generation when that run started
+	cfg  *config.Config // the tenant's configuration generation that run used
 }
 
 // cannotHeal returns the SQLSTATE of a failure that cannot heal by itself —
@@ -58,8 +61,8 @@ func cannotHeal(err error) string {
 func (h *digestHold) holds(tenant string, gen uint64, cfg *config.Config) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	e, ok := h.held[tenant]
-	return ok && e.gen == gen && e.cfg == cfg
+	e, ok := h.tenants[tenant]
+	return ok && e.held && e.gen == gen && e.cfg == cfg
 }
 
 // settle records the outcome of tenant's run, started at write generation gen
@@ -69,42 +72,45 @@ func (h *digestHold) holds(tenant string, gen uint64, cfg *config.Config) bool {
 func (h *digestHold) settle(tenant, homeScope string, gen uint64, cfg *config.Config, err error) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	_, wasHeld := h.held[tenant]
+	e, reported := h.tenants[tenant]
 	code := cannotHeal(err)
 	switch {
 	case err == nil:
-		if wasHeld {
-			delete(h.held, tenant)
+		if reported {
+			delete(h.tenants, tenant)
 			slog.Info("scheduler: digest writes the topic map again", "scope", homeScope)
 		}
 		return true
 	case code != "":
-		if h.held == nil {
-			h.held = make(map[string]digestHeld)
+		if h.tenants == nil {
+			h.tenants = make(map[string]digestHeld)
 		}
-		h.held[tenant] = digestHeld{gen: gen, cfg: cfg}
-		if wasHeld {
+		h.tenants[tenant] = digestHeld{held: true, gen: gen, cfg: cfg}
+		if reported {
 			slog.Debug("scheduler: digest failed again on a value the database cannot store", "scope", homeScope,
 				"sqlstate", code, "error", err)
 		} else {
 			slog.Error("scheduler: digest failed on a value the database cannot store — not retried until a block is "+
-				"written or a setting changes; this line repeats only after the digest wrote its map in between",
+				"written or a setting changes; this line repeats only after the digest succeeded in between",
 				"scope", homeScope, "sqlstate", code, "error", err)
 		}
 		return true
 	default:
-		delete(h.held, tenant)
+		if reported {
+			e.held = false // retried like any such failure; the report stands until a success
+			h.tenants[tenant] = e
+		}
 		slog.Error("scheduler: digest error", "error", err)
 		return false
 	}
 }
 
-// retain forgets the held tenants that are not among tenants (a tenant
-// suspended or gone since).
+// retain forgets the tenants that are not among tenants (a tenant suspended
+// or gone since): their state would otherwise outlive them.
 func (h *digestHold) retain(tenants []backgroundTenant) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for scope := range h.held {
+	for scope := range h.tenants {
 		found := false
 		for _, bt := range tenants {
 			if bt.scope == scope {
@@ -113,7 +119,7 @@ func (h *digestHold) retain(tenants []backgroundTenant) {
 			}
 		}
 		if !found {
-			delete(h.held, scope)
+			delete(h.tenants, scope)
 		}
 	}
 }
@@ -122,9 +128,11 @@ func (h *digestHold) retain(tenants []backgroundTenant) {
 // moved since its run failed.
 func (h *digestHold) configChanged(ctx context.Context, store *config.Store) bool {
 	h.mu.Lock()
-	held := make(map[string]*config.Config, len(h.held))
-	for scope, e := range h.held {
-		held[scope] = e.cfg
+	held := make(map[string]*config.Config, len(h.tenants))
+	for scope, e := range h.tenants {
+		if e.held {
+			held[scope] = e.cfg
+		}
 	}
 	h.mu.Unlock()
 	for scope, cfg := range held {

@@ -327,6 +327,27 @@ func TestMapCapHoldsAtAMillionBlocks(t *testing.T) {
 	t.Logf("1,000,000 blocks: map %d bytes, %d lines listed, %d lines held at the end", len(m.text), m.listed, b.kept)
 }
 
+// TestMapCapHoldsOneLargeCategoryBounded: the bound on whole rows holds
+// inside a category too — a corpus that is one category never reaches a
+// category boundary, where the builder also checks the full map's size.
+func TestMapCapHoldsOneLargeCategoryBounded(t *testing.T) {
+	r := rand.New(rand.NewPCG(518, 6))
+	rows := make([]mapRow, 200_000)
+	for i := range rows {
+		rows[i] = mapRow{id: testID(r), title: testTitle(r), category: "learnings", scope: "private"}
+	}
+	sourceOrder(rows)
+	b := newMapBuilder("private", maxMapBytes)
+	rowBound := maxMapBytes/minLineBytes + 1
+	for i, row := range rows {
+		b.add(row)
+		if len(b.rows) > rowBound {
+			t.Fatalf("after %d rows of one category the builder keeps %d whole rows, bound %d", i+1, len(b.rows), rowBound)
+		}
+	}
+	checkCappedMap(t, maxMapBytes, "private", rows, b.render(testDate))
+}
+
 func countCat(rows []mapRow, cat string) int {
 	n := 0
 	for _, r := range rows {
