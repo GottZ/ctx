@@ -58,7 +58,8 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 		slog.Debug("digest: off, leaving the topic map untouched", "scope", homeScope)
 		return Result{}, nil
 	case ModeStub:
-		return Result{}, writeStub(ctx, pool, set, homeScope, language)
+		id, err := writeStub(ctx, pool, set, homeScope, language)
+		return Result{MapID: id}, err
 	}
 
 	// Block metadata (no content), sieved by digest.include (WF T8, design/01
@@ -127,13 +128,17 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 		"truncated", m.truncated,
 	)
 
-	return Result{Listed: m.listed, Truncated: m.truncated}, nil
+	return Result{Listed: m.listed, Truncated: m.truncated, MapID: block.ID}, nil
 }
 
 // Result is what a run wrote into the topic map.
 type Result struct {
 	Listed    int  // blocks the map lists by line
 	Truncated bool // the map lists fewer blocks than its source holds (maxMapBytes)
+	// MapID is the id of the topic map's block when the run wrote it, a full
+	// map or the stub, and "" when it wrote none. The background digest knows
+	// its own writes by it (issue #525): the write notifies like any other.
+	MapID string
 }
 
 // classifyFollowUpTimeout bounds the type classification after a topic map's
@@ -232,7 +237,8 @@ func stubText(homeScope, language string) string {
 }
 
 // writeStub replaces the linear map with the pointer — the ONLY write of stub
-// mode, and only when the text is not already there.
+// mode, and only when the text is not already there. It returns the id of the
+// block it wrote, "" when it wrote none.
 //
 // Why a stub rather than archiving the block: an archived block is gone from
 // `ctx get` and `ctx search`, so every consumer that looks the map up where the
@@ -241,17 +247,17 @@ func stubText(homeScope, language string) string {
 // forwarding address, and it reaches the consumers exactly where they search
 // (E2-02/E9-02 — the stub carries the transition; archiving the two dead
 // scope blocks is its own decided wave).
-func writeStub(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, homeScope, language string) error {
+func writeStub(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, homeScope, language string) (string, error) {
 	title := "topic-map-" + homeScope
 	text := stubText(homeScope, language)
 
 	old, found, err := store.MapBlockContent(ctx, pool, "index", title, homeScope)
 	if err != nil {
-		return fmt.Errorf("digest: read topic map: %w", err)
+		return "", fmt.Errorf("digest: read topic map: %w", err)
 	}
 	if found && old == text {
 		slog.Debug("digest: stub unchanged", "scope", homeScope)
-		return nil
+		return "", nil
 	}
 
 	block, err := store.UpsertBlock(ctx, pool, "index", title, text,
@@ -265,7 +271,7 @@ func writeStub(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, home
 		},
 		homeScope, true, store.SensitivityWrite{}, "")
 	if err != nil {
-		return fmt.Errorf("digest: upsert topic map stub: %w", err)
+		return "", fmt.Errorf("digest: upsert topic map stub: %w", err)
 	}
 
 	// Same classify hook as the full map: is_meta=true keeps the stub on
@@ -275,7 +281,7 @@ func writeStub(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, home
 		slog.Warn("digest: stub auto-classify failed", "error", err, "block_id", block.ID)
 	}
 	slog.Info("digest: topic map replaced by stub", "scope", homeScope, "content_length", len(text))
-	return nil
+	return block.ID, nil
 }
 
 // mapSourceQuery reads the map's source: the non-archived blocks of the read

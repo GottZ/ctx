@@ -312,9 +312,30 @@ type Scheduler struct {
 	lastWriteAt   time.Time
 	guardPending  bool
 	digestPending bool
-	// writeGen counts NotifyWrite calls: the corpus state a held digest
-	// failed in (digestHold, issue #518).
+	// writeGen counts the block writes the digest reads (NotifyBlockWrite,
+	// NotifyWrite): the corpus state a held digest failed in (digestHold,
+	// issue #518). A write of the digest's own topic map does not count.
 	writeGen uint64
+
+	// digestMaps holds the ids of the topic maps the background digest of this
+	// process wrote (issue #525). A map is the digest's output, never its
+	// source, and its write notifies like any other: counted as a write, the
+	// notification of the map one run wrote made the digest pending again —
+	// whenever it arrived after the run's end — and the digest ran again after
+	// every debounce. A notification naming one of these ids is no write for
+	// the digest. Another instance's run writes the same rows (a map's row is
+	// its category, title and scope), so its maps are known here once this
+	// process has written them itself. One id per map row: bounded by the
+	// topic maps the process ever wrote.
+	digestMaps map[string]struct{}
+	// digestRun is the open notes of the background digest run under way, nil
+	// between runs (beginDigestRun, endDigestRun).
+	digestRun *digestRunNotes
+	// runDigestFn is digest.RunDigest behind a seam: tests act between a run's
+	// map write and the run's end through it, where the notification of that
+	// write and of a block written meanwhile can arrive. nil is production.
+	runDigestFn func(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry,
+		mode, language, tenantScope, homeScope string, readScopes []string) (digest.Result, error)
 
 	// digestHold keeps a digest whose run failed for good from running again
 	// until a block is written or a setting changes (issue #518).
@@ -770,14 +791,93 @@ func (s *Scheduler) newRouter(cfg *config.Config, tenant string) *dream.Router {
 	}
 }
 
-// NotifyWrite signals that a write occurred. Schedules guard and digest.
+// NotifyWrite signals that a write occurred whose block is not known — the
+// reconnect backlog, a notification without a readable id. Schedules guard
+// and digest.
 func (s *Scheduler) NotifyWrite() {
+	s.NotifyBlockWrite("")
+}
+
+// NotifyBlockWrite signals that the block id was written (ctx_block_write).
+// It schedules the guard, and the digest unless id names a topic map the
+// background digest wrote (digestMaps, issue #525).
+//
+// While a background digest run is under way, the notification can be one
+// of the run's own maps whose id the run has not reported yet — the first
+// write of a map inserts a row whose id only the write returns, and the
+// notification races the return. Such an id is noted and decided when the
+// run ends (endDigestRun): a map of that run is dropped, any other id is a
+// write. The notes hold no more ids than the run has tenants, one map each at
+// most; one id past that came from elsewhere, so it and every later one
+// count at once. A write is therefore never lost to the run's end, whatever
+// the order of the notifications and the run.
+func (s *Scheduler) NotifyBlockWrite(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastWriteAt = time.Now()
 	s.guardPending = true
+	if id != "" {
+		if _, own := s.digestMaps[id]; own {
+			return
+		}
+	}
+	s.lastWriteAt = time.Now()
+	if r := s.digestRun; r != nil && id != "" && !r.foreign {
+		if _, noted := r.ids[id]; noted || len(r.ids) < r.limit {
+			r.ids[id] = struct{}{}
+			return
+		}
+		r.foreign = true
+	}
 	s.digestPending = true
 	s.writeGen++
+}
+
+// digestRunNotes are the notifications a background digest run cannot decide
+// yet (NotifyBlockWrite): ids that are no known map, at most limit of them.
+type digestRunNotes struct {
+	limit   int                 // the maps the run can write: one per tenant
+	ids     map[string]struct{} // noted ids, decided at the run's end
+	foreign bool                // more ids came than the run writes maps
+	closed  bool                // decided (endDigestRun)
+}
+
+// beginDigestRun opens the notes of a background digest run over tenants
+// tenants.
+func (s *Scheduler) beginDigestRun(tenants int) *digestRunNotes {
+	r := &digestRunNotes{limit: tenants, ids: make(map[string]struct{}, tenants)}
+	s.mu.Lock()
+	s.digestRun = r
+	s.mu.Unlock()
+	return r
+}
+
+// endDigestRun closes the notes r: the ids of the maps the run wrote become
+// known, and a noted id that is none of them counts as a write now. It is a
+// no-op once r is closed, so a deferred call after the regular one, or after
+// a panic of the run (maps nil: every noted id counts), is safe.
+func (s *Scheduler) endDigestRun(r *digestRunNotes, maps []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r.closed {
+		return
+	}
+	r.closed = true
+	if s.digestRun == r {
+		s.digestRun = nil
+	}
+	for _, id := range maps {
+		if s.digestMaps == nil {
+			s.digestMaps = make(map[string]struct{})
+		}
+		s.digestMaps[id] = struct{}{}
+	}
+	for id := range r.ids {
+		if _, own := s.digestMaps[id]; !own {
+			s.digestPending = true
+			s.writeGen++
+			return
+		}
+	}
 }
 
 // Run starts the scheduler. Blocks until ctx is cancelled.
@@ -2168,8 +2268,18 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 	s.mu.Lock()
 	gen := s.writeGen
 	s.mu.Unlock()
-	ok, succeeded := true, false
+	run := s.runDigestFn
+	if run == nil {
+		run = digest.RunDigest
+	}
+	ok := true
 	tenants := s.backgroundTenantsFn(ctx)
+	// The run's own map writes notify as well; the notes tell them from the
+	// writes of others (NotifyBlockWrite, issue #525). The deferred close
+	// settles them when a tenant's run panics.
+	notes := s.beginDigestRun(len(tenants))
+	defer s.endDigestRun(notes, nil)
+	var maps []string
 	for _, bt := range tenants {
 		cfg := s.cfg.SnapshotForTenant(ctx, bt.scope)
 		homeScope := effectiveHomeScope(cfg.Scheduler.HomeScope, bt.owned)
@@ -2180,27 +2290,29 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 		}
 		window := store.IntersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
 		slog.Info("scheduler: running digest", "scope", homeScope)
-		_, err := digest.RunDigest(ctx, s.pool, s.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, bt.scope, homeScope, window)
-		succeeded = succeeded || err == nil
+		res, err := run(ctx, s.pool, s.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, bt.scope, homeScope, window)
+		if res.MapID != "" {
+			maps = append(maps, res.MapID)
+		}
 		if !s.digestHold.settle(bt.scope, homeScope, gen, cfg, err) {
 			ok = false // one tenant's failure must not skip the others
 		}
 	}
 	s.digestHold.retain(tenants)
-	if !ok {
-		return // leave digestPending set → retry next debounce (pre-T13 semantics)
-	}
+	s.endDigestRun(notes, maps)
 
+	// A write since gen — a block written while the run was under way, after
+	// its scan read the corpus — keeps the digest pending: the map this run
+	// wrote may not hold it. The run's own map writes do not move writeGen.
+	// A failure the next tick retries leaves it pending as well.
 	s.mu.Lock()
-	// A run in which no tenant succeeded wrote no block, so a write since gen
-	// came from elsewhere: it stays pending and ends the hold. After a
-	// success the clear stays unconditional, as before — the run's own map
-	// write notifies too, and keeping that pending would run the digest again
-	// after every debounce.
-	if succeeded || s.writeGen == gen {
+	if ok && s.writeGen == gen {
 		s.digestPending = false
 	}
 	s.mu.Unlock()
+	if !ok {
+		return // leave digestPending set → retry next debounce (pre-T13 semantics)
+	}
 
 	slog.Info("scheduler: digest complete")
 }
