@@ -364,7 +364,7 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 	// Comment leg (I-G): only when the hook is wired and this is not a dry run.
 	if m.applyComments != nil && !dryRun {
 		cEtag, cSince := readCommentCursor(project.SyncCursor)
-		if err := m.pullComments(ctx, project, client, repo, cEtag, cSince); err != nil && !errors.Is(err, ErrNotModified) {
+		if err := m.pullComments(ctx, project, client, repo, cEtag, cSince, bounded == nil); err != nil && !errors.Is(err, ErrNotModified) {
 			if !errors.Is(err, errPageBound) {
 				m.handleWireError(ctx, project.ID, runID, backoffN, err)
 				return
@@ -461,14 +461,18 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 
 // pullComments runs the comment fetch loop (I-G): each page is 3-way applied over
 // the {body} projection, then the comment etag/since cursor is committed per page.
-func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow, client Forge, repo RepoRef, etag string, since time.Time) error {
+//
+// issuesDone says that this run's issue leg read the listing to its end (or
+// was answered 304); after a leg that stopped at its page bound, an orphan
+// comment's parent may be an issue the leg has not reached yet (holdOrphans).
+func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow, client Forge, repo RepoRef, etag string, since time.Time, issuesDone bool) error {
 	page, err := client.ListCommentsSince(ctx, repo, since, etag)
 	if err != nil {
 		return err
 	}
 	firstETag := page.ETag
 	hold := readHold(project.SyncCursor, "comments")
-	orphans := orphanHolds{prev: readOrphans(project.SyncCursor), maxIssue: -1}
+	orphans := orphanHolds{prev: readOrphans(project.SyncCursor), maxIssue: -1, issuesDone: issuesDone}
 	var maxSeen, relist time.Time
 	seen := map[string]bool{}
 	for n := 1; ; n++ {
@@ -602,11 +606,13 @@ func (m *SyncManager) commitFetchCursor(ctx context.Context, projectID, leg, eta
 // orphanHolds is the comment leg's account of comments whose parent issue
 // has no mapping (issue #509): prev, the ones the previous run held already
 // (sync_cursor.orphans, beside the legs); held, the ones this run holds; maxIssue,
-// the highest issue number the project maps (-1 until read).
+// the highest issue number the project maps (-1 until read); issuesDone,
+// whether this run's issue leg read its listing to the end.
 type orphanHolds struct {
-	prev     map[int64]bool
-	held     []int64
-	maxIssue int64
+	prev       map[int64]bool
+	held       []int64
+	maxIssue   int64
+	issuesDone bool
 }
 
 // extra is the cursor key, beside the legs, that carries the held orphans.
@@ -620,31 +626,46 @@ func (o *orphanHolds) extra() json.RawMessage {
 }
 
 // holdOrphans answers the earliest stamp of the orphan comments the leg
-// holds its cursor for (zero for none): those whose parent number lies
-// above every issue number the project maps — an issue the forge created
-// after this run's issue leg listed, whose comment the comment leg lists
-// already — and that the previous run did not hold. The next run's issue
-// leg lists that issue (it was created after the listing) and its comment
-// leg lists the comment again. A comment on a pull request — the issue
-// listing drops those, so its parent is never mapped — is held at most
-// once; one on an issue or pull request older than the newest mapped issue
-// is not held. Before, the comment cursor moved past such a comment and it
-// was not listed again until it was edited.
+// holds its cursor for (zero for none), so the next run lists them again:
+//
+//   - every orphan while this run's issue leg stopped at its page bound —
+//     the listing is ascending by updated_at, not by number, so the parent
+//     may be any issue the leg has not reached yet;
+//   - after an issue leg that read its listing to the end, an orphan whose
+//     parent number lies above every issue number the project maps and that
+//     the previous run did not hold: an issue the forge created after this
+//     run's issue leg listed, whose comment the comment leg lists already.
+//     The next run's issue leg lists that issue (it was created after the
+//     listing) and its comment leg lists the comment again.
+//
+// An orphan the previous run held, or one on an issue or pull request at
+// or below the newest mapped issue, is not held after a complete issue leg:
+// the forge listed every issue updated since the leg's cursor and none of
+// them is its parent — a pull request (the issue listing drops those, so
+// its parent is never mapped) or an issue the listing does not carry. A
+// comment on a pull request so holds the cursor once after a complete issue
+// leg, and on every run of a catch-up whose issue leg stops at the bound —
+// never beyond it. Before, the comment cursor moved past an orphan on an
+// issue the bounded leg had not reached when the parent's number was below
+// the newest mapped one, or when the previous run had held it, and the
+// comment was not listed again until it was edited (issue #509).
 func (m *SyncManager) holdOrphans(ctx context.Context, projectID string, o *orphanHolds, page []orphanComment) (time.Time, error) {
 	var at time.Time
 	for _, c := range page {
-		if o.prev[c.id] {
-			continue
-		}
-		if o.maxIssue < 0 {
-			mx, err := store.MaxMappedForgeID(ctx, m.pool, projectID, entityKindIssue)
-			if err != nil {
-				return time.Time{}, err
+		if o.issuesDone {
+			if o.prev[c.id] {
+				continue
 			}
-			o.maxIssue = mx
-		}
-		if c.parent <= o.maxIssue {
-			continue
+			if o.maxIssue < 0 {
+				mx, err := store.MaxMappedForgeID(ctx, m.pool, projectID, entityKindIssue)
+				if err != nil {
+					return time.Time{}, err
+				}
+				o.maxIssue = mx
+			}
+			if c.parent <= o.maxIssue {
+				continue
+			}
 		}
 		o.held = append(o.held, c.id)
 		at = relistAt(at, c.at)

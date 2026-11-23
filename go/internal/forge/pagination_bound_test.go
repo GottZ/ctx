@@ -60,7 +60,7 @@ func pullBoth(t *testing.T, srv *httptest.Server) (issuesErr, commentsErr error)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	issuesErr = m.pullIssues(ctx, store.ProjectRow{}, c, repo, false, "", time.Time{})
-	commentsErr = m.pullComments(ctx, store.ProjectRow{}, c, repo, "", time.Time{})
+	commentsErr = m.pullComments(ctx, store.ProjectRow{}, c, repo, "", time.Time{}, true)
 	return issuesErr, commentsErr
 }
 
