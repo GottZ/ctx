@@ -2763,23 +2763,39 @@ const activeCategoriesSQL = `SELECT category FROM ` + blockCountRowsSQL + ` k
 
 // statsSQL is GetStats' statement. The block and category numbers are sums
 // over the block counters (blockCountRowsSQL, migration 170). oldest/newest stay queries on
-// context_blocks, one per read scope: unnest + LATERAL turns each into a
-// min/max over idx_context_scope_active (scope, created_at DESC) WHERE NOT
-// is_archived, i.e. one index probe per scope. The plain
+// context_blocks, one per read scope: unnest + LATERAL turns each into one
+// LIMIT 1 probe of idx_context_scope_active (scope, created_at DESC) WHERE NOT
+// is_archived. The plain
 // `min(created_at) WHERE scope = ANY($1)` form walks idx_context_created in
 // global created_at order and filters by scope: cheap while the read scopes
 // hold the newest and the oldest rows of the corpus, linear for a scope whose
 // rows all lie behind the rest (issue #266: a 10-block scope older than the
 // other 100 000 blocks read 16 951 buffers that way, 8 with LATERAL).
+//
+// Each probe states its scope as a range, b.scope >= s.scope AND b.scope <=
+// s.scope, and orders by (scope, created_at) (issue #512). Stated as an
+// equality the scope is a constant of the probe, the order reduces to
+// created_at, and idx_context_created delivers that order as well, filtering
+// the scope row by row: at random_page_cost 4 — PostgreSQL's default, which a
+// deployment keeps unless its operator lowers it — the planner took that walk
+// and read every newer block of the other read scopes up to the probed
+// scope's newest (96 849 buffers at 1 000 000 blocks, 21 this way). The two
+// comparisons admit exactly the rows of the scope (scope is NOT NULL, and a
+// database's collation is deterministic) and are the start and stop key of
+// the index scan; no other index delivers (scope, created_at) without sorting
+// the scope's rows. created_at is NOT NULL (migration 186), so the head of
+// each order is the scope's oldest or newest block.
 const statsSQL = `SELECT
 			(` + activeBlocksSQL + `) AS total_blocks,
 			(SELECT count(*) FROM (` + activeCategoriesSQL + `) c)::int AS total_categories,
 			(SELECT min(e.m) FROM unnest($1::text[]) AS s(scope)
-			   CROSS JOIN LATERAL (SELECT min(b.created_at) AS m FROM context_blocks b
-			                        WHERE b.scope = s.scope AND NOT b.is_archived) e) AS oldest_entry,
+			   CROSS JOIN LATERAL (SELECT b.created_at AS m FROM context_blocks b
+			                        WHERE b.scope >= s.scope AND b.scope <= s.scope AND NOT b.is_archived
+			                        ORDER BY b.scope DESC, b.created_at ASC LIMIT 1) e) AS oldest_entry,
 			(SELECT max(e.m) FROM unnest($1::text[]) AS s(scope)
-			   CROSS JOIN LATERAL (SELECT max(b.created_at) AS m FROM context_blocks b
-			                        WHERE b.scope = s.scope AND NOT b.is_archived) e) AS newest_entry,
+			   CROSS JOIN LATERAL (SELECT b.created_at AS m FROM context_blocks b
+			                        WHERE b.scope >= s.scope AND b.scope <= s.scope AND NOT b.is_archived
+			                        ORDER BY b.scope, b.created_at DESC LIMIT 1) e) AS newest_entry,
 			(SELECT pg_size_pretty(pg_total_relation_size('context_blocks'))) AS db_size`
 
 // GetStats returns aggregate statistics for the context store.
