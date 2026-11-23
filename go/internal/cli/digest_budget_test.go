@@ -1,9 +1,10 @@
 // Issue #505: `ctx digest` ran under the main client's 120 s budget, and since
 // #490 the digest ends with its client — a digest that took longer never
 // finished from the CLI. The digest call now has a budget of its own
-// (digestCallBudget, 30 minutes): far above the client's, and it ends — a
-// digest that hangs does not hold the CLI forever. Every other call keeps the
-// client's budget, and the shared client keeps it too.
+// (digestCallBudget, 5 minutes since issue #519; --timeout sets another): far
+// above the client's, and it ends — a digest that hangs does not hold the CLI
+// forever. Every other call keeps the client's budget, and the shared client
+// keeps it too.
 //
 //	go test -short ./internal/cli/ -run TestDigestWaitsPastTheClientBudget -count=1 -v
 package cli
@@ -12,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -61,10 +63,14 @@ func TestDigestWaitsPastTheClientBudget(t *testing.T) {
 
 // TestDigestHasABudgetOfItsOwn — the digest call is not unbounded: a digest
 // that hangs (on a lock, say) would hold the CLI forever. Its budget is
-// generous — far above what a digest takes at the target scale — and ends.
+// generous — three times what a digest of 10 M blocks takes under heavy host
+// load by the measurement of issue #519 — and ends; --timeout defaults to it.
 func TestDigestHasABudgetOfItsOwn(t *testing.T) {
-	if digestCallBudget < 30*time.Minute {
-		t.Errorf("digestCallBudget = %v, want 30 minutes (0 waits without end)", digestCallBudget)
+	if digestCallBudget != 5*time.Minute {
+		t.Errorf("digestCallBudget = %v, want 5 minutes (0 waits without end)", digestCallBudget)
+	}
+	if f := digestCmd(func() (*Client, error) { return nil, nil }).Flags().Lookup("timeout"); f == nil || f.DefValue != digestCallBudget.String() {
+		t.Errorf("--timeout = %+v, want an option whose default is digestCallBudget (%v)", f, digestCallBudget)
 	}
 }
 
@@ -98,6 +104,62 @@ func TestDigestEndsAtItsBudget(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		srv.CloseClientConnections() // so the deferred Close does not wait for the call
 		t.Fatal("the digest call is still waiting 5 s into a 200 ms budget")
+	}
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Error("the server did not see the request end")
+	}
+}
+
+// TestDigestTimeoutOption — issue #519: `ctx digest --timeout` sets the
+// call's budget. 200 ms against a digest that does not answer ends the call
+// at the option, long before digestCallBudget, and the server sees its
+// request end; a negative value is refused before any request.
+func TestDigestTimeoutOption(t *testing.T) {
+	var hits atomic.Int32
+	ended := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+		ended <- struct{}{}
+	}))
+	defer srv.Close()
+	c := NewClientWithTimeout(Config{BaseURL: srv.URL, Key: "k"}, 0, maxResponseSize)
+	run := func(args ...string) error {
+		digest := digestCmd(func() (*Client, error) { return c, nil })
+		digest.SetArgs(args)
+		digest.SetOut(io.Discard)
+		digest.SetErr(io.Discard)
+		return digest.Execute()
+	}
+
+	refused := make(chan error, 1)
+	go func() { refused <- run("--timeout", "-1s") }()
+	select {
+	case err := <-refused:
+		if err == nil || hits.Load() != 0 {
+			t.Errorf("--timeout -1s: err %v after %d requests, want a refusal before any request", err, hits.Load())
+		}
+	case <-time.After(5 * time.Second):
+		srv.CloseClientConnections()
+		<-ended
+		t.Fatal("--timeout -1s sent the request and waited for it, want a refusal before any request")
+	}
+	done := make(chan error, 1)
+	go func() { done <- run("--timeout", "200ms") }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("digest succeeded without an answer")
+		}
+	case <-time.After(5 * time.Second):
+		srv.CloseClientConnections()
+		t.Fatalf("the digest call is still waiting 5 s into a --timeout of 200 ms (digestCallBudget %v)", digestCallBudget)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("the call with --timeout 200ms made %d requests, want 1", n)
 	}
 	select {
 	case <-ended:

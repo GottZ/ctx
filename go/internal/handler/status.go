@@ -1146,12 +1146,11 @@ func (c *StatusCollector) buildCheap(ctx context.Context, cfg *config.Config) *c
 	// means every source answered. Captured FIRST — before the health ping.
 	failsBefore := c.dbFails.Load()
 	// Health: same source + shape as /health (shared HealthStatus), from ONE
-	// pool snapshot. The ping context is capped so a hung backend cannot stall
-	// the dashboard refresh — with /health's budget (4 s, under the 5 s
-	// default tick), since both feed one healthNotice (issue #504).
-	hctx, hcancel := context.WithTimeout(ctx, healthProbeBudget)
-	health := HealthStatus(hctx, c.pool, c.backendPool.Snapshot(), cfg.Dream.Enabled, blocktypeHealthValue(c.blocktypes))
-	hcancel()
+	// pool snapshot. A hung backend cannot stall the dashboard refresh: the
+	// probes run in a round bounded by /health's budget (4 s, under the 5 s
+	// default tick) — the one budget both share, since both feed one
+	// healthNotice (issues #504, #519).
+	health := HealthStatus(ctx, c.pool, c.backendPool, cfg.Dream.Enabled, blocktypeHealthValue(c.blocktypes))
 	// N3 doctrine ("same source, same shape" — never drift between /health
 	// and /api/status's health section): the same post-pass health.go's
 	// Health() applies, design/03 §4.6.

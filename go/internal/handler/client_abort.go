@@ -244,10 +244,19 @@ func writeOutcome(err error) string {
 // that fired after the statement's last interrupt check is reported after
 // the commit of a single statement, or as the answer to the bracket's
 // COMMIT, which then never ran — only the localized message tells it from a
-// cancel. ctx sets statement_timeout on read paths only. lock_timeout raises
-// 55P03, an ERROR that stays rolled back.
+// cancel. ctx sets statement_timeout on read paths only. lock_timeout's 55P03
+// can follow a commit the same way (issue #519, executed on PostgreSQL 18.6):
+// ProcSleep keeps the lock timeout's indicator when it disarms the timer
+// after the grant, and the waits at the commit — PreCommit_Notify's lock,
+// which every transaction takes that ran one of ctx's NOTIFY triggers, and a
+// deferred constraint's check — come before HOLD_INTERRUPTS with no
+// interrupt check after them, so a timer that fired at the grant is reported
+// after the commit record (15 of 8,000 runs at the edge); its fields are
+// those of a 55P03 that cut the wait before the grant. ctx sets lock_timeout
+// itself only on its migration and cutover paths; a role's or database's
+// lock_timeout reaches every write.
 func commitAmbiguous(pgErr *pgconn.PgError) bool {
-	return sessionEnded(pgErr) || pgErr.Code == "57014"
+	return sessionEnded(pgErr) || pgErr.Code == "57014" || pgErr.Code == "55P03"
 }
 
 // sessionEnded reports whether pgErr ends the session — severity FATAL or

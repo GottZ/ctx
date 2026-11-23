@@ -99,7 +99,7 @@ func TestHealthProbesSharedHostOnce(t *testing.T) {
 			operatorRow("e", url, backends.RoleEmbed),
 			operatorRow("cd", url+"/", backends.RoleSynthesis, backends.RoleDream),
 		}
-		resp := HealthStatus(context.Background(), brokenPool(t), snap, true, "ok")
+		resp := HealthStatus(context.Background(), brokenPool(t), seededBackends(snap...), true, "ok")
 		for _, role := range []string{"embed", "chat", "dream"} {
 			if resp.Services[role] != "ok" {
 				t.Errorf("services[%s] = %q, want ok", role, resp.Services[role])
@@ -117,7 +117,7 @@ func TestHealthProbesSharedHostOnce(t *testing.T) {
 			operatorRow("down", closedPortHost(t), backends.RoleEmbed),
 			operatorRow("shared", shared, backends.RoleEmbed, backends.RoleSynthesis),
 		}
-		resp := HealthStatus(context.Background(), brokenPool(t), snap, false, "ok")
+		resp := HealthStatus(context.Background(), brokenPool(t), seededBackends(snap...), false, "ok")
 		if resp.Services["embed"] != "ok" || resp.Services["chat"] != "ok" {
 			t.Errorf("services = %v, want embed ok (via its fallback) and chat ok", resp.Services)
 		}
@@ -132,7 +132,7 @@ func TestHealthProbesSharedHostOnce(t *testing.T) {
 			operatorRow("a", slowBackend(t, 0, &first), backends.RoleEmbed),
 			operatorRow("b", slowBackend(t, 0, &second), backends.RoleEmbed),
 		}
-		resp := HealthStatus(context.Background(), brokenPool(t), snap, false, "ok")
+		resp := HealthStatus(context.Background(), brokenPool(t), seededBackends(snap...), false, "ok")
 		if resp.Services["embed"] != "ok" {
 			t.Errorf("services[embed] = %q, want ok", resp.Services["embed"])
 		}
@@ -150,13 +150,13 @@ func TestHostProbesFinishedResultStands(t *testing.T) {
 	var hits atomic.Int32
 	url := slowBackend(t, 0, &hits)
 	probes := newHostProbes()
-	if err := probes.ping(context.Background(), url); err != nil {
+	if err := probes.ping(context.Background(), url, 1); err != nil {
 		t.Fatalf("first probe: %v", err)
 	}
 	ended, cancel := context.WithCancel(context.Background())
 	cancel()
 	for i := range 100 {
-		if err := probes.ping(ended, url); err != nil {
+		if err := probes.ping(ended, url, 1); err != nil {
 			t.Fatalf("lookup %d of a finished reachable probe on an ended context = %v, want its result (nil)", i, err)
 		}
 	}
@@ -165,10 +165,10 @@ func TestHostProbesFinishedResultStands(t *testing.T) {
 	}
 }
 
-// TestHealthStatusEndsWithItsContext: every probe ends when the caller's
-// context does. HealthStatus returns only after all of its probes returned, so
-// returning promptly on a cancelled context against backends that never answer
-// is the proof that no probe goroutine outlives the call.
+// TestHealthStatusEndsWithItsContext: HealthStatus returns when the caller's
+// context ends, against backends that never answer — the caller does not wait
+// for its probe round, which goes on to its budget and records what it finds
+// (issue #519).
 func TestHealthStatusEndsWithItsContext(t *testing.T) {
 	release := make(chan struct{})
 	hang := func() string {
@@ -186,13 +186,14 @@ func TestHealthStatusEndsWithItsContext(t *testing.T) {
 		operatorRow("c", hang(), backends.RoleSynthesis),
 		operatorRow("d", hang(), backends.RoleDream),
 	}
-	t.Cleanup(func() { close(release) }) // runs before the srv.Close cleanups above
+	t.Cleanup(func() { waitHealthRounds(t) }) // runs after the release below
+	t.Cleanup(func() { close(release) })      // runs before the srv.Close cleanups above
 	pool := brokenPool(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	done := make(chan healthResponse, 1)
-	go func() { done <- HealthStatus(ctx, pool, snap, true, "ok") }()
+	go func() { done <- HealthStatus(ctx, pool, seededBackends(snap...), true, "ok") }()
 
 	select {
 	case resp := <-done:

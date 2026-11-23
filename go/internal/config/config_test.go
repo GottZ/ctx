@@ -49,8 +49,11 @@ func TestDreamBackoffConversion(t *testing.T) {
 // it exercised on the way is pinned on a living Duration key in
 // TestDumpSourcesAndRendering (dream.idle_wait).
 
-// TestDSN pins the legacy DSN shape including URL-encoding of credentials.
+// TestDSN pins the legacy DSN shape including URL-encoding of credentials,
+// and the connect timeout it carries since issue #519 while PGCONNECT_TIMEOUT
+// is unset.
 func TestDSN(t *testing.T) {
+	t.Setenv("PGCONNECT_TIMEOUT", "")
 	cfg, _ := cfgFrom(t, map[string]string{
 		"server.db_user":     "user@x",
 		"server.db_password": "p@ss:w0rd",
@@ -59,7 +62,7 @@ func TestDSN(t *testing.T) {
 		"server.db":          "ctx",
 		"server.db_sslmode":  "require",
 	})
-	want := "postgres://user%40x:p%40ss%3Aw0rd@db.example:5433/ctx?sslmode=require"
+	want := "postgres://user%40x:p%40ss%3Aw0rd@db.example:5433/ctx?sslmode=require&connect_timeout=10"
 	if got := cfg.DSN(); got != want {
 		t.Errorf("DSN() = %q, want %q", got, want)
 	}

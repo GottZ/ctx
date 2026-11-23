@@ -52,7 +52,7 @@ func TestHealthBackendAnswersAgainAfterThreeProbesInARow(t *testing.T) {
 		down.Store(isDown)
 		logs := installRejectLogCapture(t)
 		for range calls {
-			HealthStatus(context.Background(), pool, snap, true, "ok")
+			HealthStatus(context.Background(), pool, seededBackends(snap...), true, "ok")
 		}
 		got := backendLines(logs, backends.RoleSynthesis, row.Name)
 		if strings.Join(got, "|") != strings.Join(want, "|") {
@@ -110,7 +110,8 @@ func TestHealthFlappingBackendLogsOneWarn(t *testing.T) {
 // TestHealthRecoveryOneLineUnderConcurrency — 64 calls at the same time for
 // each change: exactly one WARN for the backend and one for the role it alone
 // serves when it stops answering, exactly one INFO each when it answers
-// again.
+// again. A burst shares its probe round (issue #519), so the recovery, which
+// wants three answers in a row, gets three bursts.
 func TestHealthRecoveryOneLineUnderConcurrency(t *testing.T) {
 	var down atomic.Bool
 	up := slowBackend(t, 0, nil)
@@ -118,20 +119,23 @@ func TestHealthRecoveryOneLineUnderConcurrency(t *testing.T) {
 	snap := []backends.Backend{operatorRow("i504-c64-e", up, backends.RoleEmbed, backends.RoleDream), row}
 	healthCalls(t, snap, recoveryAnswers) // a known state
 	pool := brokenPool(t)
-	burst := func(t *testing.T, isDown bool) (backend, role map[slog.Level]int) {
+	bp := seededBackends(snap...)
+	bursts := func(t *testing.T, isDown bool, n int) (backend, role map[slog.Level]int) {
 		t.Helper()
 		down.Store(isDown)
 		logs := installRejectLogCapture(t)
-		var wg sync.WaitGroup
-		start := make(chan struct{})
-		for range 64 {
-			wg.Go(func() {
-				<-start
-				HealthStatus(context.Background(), pool, snap, true, "ok")
-			})
+		for range n {
+			var wg sync.WaitGroup
+			start := make(chan struct{})
+			for range 64 {
+				wg.Go(func() {
+					<-start
+					HealthStatus(context.Background(), pool, bp, true, "ok")
+				})
+			}
+			close(start)
+			wg.Wait()
 		}
-		close(start)
-		wg.Wait()
 		backend, role = map[slog.Level]int{}, map[slog.Level]int{}
 		for _, r := range logs.all() {
 			if !strings.HasPrefix(r.msg, "health check") || r.attrs["role"] != backends.RoleSynthesis || r.level < slog.LevelInfo {
@@ -146,15 +150,16 @@ func TestHealthRecoveryOneLineUnderConcurrency(t *testing.T) {
 		return backend, role
 	}
 	for _, s := range []struct {
-		name  string
-		down  bool
-		level slog.Level
+		name   string
+		down   bool
+		bursts int
+		level  slog.Level
 	}{
-		{"outage", true, slog.LevelWarn},
-		{"recovery", false, slog.LevelInfo},
-		{"second outage", true, slog.LevelWarn},
+		{"outage", true, 1, slog.LevelWarn},
+		{"recovery", false, recoveryAnswers, slog.LevelInfo},
+		{"second outage", true, 1, slog.LevelWarn},
 	} {
-		if b, r := burst(t, s.down); len(b) != 1 || b[s.level] != 1 || len(r) != 1 || r[s.level] != 1 {
+		if b, r := bursts(t, s.down, s.bursts); len(b) != 1 || b[s.level] != 1 || len(r) != 1 || r[s.level] != 1 {
 			t.Errorf("%s: backend %v, role %v, want exactly one %v for each", s.name, b, r, s.level)
 		}
 	}
