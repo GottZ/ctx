@@ -360,7 +360,11 @@ func runPostgres(ctx context.Context, image string) (*tcpostgres.PostgresContain
 		// deaths (runs 32363351979 + 32365157495, different tests, both
 		// mid-DROP/CREATE churn, never reproduced locally where the window is
 		// tiny) match that race, not OOM (oom_killed=false on inspection).
-		testcontainers.WithCmdArgs("-c", "timescaledb.max_background_workers=0"),
+		testcontainers.WithCmdArgs("-c", "timescaledb.max_background_workers=0",
+			// A deployment's planner input on every image: the command line
+			// wins over the postgresql.conf timescaledb-tune writes in the CI
+			// image (DeploymentRandomPageCost).
+			"-c", "random_page_cost="+DeploymentRandomPageCost),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
