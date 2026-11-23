@@ -389,6 +389,13 @@ type PushProjection func(b *Block) string
 // decide and may have saved its cursor past it, and the flag on a row whose
 // block and forge agree — or whose forge version no flag recorded — stood
 // for good; the held listing converges or records the forge's version.
+// The advance also marks that hold as pending on the row it writes
+// (metadata.hold_pending: the same stamp, null for zero), in its own
+// transaction: the hold takes the project row, which may not come after the
+// block and the mapping row, so it is written in a transaction of its own
+// after this one — and a hold write that fails, or a process that ends
+// between the two, leaves the mark, from which the next run of any instance
+// sets the hold (LockPendingHolds, issue #509). The hold write drops it.
 func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, forgeUpdatedAt *time.Time, sent bool, project PushProjection) (moved bool, hold *time.Time, err error) {
 	var b Block
 	var at time.Time
@@ -445,7 +452,10 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 		                       WHEN `+baseYounger+`
 		                       THEN (metadata - 'base_fields') || jsonb_build_object('forge_seen', jsonb_build_object(
 		                              'fields', metadata->'base_fields', 'hash', base_hash, 'at', `+utcJSON(`forge_updated_at`)+`))
-		                       ELSE (metadata - 'base_fields') - 'forge_seen' END,
+		                       ELSE (metadata - 'base_fields') - 'forge_seen' END
+		                  || CASE WHEN base_hash NOT IN ($6, $2)
+		                          THEN jsonb_build_object('hold_pending', `+utcJSON(`GREATEST(forge_updated_at, $8::timestamptz)`)+`)
+		                          ELSE '{}'::jsonb END,
 		       forge_updated_at = CASE WHEN base_hash IN ($6, $2) THEN GREATEST(forge_updated_at, $8::timestamptz) ELSE forge_updated_at END,
 		       conflict = conflict OR base_hash NOT IN ($6, $2) OR `+reverted+`,
 		       conflict_at = CASE WHEN base_hash IN ($6, $2) AND NOT `+reverted+` THEN conflict_at ELSE COALESCE(conflict_at, now()) END
@@ -467,6 +477,94 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 		return true, newest, nil
 	}
 	return revert, nil, StampForgeState(ctx, tx, blockID, ctxFields)
+}
+
+// PendingHold is a hold a push advance marked on a mapping row
+// (metadata.hold_pending, AdvancePushBase) that no hold write has set yet:
+// the entity's kind and the stamp to hold its fetch leg at (zero: the whole
+// leg).
+type PendingHold struct {
+	BlockID, EntityKind string
+	At                  time.Time
+}
+
+// pendingHoldsWhere selects a project's pending holds. A mark is only ever
+// on a flagged row (the advance that sets it flags the row, and every write
+// that clears a flag drops it), so the partial index idx_sync_map_conflict
+// (project_id) WHERE conflict reads only the project's flagged rows — not a
+// scan of its mappings.
+const pendingHoldsWhere = `project_id = $1::uuid AND conflict AND metadata ? 'hold_pending'`
+
+// HasPendingHolds reports whether a project has a pending hold — the check
+// each sync run makes before it reads its cursor.
+func HasPendingHolds(ctx context.Context, pool *pgxpool.Pool, projectID string) (bool, error) {
+	var found bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM context_project_sync_map WHERE `+pendingHoldsWhere+`)`, projectID).Scan(&found); err != nil {
+		return false, fmt.Errorf("store: pending holds: %w", err)
+	}
+	return found, nil
+}
+
+// LockPendingHolds locks a project's mapping rows that carry a pending hold
+// (FOR NO KEY UPDATE) and returns their holds. The caller holds the project
+// row (LockProjectForCursor) — the mapping rows come after it, the order of
+// a resolution and a stamp reset — sets the holds (HoldFetchCursor) and
+// drops the marks (DropPendingHolds) in the same transaction.
+func LockPendingHolds(ctx context.Context, tx pgx.Tx, projectID string) ([]PendingHold, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT block_id::text, entity_kind, (metadata->>'hold_pending')::timestamptz
+		  FROM context_project_sync_map WHERE `+pendingHoldsWhere+`
+		   FOR NO KEY UPDATE`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("store: lock pending holds: %w", err)
+	}
+	defer rows.Close()
+	var out []PendingHold
+	for rows.Next() {
+		var h PendingHold
+		var at *time.Time
+		if err := rows.Scan(&h.BlockID, &h.EntityKind, &at); err != nil {
+			return nil, fmt.Errorf("store: lock pending holds: %w", err)
+		}
+		if at != nil {
+			h.At = *at
+		}
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: lock pending holds: %w", err)
+	}
+	return out, nil
+}
+
+// PendingHoldOf is the pending hold of one mapping row the caller locked
+// (ok=false for none).
+func PendingHoldOf(ctx context.Context, tx pgx.Tx, blockID string) (at time.Time, ok bool, err error) {
+	var stamp *time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT (metadata->>'hold_pending')::timestamptz FROM context_project_sync_map
+		 WHERE block_id = $1::uuid AND metadata ? 'hold_pending'`, blockID).Scan(&stamp)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return time.Time{}, false, nil
+	case err != nil:
+		return time.Time{}, false, fmt.Errorf("store: pending hold: %w", err)
+	}
+	if stamp != nil {
+		at = *stamp
+	}
+	return at, true, nil
+}
+
+// DropPendingHolds drops the pending-hold marks of the given mapping rows
+// once their holds are set, in the caller's transaction.
+func DropPendingHolds(ctx context.Context, tx pgx.Tx, blockIDs []string) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE context_project_sync_map SET metadata = metadata - 'hold_pending'
+		 WHERE block_id = ANY($1::uuid[]) AND metadata ? 'hold_pending'`, blockIDs); err != nil {
+		return fmt.Errorf("store: drop pending holds: %w", err)
+	}
+	return nil
 }
 
 // PushSkip names why a push section leaves an entity to the next run; ""

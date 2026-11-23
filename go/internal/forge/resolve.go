@@ -322,9 +322,10 @@ func (r *Resolver) list(ctx context.Context, project store.ProjectRow, after str
 // the forge's answer for any mapping of a gone entity (404, or a refused
 // 301) and fails the push leg on every run. The resolution runs under the
 // locks of the sync, in their order: the entity's push lock (tried — a push
-// on the wire is not waited for, ErrPushInFlight), then, for remote, the
-// project row (the cursor), then the block and the mapping row, FOR NO KEY
-// UPDATE, the order of the pull and of the push advance. A pull or a push
+// on the wire is not waited for, ErrPushInFlight), then the project row (the
+// cursor: remote holds the leg, local sets a hold a push advance left
+// pending), then the block and the mapping row, FOR NO KEY UPDATE, the order
+// of the pull and of the push advance. A pull or a push
 // advance of the entity therefore runs wholly before or after it. expect,
 // when set, must name the row's flag (Conflict.Flag), else ErrFlagChanged.
 // A mapping that is not flagged is no error: Changed=false, nothing written
@@ -360,14 +361,12 @@ func (r *Resolver) ResolveConflict(ctx context.Context, project store.ProjectRow
 func (r *Resolver) resolveLocked(ctx context.Context, tx pgx.Tx, project store.ProjectRow, blockID, direction, expect string,
 	stamp store.AuditStamp, res *ResolveResult) error {
 
-	if direction == ResolveRemote {
-		ok, err := store.LockProjectForCursor(ctx, tx, project.ID)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return ErrConflictNotFound
-		}
+	ok, err := store.LockProjectForCursor(ctx, tx, project.ID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrConflictNotFound
 	}
 	cur, err := store.LockPulledBlock(ctx, tx, blockID, []string{project.Scope}, nil)
 	if errors.Is(err, store.ErrIssueNotFound) {
@@ -401,6 +400,17 @@ func (r *Resolver) resolveLocked(ctx context.Context, tx pgx.Tx, project store.P
 		w, res.Basis = localBasis(m)
 		if m.EntityKind == entityKindIssue && metaBool(cur.Metadata, "truncated") && !sameBody(w.BaseFields, ctxFields) {
 			return ErrLocalTruncated
+		}
+		// A hold a push advance marked as pending (its hold write failed,
+		// issue #509) is set here: the resolution drops the mark with the
+		// flag, and the held listing is what flags the entity again with a
+		// snapshot when the forge moved.
+		if at, pending, err := store.PendingHoldOf(ctx, tx, blockID); err != nil {
+			return err
+		} else if pending {
+			if err := store.HoldFetchCursor(ctx, tx, project.ID, legOf(m.EntityKind), at); err != nil {
+				return err
+			}
 		}
 	case ResolveRemote:
 		w = store.SyncMapResolution{BaseHash: ctxH, BaseFields: ctxFields, PullGate: true}

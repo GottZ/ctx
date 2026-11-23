@@ -356,7 +356,7 @@ func UpdateSyncMapBase(ctx context.Context, tx pgx.Tx, blockID, baseHash string,
 		    SET base_hash = $2, forge_updated_at = $3,
 		        synced_at = COALESCE($5::timestamptz, '-infinity'::timestamptz),
 		        conflict = false, conflict_at = NULL,
-		        metadata = (metadata || $4::jsonb) - 'forge_seen'
+		        metadata = ((metadata || $4::jsonb) - 'forge_seen') - 'hold_pending'
 		  WHERE block_id = $1::uuid`,
 		blockID, baseHash, forgeUpdatedAt, baseFieldsMeta(baseFields), syncedAt)
 	if err != nil {

@@ -371,6 +371,9 @@ func (m *SyncManager) runSync(base context.Context, project store.ProjectRow, dr
 	}()
 	ctx, cancel := context.WithTimeout(base, m.runDeadline())
 	defer cancel()
+	if c, ok := m.setPendingHolds(ctx, project.ID); ok {
+		project.SyncCursor = c
+	}
 	etag, since, backoffN := readCursor(project.SyncCursor)
 	// failed ends the run on err; a run its deadline cut is no failure at
 	// the forge and ends as truncated.
@@ -472,6 +475,58 @@ func (m *SyncManager) runSync(base context.Context, project store.ProjectRow, dr
 	})
 	_ = store.MergeProjectSyncCursor(base, m.pool, project.ID, json.RawMessage(`{"backoff_n":0}`))
 	m.finish(project.ID, runID, "", false, false)
+}
+
+// setPendingHolds sets the holds push advances marked as pending and no
+// hold write set (store.AdvancePushBase: the write failed, or the process
+// ended before it; issue #509), before the run reads its cursor, and
+// answers the project's sync_cursor with them (ok=false: none set, the run
+// reads the cursor it started with). The check reads the project's flagged
+// mapping rows over the partial index idx_sync_map_conflict; the holds are
+// written under the project row, then the mapping rows, in one transaction
+// that drops the marks. A failure is logged and the run goes on: the marks
+// stay for the next run.
+func (m *SyncManager) setPendingHolds(ctx context.Context, projectID string) (json.RawMessage, bool) {
+	if has, err := store.HasPendingHolds(ctx, m.pool, projectID); err != nil || !has {
+		if err != nil {
+			slog.Warn("forge: reading the pending holds failed; the next run sets them", "project", projectID, "error", err)
+		}
+		return nil, false
+	}
+	var cur json.RawMessage
+	err := pgxdb.Write(ctx, m.pool, pgxdb.Stages{Begin: "forge: pending holds begin", Commit: "forge: pending holds commit"}, func(tx pgx.Tx) error {
+		ok, err := store.LockProjectForCursor(ctx, tx, projectID)
+		if err != nil || !ok {
+			return err
+		}
+		holds, err := store.LockPendingHolds(ctx, tx, projectID)
+		if err != nil {
+			return err
+		}
+		at := map[string]time.Time{}
+		ids := make([]string, 0, len(holds))
+		for _, h := range holds {
+			leg := legOf(h.EntityKind)
+			if a, seen := at[leg]; !seen || h.At.Before(a) {
+				at[leg] = h.At
+			}
+			ids = append(ids, h.BlockID)
+		}
+		for leg, a := range at {
+			if err := store.HoldFetchCursor(ctx, tx, projectID, leg, a); err != nil {
+				return err
+			}
+		}
+		if err := store.DropPendingHolds(ctx, tx, ids); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT sync_cursor FROM context_projects WHERE id = $1::uuid`, projectID).Scan(&cur)
+	})
+	if err != nil {
+		slog.Warn("forge: setting the pending holds failed; the next run sets them", "project", projectID, "error", err)
+		return nil, false
+	}
+	return cur, cur != nil
 }
 
 // pullIssues runs the issue fetch loop: each page is 3-way applied, then the

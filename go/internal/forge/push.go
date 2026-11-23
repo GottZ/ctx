@@ -479,7 +479,13 @@ func (r *pushRecord) advance(sent bool) func(context.Context, pgx.Tx) error {
 // the mapping row, the reverse of a resolution's and a stamp reset's order.
 // A run that commits its cursor in between is held back all the same — the
 // hold moves since to its time. Like the advance it runs outside the run's
-// deadline (issue #474).
+// deadline (issue #474). The advance marked the hold as pending on the
+// mapping row (store.AdvancePushBase); this transaction drops the mark with
+// the hold set. Where it fails, or the process ends before it, the mark
+// stays and the next run of any instance sets the hold before it reads its
+// cursor (SyncManager.setPendingHolds) — before, nothing set it again: the
+// push lists no flagged mapping, and a run that had saved its cursor past
+// the entity never listed it again.
 func (r *pushRecord) settle(ctx context.Context, pool *pgxpool.Pool, res *PushResult, err error) error {
 	if err != nil {
 		return err
@@ -496,7 +502,10 @@ func (r *pushRecord) settle(ctx context.Context, pool *pgxpool.Pool, res *PushRe
 		if err != nil || !ok {
 			return err
 		}
-		return store.HoldFetchCursor(ctx, tx, r.projectID, r.leg, *r.hold)
+		if err := store.HoldFetchCursor(ctx, tx, r.projectID, r.leg, *r.hold); err != nil {
+			return err
+		}
+		return store.DropPendingHolds(ctx, tx, []string{r.blockID})
 	})
 }
 

@@ -188,7 +188,7 @@ func ResolveSyncMapConflict(ctx context.Context, tx pgx.Tx, blockID string, r Sy
 		UPDATE context_project_sync_map
 		   SET base_hash = $2,
 		       metadata = (CASE WHEN $3::jsonb IS NULL THEN metadata - 'base_fields'
-		                        ELSE metadata || jsonb_build_object('base_fields', $3::jsonb) END) - 'forge_seen',
+		                        ELSE metadata || jsonb_build_object('base_fields', $3::jsonb) END) - 'forge_seen' - 'hold_pending',
 		       synced_at = CASE WHEN $5 THEN 'infinity'::timestamptz ELSE COALESCE($4::timestamptz, '-infinity'::timestamptz) END,
 		       conflict = false, conflict_at = NULL
 		 WHERE block_id = $1::uuid AND conflict`, blockID, r.BaseHash, fields, r.SyncedAt, r.PullGate)
