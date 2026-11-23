@@ -965,6 +965,166 @@ jobs:
           path: go/coverage-integration.out
           retention-days: 7
 
+  # ─── Nightly: Integration tests on the production image (#514, not required) ─
+  # integration-tests runs every suite on the CI image,
+  # timescale/timescaledb-ha:pg18; a deployment runs pgvector-timescaledb:pg18,
+  # built from db-image/. What the tests see differs (docs/development.md,
+  # "Integration tests against the production image"): random_page_cost 1.1
+  # against 4, no JIT against JIT, collation C.UTF-8 against en_US.utf8, and
+  # the versions. This job builds the production image and runs on it every
+  # package whose integration tests start a database container; the three JIT
+  # tests of internal/store run here and nowhere else. Schedule and dispatch
+  # only: a nightly job is never a required check.
+  #
+  # Three guards, each a command of .github/scripts/production-image.sh, so a
+  # run cannot pass on the wrong image:
+  #   probe       the built image started once: version, JIT, planner input
+  #               and collation go to the log and the job summary; no JIT ⇒ red.
+  #   containers  every container the tests started (docker events of the
+  #               Testcontainers label, the reaper aside) came from
+  #               CTX_TEST_PG_IMAGE. internal/testdb takes the variable as
+  #               given and falls back to the CI image only when it is empty —
+  #               a run of the wrong image that would otherwise be green.
+  #   jit-tests   no test of the shard skipped for want of JIT, and in the
+  #               shard of internal/store the three JIT tests ran (passed or
+  #               failed).
+  #
+  # The image is built in every shard, without a layer cache: `docker build
+  # --no-cache` took 23 s locally with the layers of the digest-pinned base at
+  # hand (915 MB image); a runner downloads that base, 160 MiB compressed, as
+  # well. The per-PR shards spend 26 s restoring and loading the CI image from
+  # their cache (run 45085564665), so a cache would buy nothing here, and the
+  # build is itself the nightly check that db-image/ still builds (its
+  # TimescaleDB packages come from packagecloud, pinned by version).
+  #
+  # Budget (issue #514; package seconds as go test prints them). On the CI
+  # image in run 45085564665: store 648, handler 426, oai 418, events 388,
+  # guard 308 + rrf 214, the rest's packages about 700 together. Locally, Go
+  # pinned to two cores, each package once on each image back to back: store
+  # 1007 on the production image against 832 on the CI image (the three JIT
+  # tests, which skip on the CI image, take 161 s of it), handler 1104 against
+  # 840 — the production image costs 1.2-1.3x. Expected per shard on a
+  # runner: store about 13 min, rest about 15, every other shard 11 or less;
+  # each package budget is at least twice that, each job cap above it. All 35
+  # packages ran once on the production image that way: red only in store
+  # (the two cost pins of #512/#513) and rrf (TestVW4TrigramInnerTiebreak,
+  # whose index plan random_page_cost 4 does not choose), plus one oai timing
+  # test once under host load (green 5 of 5 on its own, on either image).
+  #
+  # The shard list, the `rest` complement (every other package that starts a
+  # database, computed at run time) and the timeouts live in the script; the
+  # shards job hands them over as the matrix, so no second list exists to
+  # drift from it.
+  integration-production-image-shards:
+    name: Integration Tests on the production image (shards, nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Shard matrix
+        id: matrix
+        run: |
+          MATRIX=$(bash .github/scripts/production-image.sh matrix)
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+
+  integration-production-image:
+    name: Integration Tests on the production image (${{ matrix.shard }}, nightly)
+    needs: [integration-production-image-shards]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.job_timeout }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.integration-production-image-shards.outputs.matrix) }}
+
+    # The environment of integration-tests, so a difference between the two
+    # jobs is the image's; CTX_TEST_PG_IMAGE names the image the build step
+    # tags and every later step holds the run to.
+    env:
+      CTX_TEST_PG_IMAGE: pgvector-timescaledb:pg18
+      TESTCONTAINERS_RYUK_DISABLED: "false"
+      CONTEXT_DB: context_store
+      CONTEXT_DB_USER: context_user
+      CONTEXT_DB_PASSWORD: testpassword
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go/go.sum
+
+      - name: Build the production database image (db-image/)
+        run: |
+          docker build --progress=plain -t "$CTX_TEST_PG_IMAGE" db-image
+          docker image inspect "$CTX_TEST_PG_IMAGE" --format 'built {{.Id}}, {{.Size}} bytes'
+
+      - name: Probe the built image (version, JIT, planner input, collation)
+        run: bash .github/scripts/production-image.sh probe
+
+      - name: Start docker-events recorder
+        run: bash .github/scripts/production-image.sh record "$RUNNER_TEMP/docker-events.log"
+
+      - name: Resolve shard packages
+        id: shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          PKGS=$(bash .github/scripts/production-image.sh packages "$SHARD")
+          echo "Shard '${SHARD}' packages: ${PKGS}"
+          echo "packages=${PKGS}" >> "$GITHUB_OUTPUT"
+
+      # -v always: the jit-tests guard reads the per-test lines. -p 1 and the
+      # per-package -timeout as in integration-tests.
+      - name: Run integration tests
+        id: tests
+        working-directory: go
+        env:
+          PKGS: ${{ steps.shard.outputs.packages }}
+          PKG_TIMEOUT: ${{ matrix.pkg_timeout }}
+        run: |
+          set -o pipefail
+          read -r -a packages <<<"$PKGS"
+          go test -v -tags=integration -count=1 -p 1 -timeout="$PKG_TIMEOUT" "${packages[@]}" 2>&1 | tee "$RUNNER_TEMP/go-test.log"
+
+      # Right after the tests: the reaper removes the containers about 10 s
+      # after the last test binary exits.
+      - name: Container post-mortem (on failure)
+        if: failure()
+        run: |
+          for id in $(docker ps -aq --filter "ancestor=${CTX_TEST_PG_IMAGE}"); do
+            echo "=== container ${id} ==="
+            docker inspect "${id}" --format 'state={{.State.Status}} exit={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}'
+            docker logs --tail 60 "${id}" 2>&1 || true
+          done
+          echo "=== docker events (recorder) ==="
+          grep -vE " (create|start) " "$RUNNER_TEMP/docker-events.log" 2>/dev/null | tail -40 || true
+          echo "=== memory snapshot ==="
+          free -m || true
+
+      - name: Every container the tests started came from the built image
+        if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
+        run: bash .github/scripts/production-image.sh containers "$RUNNER_TEMP/docker-events.log"
+
+      - name: No test skipped for want of JIT, the JIT tests ran
+        if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: bash .github/scripts/production-image.sh jit-tests "$SHARD" "$RUNNER_TEMP/go-test.log"
+
   # ─── Stage 4: Build Binary ────────────────────────────────────────────────────
   # This job is a flag-parity pre-probe, not a release build: it is the only
   # place that compiles ./cmd/ctxd for linux/amd64 with CGO_ENABLED=0 AND
