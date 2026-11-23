@@ -71,16 +71,17 @@ func TestAHoldThePushCouldNotWriteIsSetByTheNextRun(t *testing.T) {
 	if _, since := e.i509Cursor(t, "issues"); !since.After(e.gh.issue(t, 5).Updated) {
 		t.Fatalf("precondition: the saved since %v is not past #5's stamp", since)
 	}
-	// The next run of another instance (not the one whose hold failed).
+	// The next run of another instance (not the one whose hold failed) sets
+	// the pending hold before it reads its cursor, so it lists #5 itself.
 	for run := 1; run <= 2; run++ {
 		st, err := e.i509Run(other)
 		if err != nil {
 			t.Fatalf("run %d: %v", run, err)
 		}
 		t.Logf("run %d: fetched %d", run, st.Fetched)
-	}
-	if base, flagged := e.mapping(t); flagged || base != e.forgeH(t) {
-		t.Errorf("STALE FLAG: two runs after an advance whose hold write failed, base is the forge's %v, flagged %v — block and forge agree, and no run listed #5 again", base == e.forgeH(t), flagged)
+		if base, flagged := e.mapping(t); flagged || base != e.forgeH(t) {
+			t.Errorf("STALE FLAG: run %d after an advance whose hold write failed, base is the forge's %v, flagged %v — block and forge agree, and the run did not list #5", run, base == e.forgeH(t), flagged)
+		}
 	}
 	var pending bool
 	if err := e.pool.QueryRow(ctx, `SELECT metadata ? 'hold_pending' FROM context_project_sync_map WHERE block_id = $1::uuid`, e.id(t)).Scan(&pending); err != nil || pending {
