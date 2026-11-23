@@ -38,7 +38,7 @@ type inputErrorCase struct {
 	h            *ManageHandler
 	as           *auth.AuthResult
 	payload      map[string]any
-	field        string // the field the 422 names (fields[].field), when the route refuses before the store
+	field        string // the field the answer names, when the route refuses before the store: a 422's fields[].field, or the start of the dispatcher's NUL refusal (issue #519)
 }
 
 const i505NUL = "i505\x00nul"
@@ -73,7 +73,7 @@ func runInputErrorCases(t *testing.T, cases []inputErrorCase, want map[string]in
 				t.Errorf("%s with %s wrote %v, want no line above DEBUG", c.route, c.input, lines)
 			}
 			if c.field != "" && !namesField(resp, c.field) {
-				t.Errorf("%s with %s answered %v, want a 422 naming the field %q (refused before the store)", c.route, c.input, resp, c.field)
+				t.Errorf("%s with %s answered %v, want an answer naming the field %q (refused before the store)", c.route, c.input, resp, c.field)
 			}
 			for _, r := range logs.all() {
 				if strings.Contains(r.text(), "i505") && strings.Contains(r.text(), "nul") {
@@ -86,8 +86,13 @@ func runInputErrorCases(t *testing.T, cases []inputErrorCase, want map[string]in
 	t.Logf("route × input error ⇒ status, lines above DEBUG:\n| route | input | status | lines |\n|---|---|---|---|\n%s", strings.Join(table, "\n"))
 }
 
-// namesField reports whether a validation answer lists field in its fields.
+// namesField reports whether a validation answer lists field in its fields,
+// or — the dispatcher's refusal of a NUL character (issue #519) — names it,
+// as data.<field>, at the start of its error.
 func namesField(resp map[string]any, field string) bool {
+	if msg, _ := resp["error"].(string); strings.HasPrefix(msg, "data."+field+" ") {
+		return true
+	}
 	fields, _ := resp["fields"].([]any)
 	for _, f := range fields {
 		if m, _ := f.(map[string]any); m["field"] == field {
@@ -160,12 +165,13 @@ func TestAdminWriteInputErrorsTenantRoutes(t *testing.T) {
 		"scope-create | NUL": 400, "scope-create | too long": 400, "scope-create | invalid JSON field": 400,
 		"tenant-grant-create | NUL": 400, "tenant-grant-create | too long": 400, "tenant-grant-create | invalid JSON field": 400,
 		"tenant-grant-delete | NUL": 400, "tenant-grant-delete | too long": 404,
-		"tenant-quota-set | NUL": 422, "tenant-quota-set | out of range": 400, "tenant-quota-set | invalid JSON field": 400,
+		"tenant-quota-set | NUL": 400, "tenant-quota-set | out of range": 400, "tenant-quota-set | invalid JSON field": 400,
 		"tenant-quota-set | calls out of range": 400,
 		"block-grant-create | NUL": 400, "block-grant-create | too long": 400, "block-grant-create | invalid JSON field": 400,
 		"block-grant-revoke | NUL": 400, "block-grant-revoke | too long": 404,
-		// An id that is no uuid names no tenant: 404 before PruneTenant runs.
-		"tenant-delete | NUL": 404, "tenant-delete | too long": 404,
+		// An id that is no uuid names no tenant: 404 before PruneTenant runs;
+		// a NUL in it the dispatcher refuses first (issue #519).
+		"tenant-delete | NUL": 400, "tenant-delete | too long": 404,
 	})
 }
 
@@ -216,12 +222,15 @@ func TestAdminWriteInputErrorsBackendRoutes(t *testing.T) {
 	// tenant row may not point at a private base_url, so the host is public.
 	cases = append(cases, c("backend-create", "too long scope", map[string]any{"data": spec("i505-s",
 		"scope", i505Long[:51], "base_url", "https://i505.example.org")}))
+	// A NUL character the dispatcher refuses before the action runs (issue
+	// #519): 400 naming data.<field>.
 	want := map[string]int{"backend-create | too long scope": 422}
 	for _, route := range []string{"backend-create", "backend-update"} {
 		for _, input := range []string{"NUL in extra_headers", "NUL in metadata", "NUL in extra_body", "NUL in a metadata key",
-			"NUL in a key the write does not read", "out of range"} {
-			want[route+" | "+input] = 422
+			"NUL in a key the write does not read"} {
+			want[route+" | "+input] = 400
 		}
+		want[route+" | out of range"] = 422
 		want[route+" | invalid JSON field"] = 400
 	}
 	runInputErrorCases(t, cases, want)
@@ -245,9 +254,9 @@ func TestAdminWriteInputErrorsModelAliasRoutes(t *testing.T) {
 		c("model-alias-delete", "too long", map[string]any{"id": i505Long}),
 	}
 	runInputErrorCases(t, cases, map[string]int{
-		"model-alias-create | NUL": 422, "model-alias-create | NUL in policy": 422, "model-alias-create | too long": 422,
-		"model-alias-create | invalid JSON field": 400, "model-alias-update | NUL in policy": 422,
-		"model-alias-update | invalid JSON field": 400, "model-alias-delete | NUL": 404, "model-alias-delete | too long": 404,
+		"model-alias-create | NUL": 400, "model-alias-create | NUL in policy": 400, "model-alias-create | too long": 422,
+		"model-alias-create | invalid JSON field": 400, "model-alias-update | NUL in policy": 400,
+		"model-alias-update | invalid JSON field": 400, "model-alias-delete | NUL": 400, "model-alias-delete | too long": 404,
 	})
 }
 
@@ -276,8 +285,8 @@ func TestAdminWriteInputErrorsEmbedMigrationRoutes(t *testing.T) {
 		c("embed-migration-rollback", "NUL in the reason", map[string]any{"id": "01900000-0000-7000-8000-000000000505", "data": map[string]any{"reason": i505NUL}}),
 	}, map[string]int{
 		"embed-migration-create | NUL": 400, "embed-migration-create | NUL in a model": 400, "embed-migration-create | too long": 400,
-		"embed-migration-create | invalid JSON field": 400, "embed-migration-pause | NUL": 404,
-		"embed-migration-rollback | NUL in the reason": 404,
+		"embed-migration-create | invalid JSON field": 400, "embed-migration-pause | NUL": 400,
+		"embed-migration-rollback | NUL in the reason": 400,
 	})
 	// A migration the abort finds: its reason reaches the database.
 	status, resp := kaManage(t, h, admin, "i505-live", map[string]any{"action": "embed-migration-create",

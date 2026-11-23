@@ -440,5 +440,12 @@ func (h *ManageHandler) handleManage(w http.ResponseWriter, r *http.Request, act
 	if !enforceManageActionTier(w, action, req, authResult, reqID, h.selfServiceOpen) {
 		return
 	}
+	// Issue #519: a NUL character is a value the database cannot store, in any
+	// field of any action — refused here, before the action's first query,
+	// as the caller's mistake: 400 naming the field, no line (request_nul.go).
+	if field := manageNULField(req); field != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": field + " " + nulFieldMessage})
+		return
+	}
 	action.handle(h, w, r, authResult, req)
 }

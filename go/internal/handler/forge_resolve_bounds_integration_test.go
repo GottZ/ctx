@@ -109,9 +109,10 @@ func TestForgeResolveResetAllWithNothingToReset(t *testing.T) {
 	}
 }
 
-// A project id with a NUL byte names no project: 404 like any id that is
-// not a project's (store.GetProjectByID, which every forge action loads the
-// project with).
+// A project id with a NUL byte is a value the database cannot store: the
+// manage dispatcher refuses it with 400 before the forge action runs (issue
+// #519); store.GetProjectByID, which every forge action loads the project
+// with, answers such an id as no project's.
 func TestForgeResolveProjectIDWithANulByte(t *testing.T) {
 	e := newFCMEnv(t)
 	for _, c := range []struct {
@@ -121,8 +122,8 @@ func TestForgeResolveProjectIDWithANulByte(t *testing.T) {
 		{"forge-conflict-list", map[string]any{"project_id": "a\x00b"}},
 		{"forge-stamp-reset", map[string]any{"project_id": "a\x00b", "all": true}},
 	} {
-		if code, _, raw := e.do(t, e.h, e.adminA, c.action, c.data); code != http.StatusNotFound {
-			t.Errorf("%s with a NUL byte in project_id: %d %s, want 404", c.action, code, raw)
+		if code, _, raw := e.do(t, e.h, e.adminA, c.action, c.data); code != http.StatusBadRequest {
+			t.Errorf("%s with a NUL byte in project_id: %d %s, want 400", c.action, code, raw)
 		}
 	}
 }
