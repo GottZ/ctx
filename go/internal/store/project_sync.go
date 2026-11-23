@@ -224,6 +224,10 @@ type SyncMap struct {
 	BaseFields     json.RawMessage
 	Conflict       bool
 	ForgeUpdatedAt *time.Time
+	// PullGate: a remote resolution keeps the mapping out of the push until
+	// a pull decided over the entity (synced_at 'infinity', issue #509;
+	// ResolveSyncMapConflict, OpenPullGate).
+	PullGate bool
 }
 
 // GetSyncMapsByForge batch-loads the mapping rows for a page of forge ids of one
@@ -238,7 +242,7 @@ func GetSyncMapsByForge(ctx context.Context, pool *pgxpool.Pool, projectID, kind
 	}
 	rows, err := pool.Query(ctx,
 		`SELECT entity_kind, forge_id, block_id::text, base_hash, conflict, forge_updated_at,
-		        metadata->'base_fields'
+		        metadata->'base_fields', synced_at = 'infinity'::timestamptz
 		   FROM context_project_sync_map
 		  WHERE project_id = $1::uuid AND entity_kind = $2 AND forge_id = ANY($3::bigint[])`,
 		projectID, kind, forgeIDs)
@@ -248,7 +252,7 @@ func GetSyncMapsByForge(ctx context.Context, pool *pgxpool.Pool, projectID, kind
 	defer rows.Close()
 	for rows.Next() {
 		m := SyncMap{ProjectID: projectID}
-		if err := rows.Scan(&m.EntityKind, &m.ForgeID, &m.BlockID, &m.BaseHash, &m.Conflict, &m.ForgeUpdatedAt, &m.BaseFields); err != nil {
+		if err := rows.Scan(&m.EntityKind, &m.ForgeID, &m.BlockID, &m.BaseHash, &m.Conflict, &m.ForgeUpdatedAt, &m.BaseFields, &m.PullGate); err != nil {
 			return nil, fmt.Errorf("store: scan sync map: %w", err)
 		}
 		out[m.ForgeID] = m
@@ -303,11 +307,11 @@ func LockSyncMap(ctx context.Context, tx pgx.Tx, blockID string) (SyncMap, bool,
 	var m SyncMap
 	err := tx.QueryRow(ctx,
 		`SELECT project_id::text, entity_kind, forge_id, block_id::text, base_hash, conflict, forge_updated_at,
-		        metadata->'base_fields'
+		        metadata->'base_fields', synced_at = 'infinity'::timestamptz
 		   FROM context_project_sync_map
 		  WHERE block_id = $1::uuid
 		    FOR NO KEY UPDATE`, blockID).Scan(&m.ProjectID, &m.EntityKind, &m.ForgeID, &m.BlockID, &m.BaseHash,
-		&m.Conflict, &m.ForgeUpdatedAt, &m.BaseFields)
+		&m.Conflict, &m.ForgeUpdatedAt, &m.BaseFields, &m.PullGate)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SyncMap{}, false, nil
 	}

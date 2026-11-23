@@ -265,12 +265,19 @@ func (r *Resolver) ListConflicts(ctx context.Context, project store.ProjectRow, 
 //     again — now with a snapshot, which a second local resolution diffs
 //     against. Refused for an issue whose truncated body differs from the
 //     basis (ErrLocalTruncated).
-//   - remote: the base becomes the block's own projection (synced_at the
-//     block's updated_at, so the push leaves it alone), and the fetch leg
+//   - remote: the base becomes the block's own projection, the fetch leg
 //     of the entity is held at the row's forge stamp (store.HoldFetchCursor;
-//     a full listing without one): the next pull lists the entity — its
-//     forge stamp is at or after the recorded one — and, the block holding
-//     the base, pulls the forge's version over it.
+//     a full listing without one), and the push leaves the mapping alone
+//     until a pull decided over the entity (store.SyncMapResolution
+//     .PullGate). The next pull lists the entity — its forge stamp is at or
+//     after the recorded one — and, the block holding the base, pulls the
+//     forge's version over it; a local edit since the resolution has moved
+//     the block off that base, so the pull flags the mapping (both sides
+//     moved) instead of either side winning unseen. A push before that pull
+//     sends nothing: the base is a version the forge never held, so its
+//     diff would have sent the edit over the forge's version, the one the
+//     resolution chose. Where the pull finds the forge at the base, the
+//     gate opens and the push sends the block's edit.
 //
 // Both clear the flag, its time and the forge snapshot, keep the row's
 // forge stamp (it orders the next pull's fetch) and record who resolved
@@ -364,7 +371,7 @@ func (r *Resolver) resolveLocked(ctx context.Context, tx pgx.Tx, project store.P
 			return ErrLocalTruncated
 		}
 	case ResolveRemote:
-		w = store.SyncMapResolution{BaseHash: ctxH, BaseFields: ctxFields, SyncedAt: &cur.UpdatedAt}
+		w = store.SyncMapResolution{BaseHash: ctxH, BaseFields: ctxFields, PullGate: true}
 		var at time.Time
 		if m.ForgeUpdatedAt != nil {
 			at = *m.ForgeUpdatedAt

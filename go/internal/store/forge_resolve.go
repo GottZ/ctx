@@ -140,11 +140,16 @@ func LockSyncMapOfProject(ctx context.Context, tx pgx.Tx, projectID, blockID str
 // SyncMapResolution is what a resolution writes on a flagged mapping: the
 // base (hash and snapshot; a nil snapshot drops base_fields) and synced_at
 // (nil: -infinity, the row is a push candidate whatever its block's
-// updated_at).
+// updated_at). PullGate sets synced_at to 'infinity' instead: the candidate
+// filter (b.updated_at > m.synced_at) is false for every local write, so the
+// push — of this version and of one before it alike — leaves the mapping
+// alone until a pull decided over the entity and wrote synced_at (a pull, a
+// convergence, a flag, or OpenPullGate where the forge holds the base).
 type SyncMapResolution struct {
 	BaseHash   string
 	BaseFields json.RawMessage
 	SyncedAt   *time.Time
+	PullGate   bool
 }
 
 // ResolveSyncMapConflict writes a resolution on the flagged mapping of
@@ -162,9 +167,9 @@ func ResolveSyncMapConflict(ctx context.Context, tx pgx.Tx, blockID string, r Sy
 		   SET base_hash = $2,
 		       metadata = (CASE WHEN $3::jsonb IS NULL THEN metadata - 'base_fields'
 		                        ELSE metadata || jsonb_build_object('base_fields', $3::jsonb) END) - 'forge_seen',
-		       synced_at = COALESCE($4::timestamptz, '-infinity'::timestamptz),
+		       synced_at = CASE WHEN $5 THEN 'infinity'::timestamptz ELSE COALESCE($4::timestamptz, '-infinity'::timestamptz) END,
 		       conflict = false, conflict_at = NULL
-		 WHERE block_id = $1::uuid AND conflict`, blockID, r.BaseHash, fields, r.SyncedAt)
+		 WHERE block_id = $1::uuid AND conflict`, blockID, r.BaseHash, fields, r.SyncedAt, r.PullGate)
 	if err != nil {
 		return false, fmt.Errorf("store: resolve sync map conflict: %w", err)
 	}
@@ -189,6 +194,21 @@ func RecordForgeObservation(ctx context.Context, tx pgx.Tx, blockID string, at *
 		                       ELSE metadata || jsonb_build_object('forge_seen', $3::jsonb) END
 		 WHERE block_id = $1::uuid`, blockID, at, seenJSON); err != nil {
 		return fmt.Errorf("store: record forge observation: %w", err)
+	}
+	return nil
+}
+
+// OpenPullGate ends the push gate of a remote resolution (SyncMapResolution
+// .PullGate) on the locked mapping row of blockID: a pull found the forge at
+// the base, so the forge holds no version the push could send over unseen,
+// and synced_at becomes -infinity — the block's edit since the resolution is
+// a push candidate. A row without the gate is left as it is.
+func OpenPullGate(ctx context.Context, tx pgx.Tx, blockID string) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE context_project_sync_map
+		   SET synced_at = '-infinity'::timestamptz
+		 WHERE block_id = $1::uuid AND synced_at = 'infinity'::timestamptz`, blockID); err != nil {
+		return fmt.Errorf("store: open pull gate: %w", err)
 	}
 	return nil
 }

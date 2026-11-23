@@ -538,7 +538,7 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 			res.Applied = 1
 			return store.UpdateSyncMapBase(ctx, tx, m.BlockID, p.forgeH, p.forgeFields, p.fUpdated, &b.UpdatedAt)
 		case decNoop, decConverge:
-			if d == decNoop && !locked.Conflict {
+			if d == decNoop && !locked.Conflict && !locked.PullGate {
 				return nil // in sync and unflagged: nothing to record
 			}
 			var heldAt *time.Time
@@ -579,7 +579,18 @@ func (a *Applier) flagOrObserve(ctx context.Context, tx pgx.Tx, blockID string, 
 		return store.FlagSyncMapConflict(ctx, tx, blockID, a.clock(), p.seen())
 	case d == decConflict && newer:
 		return store.RecordForgeObservation(ctx, tx, blockID, p.fUpdated, p.seen())
-	case d == decCtxAhead && newer:
+	case d == decCtxAhead && (newer || locked.PullGate):
+		if locked.PullGate {
+			// The forge holds the base a remote resolution wrote: the
+			// block's edit since is the only change, and the push may
+			// send it (issue #509).
+			if err := store.OpenPullGate(ctx, tx, blockID); err != nil {
+				return err
+			}
+		}
+		if !newer {
+			return nil
+		}
 		res.Relist = stampOf(p.fUpdated)
 		var seen *store.ForgeSeen
 		if locked.Conflict {
@@ -624,6 +635,12 @@ func stampOf(fetched *time.Time) time.Time {
 // fetch differs from the base, so such a skip always carries other content.
 func endsOnRead(ctx context.Context, read decision, m store.SyncMap, p pulled) (ApplyResult, bool) {
 	var res ApplyResult
+	if m.PullGate && orderFetch(m, p.fUpdated) != fetchOlder {
+		// A remote resolution keeps the push away until a pull decides
+		// over the entity (issue #509): this fetch does, on the locked
+		// rows — a noop or ctx-ahead there ends the gate.
+		return res, false
+	}
 	switch {
 	case read == decNoop && !m.Conflict:
 		return res, true
