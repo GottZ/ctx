@@ -924,14 +924,6 @@ func sanitizeErr(err error) string {
 	return "sync wire error"
 }
 
-// forgeCfg is the {kind,owner,repo,api_base?} shape of context_projects.forge.
-type forgeCfg struct {
-	Kind    string `json:"kind"`
-	Owner   string `json:"owner"`
-	Repo    string `json:"repo"`
-	APIBase string `json:"api_base"`
-}
-
 // pushThrottleKey builds the token-scoped throttle key (§6.1). The design keys on
 // (forge_kind, token_secret NAME, secret scope); under masterplan K14 each project
 // seals its OWN secret ("forge.token.<project_id>"), so the NAME is per-repo and
@@ -941,22 +933,25 @@ type forgeCfg struct {
 // SAME PAT hash to the same bucket. The hash is in-memory only, never logged.
 func pushThrottleKey(forge json.RawMessage, token string) string {
 	kind := "github"
-	var f forgeCfg
-	if len(forge) > 0 {
-		if err := json.Unmarshal(forge, &f); err == nil && f.Kind != "" {
-			kind = f.Kind
-		}
+	if f, err := store.ReadForgeConfig(forge); err == nil && f.Kind != "" {
+		kind = f.Kind
 	}
 	sum := sha256.Sum256([]byte(token))
 	return kind + "\x00" + hex.EncodeToString(sum[:])
 }
 
+// repoRefFromForge reads the run's repository from the project's forge
+// config as every reader of the row reads it (store.ReadForgeConfig, issue
+// #474): a row that names a key in two spellings does not sync — which of
+// its values was meant is not known, and before, the run used the one that
+// sorts last in JSONB while the project API served the other.
 func repoRefFromForge(raw json.RawMessage) (RepoRef, error) {
-	var f forgeCfg
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &f); err != nil {
-			return RepoRef{}, fmt.Errorf("forge: invalid forge config: %w", err)
-		}
+	f, err := store.ReadForgeConfig(raw)
+	switch {
+	case errors.Is(err, store.ErrForgeConfigSpellings):
+		return RepoRef{}, errForgeSpellings
+	case err != nil:
+		return RepoRef{}, fmt.Errorf("forge: invalid forge config: %w", err)
 	}
 	if f.Kind != "" && f.Kind != "github" {
 		return RepoRef{}, ErrForgeKind
@@ -979,6 +974,10 @@ func repoRefFromForge(raw json.RawMessage) (RepoRef, error) {
 // it went unused. Refusing names the change; ignoring it would turn an
 // unauthenticated sync that relied on it into a 401 or 404 without a hint.
 var errAPIBaseCredentials = &configError{"forge: forge.api_base carries credentials (user:password@); the sync does not run with them: remove them from forge.api_base and set the token with forge-token-set"}
+
+// errForgeSpellings ends a run whose forge config names a key in two
+// spellings (repoRefFromForge), before its first request.
+var errForgeSpellings = &configError{"forge: the forge config names a key in more than one spelling (e.g. api_base and API_BASE); the sync does not run: set forge again with PATCH /api/project/{id}"}
 
 // cursor is the sync_cursor JSONB shape this wave reads/writes: an independent
 // etag/since leg per entity kind (issues, comments — a comment-only change does

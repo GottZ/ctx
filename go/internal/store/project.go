@@ -33,6 +33,8 @@ import (
 // the wire shape (the API exposes only token_set=bool via forge-sync-status,
 // design/02 §5.4). The remaining sync-state columns (SyncEnabled/PushEnabled/
 // LastError/BackoffUntil) are the Achse-02 I-F contract (migration 080).
+// Forge goes on the wire as ServedForgeConfig reads it (MarshalJSON in
+// forge_config.go, issue #474).
 type ProjectRow struct {
 	ID               string          `json:"id"`
 	TenantID         string          `json:"tenant_id"`
