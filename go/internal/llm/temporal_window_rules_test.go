@@ -207,8 +207,10 @@ func TestRules_OverlappingDayDatesDoNotPanic(t *testing.T) {
 // cost of a long question has its own test (TestRules_CostIsLinearInTheQuestion).
 const maxFuzzQuestion = 512
 
-// FuzzNormalizeTemporalRules: no question makes the rules panic, and no
-// window they yield starts after it ends.
+// FuzzNormalizeTemporalRules: no question makes the rules panic, no window
+// they yield starts after it ends, and a result they yield names a date — the
+// query path takes any result as the rules' answer and skips the LLM fallback
+// for it (issue #517).
 func FuzzNormalizeTemporalRules(f *testing.F) {
 	for _, s := range []string{"29.03.2026-03-29", "seit 2024-03-15", "bis März 2015", "von Freitag bis Montag",
 		"2024-03-01 bis 2024-03-31", "gestern und vorgestern", "seit dem 15.03.2024", "letzten Freitag bis Montag"} {
@@ -221,6 +223,9 @@ func FuzzNormalizeTemporalRules(f *testing.F) {
 		tr := NormalizeTemporalRules(q, now463)
 		if tr == nil {
 			return
+		}
+		if len(tr.Dates) == 0 {
+			t.Errorf("%q: a result without a date", q)
 		}
 		for _, d := range tr.Dates {
 			if d.End != nil && *d.End < d.Date {
