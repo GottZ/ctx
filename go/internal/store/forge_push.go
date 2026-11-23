@@ -365,7 +365,31 @@ type PushProjection func(b *Block) string
 // or stamp — before, it recorded the base unknown and flagged the mapping as
 // if a PATCH had been on the wire. It stamps metadata.forge_state only with
 // a base it wrote.
-func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, forgeUpdatedAt *time.Time, sent bool, project PushProjection) (moved bool, err error) {
+//
+// An observation of the forge younger than the PATCH's answer survives the
+// advance (issue #509, the follow-up list of 2026-11-23): a forge snapshot
+// whose stamp lies after forgeUpdatedAt — a pull flagged the row over a
+// remote edit that landed after the PATCH — stays as the flag's forge side,
+// so the resolve surface lists it and keeping the local version diffs the
+// block against it and pushes it. Dropped, a local resolution kept the sent
+// version as the base, and the next fetch of the remote edit — at the stamp
+// the row records, the base unmoved — pulled it over the block although the
+// local version was chosen. Where the base moved to a third version, that
+// version is such an observation when its stamp lies after the answer (a
+// pull applied or converged on it after the PATCH landed), and it becomes
+// the flag's forge side unless a younger snapshot is there. An observation
+// at or before the answer's stamp, or any without an answer stamp, is
+// dropped as before: what the forge holds since the PATCH is not known.
+//
+// hold is set when the advance recorded the base unknown: the stamp of the
+// newest forge version the row and the PATCH's answer know (the later of
+// the two; zero for none). The caller holds the entity's fetch leg there
+// (store.HoldFetchCursor, issue #509): another instance's run that listed
+// the entity between the PATCH's landing and this advance found nothing to
+// decide and may have saved its cursor past it, and the flag on a row whose
+// block and forge agree — or whose forge version no flag recorded — stood
+// for good; the held listing converges or records the forge's version.
+func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHash string, ctxFields json.RawMessage, forgeUpdatedAt *time.Time, sent bool, project PushProjection) (moved bool, hold *time.Time, err error) {
 	var b Block
 	var at time.Time
 	holds := false
@@ -376,7 +400,7 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
-		return false, fmt.Errorf("store: advance push base: lock block: %w", err)
+		return false, nil, fmt.Errorf("store: advance push base: lock block: %w", err)
 	default:
 		holds = project(&b) == ctxHash
 	}
@@ -401,7 +425,13 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 		AND COALESCE(` + row + `metadata->'forge_seen'->>'hash', ` + row + `base_hash) = ` + row + `base_hash)`
 	}
 	reverted := revertedOf("")
+	// younger (Y below): the row's forge snapshot, or for a moved base the
+	// base itself, is an observation later than the PATCH's answer
+	// ($8; none without an answer stamp — the comparison is false, not NULL).
+	const seenYounger = `COALESCE((metadata->'forge_seen'->>'at')::timestamptz > $8::timestamptz, false)`
+	const baseYounger = `COALESCE(forge_updated_at > $8::timestamptz, false)`
 	var revert bool
+	var newest *time.Time
 	err = tx.QueryRow(ctx, `
 		UPDATE context_project_sync_map
 		   SET base_hash = CASE WHEN base_hash IN ($6, $2) THEN $2 ELSE $7 END,
@@ -409,26 +439,34 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 		       metadata = CASE WHEN `+reverted+`
 		                       THEN (metadata || $3::jsonb) || jsonb_build_object('forge_seen', jsonb_build_object(
 		                              'fields', metadata->'base_fields', 'hash', base_hash, 'at', `+utcJSON(`forge_updated_at`)+`))
+		                       WHEN base_hash IN ($6, $2) AND `+seenYounger+` THEN metadata || $3::jsonb
 		                       WHEN base_hash IN ($6, $2) THEN (metadata || $3::jsonb) - 'forge_seen'
+		                       WHEN `+seenYounger+` THEN metadata - 'base_fields'
+		                       WHEN `+baseYounger+`
+		                       THEN (metadata - 'base_fields') || jsonb_build_object('forge_seen', jsonb_build_object(
+		                              'fields', metadata->'base_fields', 'hash', base_hash, 'at', `+utcJSON(`forge_updated_at`)+`))
 		                       ELSE (metadata - 'base_fields') - 'forge_seen' END,
 		       forge_updated_at = CASE WHEN base_hash IN ($6, $2) THEN GREATEST(forge_updated_at, $8::timestamptz) ELSE forge_updated_at END,
 		       conflict = conflict OR base_hash NOT IN ($6, $2) OR `+reverted+`,
 		       conflict_at = CASE WHEN base_hash IN ($6, $2) AND NOT `+reverted+` THEN conflict_at ELSE COALESCE(conflict_at, now()) END
 		 WHERE block_id = $1::uuid AND ($9 OR base_hash = $6)
-		RETURNING old.base_hash NOT IN ($6, $2), `+revertedOf("old."),
-		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash, forgeUpdatedAt, sent).Scan(&moved, &revert)
+		RETURNING old.base_hash NOT IN ($6, $2), `+revertedOf("old.")+`, GREATEST(old.forge_updated_at, $8::timestamptz)`,
+		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash, forgeUpdatedAt, sent).Scan(&moved, &revert, &newest)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		// The mapping is gone, or an advance without a wire write found the
 		// base moved off the listed one: nothing to record.
-		return false, nil
+		return false, nil, nil
 	case err != nil:
-		return false, fmt.Errorf("store: advance push base: %w", err)
+		return false, nil, fmt.Errorf("store: advance push base: %w", err)
 	}
 	if moved {
-		return true, nil
+		if newest == nil {
+			newest = &time.Time{}
+		}
+		return true, newest, nil
 	}
-	return revert, StampForgeState(ctx, tx, blockID, ctxFields)
+	return revert, nil, StampForgeState(ctx, tx, blockID, ctxFields)
 }
 
 // PushSkip names why a push section leaves an entity to the next run; ""

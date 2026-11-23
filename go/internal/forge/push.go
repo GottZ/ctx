@@ -97,7 +97,7 @@ func (p *Pusher) PushProject(ctx context.Context, project store.ProjectRow, clie
 		return res, err
 	}
 	for i := range comments {
-		cont, err := p.pushComment(ctx, client, repo, allow, &comments[i], &res)
+		cont, err := p.pushComment(ctx, project.ID, client, repo, allow, &comments[i], &res)
 		if err != nil {
 			return res, err
 		}
@@ -118,7 +118,8 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		_, h := pol.ctxIssueBase(b, c.BaseFields)
 		return h
 	}
-	rec := pushRecord{blockID: c.Block.ID, listed: c.BaseHash, ctxH: ctxH, ctxFields: ctxFields, projected: projected}
+	rec := pushRecord{blockID: c.Block.ID, listed: c.BaseHash, ctxH: ctxH, ctxFields: ctxFields, projected: projected,
+		projectID: project.ID, leg: legOf(entityKindIssue)}
 	if ctxH == c.BaseHash {
 		// In sync (a write that left the projection alone, or an edit undone
 		// since a PATCH): 0 wire, but the row was listed, so it leaves the
@@ -127,7 +128,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		// candidates out of the listing.
 		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, rec.advance(false))
 		noteSkip(res, c.Block.ID, skip)
-		rec.count(res, err)
+		err = rec.settle(ctx, p.pool, res, err)
 		return true, err
 	}
 	ctxProj, _ := parseIssueProjection(ctxFields)
@@ -150,7 +151,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		// Only a never-pushed field (milestone) diverged: advance base, 0 wire.
 		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, rec.advance(false))
 		noteSkip(res, c.Block.ID, skip)
-		rec.count(res, err)
+		err = rec.settle(ctx, p.pool, res, err)
 		return true, err
 	}
 	cont, err := p.wireSection(ctx, c.Block.ID, c.BaseHash, allow, res, func(ctx context.Context) error {
@@ -160,7 +161,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		}
 		return err
 	}, rec.advance(true))
-	rec.count(res, err)
+	err = rec.settle(ctx, p.pool, res, err)
 	return cont, err
 }
 
@@ -365,7 +366,7 @@ func (p *Pusher) createIssue(ctx context.Context, project store.ProjectRow, clie
 }
 
 // pushComment pushes one candidate comment (create or body-update).
-func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
+func (p *Pusher) pushComment(ctx context.Context, projectID string, client Forge, repo RepoRef,
 	allow func() bool, c *store.CommentPushCandidate, res *PushResult) (bool, error) {
 
 	block := &store.Block{Content: c.Content}
@@ -374,12 +375,13 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 		_, h := CtxCommentBase(b)
 		return h
 	}
-	rec := pushRecord{blockID: c.BlockID, listed: c.BaseHash, ctxH: ctxH, ctxFields: ctxFields, projected: projected}
+	rec := pushRecord{blockID: c.BlockID, listed: c.BaseHash, ctxH: ctxH, ctxFields: ctxFields, projected: projected,
+		projectID: projectID, leg: legOf(entityKindComment)}
 	if ctxH == c.BaseHash {
 		// In sync — 0 wire; the row leaves the candidates as in pushIssue.
 		skip, err := p.section(ctx, c.BlockID, c.BaseHash, nil, rec.advance(false))
 		noteSkip(res, c.BlockID, skip)
-		rec.count(res, err)
+		err = rec.settle(ctx, p.pool, res, err)
 		return true, err
 	}
 	body, truncated := store.CapForgeBody(c.Content)
@@ -422,7 +424,7 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 		}
 		return err
 	}, rec.advance(true))
-	rec.count(res, err)
+	err = rec.settle(ctx, p.pool, res, err)
 	return cont, err
 }
 
@@ -442,12 +444,18 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 // section's transaction committed (issue #509): counted inside it, a COMMIT
 // that failed counted a conflict that was rolled back, and a failed leg's
 // counts reach the run's status.
+//
+// hold is the time the advance asks the entity's fetch leg to be held at
+// (it recorded the base unknown, store.AdvancePushBase); projectID and leg
+// name that leg.
 type pushRecord struct {
 	blockID, listed, ctxH string
 	ctxFields             []byte
 	stamp                 *time.Time
 	projected             store.PushProjection
 	moved                 bool
+	hold                  *time.Time
+	projectID, leg        string
 }
 
 // advance is the section's record; sent says that a PATCH carried ctxH
@@ -455,17 +463,41 @@ type pushRecord struct {
 func (r *pushRecord) advance(sent bool) func(context.Context, pgx.Tx) error {
 	return func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		r.moved, err = store.AdvancePushBase(ctx, tx, r.blockID, r.listed, r.ctxH, r.ctxFields, r.stamp, sent, r.projected)
+		r.moved, r.hold, err = store.AdvancePushBase(ctx, tx, r.blockID, r.listed, r.ctxH, r.ctxFields, r.stamp, sent, r.projected)
 		return err
 	}
 }
 
-// count adds the advance's conflict to res once its section returned
-// without an error — the record committed.
-func (r *pushRecord) count(res *PushResult, err error) {
-	if err == nil && r.moved {
+// settle runs once the section returned: with err nil — the record
+// committed — it adds the advance's conflict to res, and where the advance
+// recorded the base unknown it holds the entity's fetch leg at the stamp the
+// advance named (store.HoldFetchCursor, issue #509), so the next run lists
+// the entity and decides on it: a convergence clears the flag where block
+// and forge agree, a newer forge version is recorded as the flag's forge
+// side. The hold takes the project row in a transaction of its own, after
+// the advance's: inside it, the project row would come after the block and
+// the mapping row, the reverse of a resolution's and a stamp reset's order.
+// A run that commits its cursor in between is held back all the same — the
+// hold moves since to its time. Like the advance it runs outside the run's
+// deadline (issue #474).
+func (r *pushRecord) settle(ctx context.Context, pool *pgxpool.Pool, res *PushResult, err error) error {
+	if err != nil {
+		return err
+	}
+	if r.moved {
 		res.Conflicts++
 	}
+	if r.hold == nil {
+		return nil
+	}
+	ctx = context.WithoutCancel(ctx)
+	return pgxdb.Write(ctx, pool, pgxdb.Stages{Begin: "forge: push hold begin", Commit: "forge: push hold commit"}, func(tx pgx.Tx) error {
+		ok, err := store.LockProjectForCursor(ctx, tx, r.projectID)
+		if err != nil || !ok {
+			return err
+		}
+		return store.HoldFetchCursor(ctx, tx, r.projectID, r.leg, *r.hold)
+	})
 }
 
 // diffIssue builds the field-diff PATCH (§4.5.2). base is the last-synced

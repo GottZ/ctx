@@ -251,7 +251,8 @@ func (r *Resolver) ListConflicts(ctx context.Context, project store.ProjectRow, 
 //     field the block holds otherwise; a pull that lists that same version
 //     reads ctx-ahead and leaves it to the push, a newer remote edit is a
 //     conflict again. Without a current snapshot (a flag a push advance
-//     kept, which drops it; the push's data-loss guard; a flag set before
+//     kept, which drops a snapshot no younger than its PATCH's answer; the
+//     push's data-loss guard; a flag set before
 //     snapshots were kept) the base stays: where the forge holds the base
 //     (the flag a push advance kept over a local edit) the push sends the
 //     block's changes and a pull of that version reads ctx-ahead; where it
@@ -260,10 +261,13 @@ func (r *Resolver) ListConflicts(ctx context.Context, project store.ProjectRow, 
 //     — the forge keeps its changes in the others, and the pull after the
 //     push brings them to the block. An unknown base (the advance could
 //     not tell what the forge holds) stays unknown: the push sends every
-//     pushed field, but the PATCH that left it unknown moved the forge's
-//     stamp, so the next run lists the entity before the push and flags it
-//     again — now with a snapshot, which a second local resolution diffs
-//     against. Refused for an issue whose truncated body differs from the
+//     pushed field. The advance that left it unknown held the entity's
+//     fetch leg (store.AdvancePushBase, issue #509): where that held run
+//     comes after this resolution, it lists the entity before the push and
+//     flags it again — now with a snapshot, which a second local resolution
+//     diffs against; where it came before, it recorded a newer forge
+//     version as the flag's forge side already, and the base is unknown
+//     here only when the forge's version carries the row's stamp. Refused for an issue whose truncated body differs from the
 //     basis (ErrLocalTruncated).
 //   - remote: the base becomes the block's own projection, the fetch leg
 //     of the entity is held at the row's forge stamp (store.HoldFetchCursor;
