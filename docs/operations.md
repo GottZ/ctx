@@ -2269,6 +2269,14 @@ Why: the map's row carries the full-text vectors `ts_de` and `ts_en` of its text
 
 **Behaviour change.** A store whose map lies between the cap and the old limit — roughly 4,000 to 60,000 blocks — gets the capped map instead of the whole one; below the cap nothing changes.
 
+**A digest the database refuses is held, not retried on every tick.** The background digest runs on a five-second ticker once 60 seconds have passed since the last block write, and a failed run used to stay pending: before the cap, a map past the limit made every tick run the whole digest again — the corpus scan and the write — into the same refusal, with an `ERROR` each time. Since issue #518 the background digest tells two kinds of failure apart. One that can go differently on the next tick (the database or a connection gone, a timeout, a lock, an error that is not the database's) is retried as before, with its `scheduler: digest error` line. One where the database refused a value — SQLSTATE class 22 (data exception) or 54 (a program limit, such as the tsvector's) — holds the tenant's digest:
+
+- one `ERROR` `scheduler: digest failed on a value the database cannot store — not retried until a block is written or a setting changes; …` with `scope`, `sqlstate` and `error`;
+- no run until a block is written (any write the scheduler is notified of) or the tenant's configuration changes (a setting written); a run after such a change that fails the same way logs at `DEBUG` only;
+- an `INFO` `scheduler: digest writes the topic map again` when it succeeds again.
+
+The state lives in each `ctxd` process: a restart starts with one run. With the cap the digest's own map no longer reaches the tsvector limit; the hold guards against the next value the database refuses.
+
 ### Retiring the two dead linear topic maps (ops step, not a migration)
 
 `topic-map-work` and `topic-map-hth` have not been rebuilt since 2026-03 and still show up in every `ctx search index` result; the second one additionally advertises a **wrong** bootstrap path (its title says `hth`, its scope says `work` — a pre-scope-clamp leftover). `scripts/archive-legacy-topic-maps.sh` retires them.
