@@ -141,9 +141,7 @@ func TestGoroutineAfterAClientAbortStaysClientGone(t *testing.T) {
 // (TestGoroutineAfterTheHandlerReturnedIsNoClientAbort). A new one fails
 // this test: name it here with the reason it runs on the request context,
 // or on none.
-var goroutineErrorLineCensus = map[string]int{
-	"status.go": 1, // cold-start rebuild on a detached context: HealthStatus's ping line, no request in that context (ERROR)
-}
+var goroutineErrorLineCensus = map[string]int{}
 
 // TestNoErrorLineHelperInAGoroutine — issue #453 point 1: the census of
 // error-line helper calls inside goroutines. On the type-checked package

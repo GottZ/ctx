@@ -290,9 +290,9 @@ func TestWriteOutcomeFatalAfterTheCommitRecord(t *testing.T) {
 	})
 
 	// The timeouts that end a statement waiting on a lock, before the COMMIT:
-	// statement_timeout raises 57014 too — writeOutcome keeps rolled_back by
-	// the stage, statementOutcome cannot tell it from a held cancel — and
-	// lock_timeout raises 55P03, an ERROR both read as rolled_back.
+	// statement_timeout raises 57014 and lock_timeout 55P03 — writeOutcome
+	// keeps rolled_back by the stage, statementOutcome cannot tell either
+	// from one held across an implicit commit (issue #519 for 55P03).
 	release := lockedTx(t, direct, `SELECT pg_advisory_xact_lock(483484)`)
 	defer release()
 	for _, tc := range []struct {
@@ -300,7 +300,7 @@ func TestWriteOutcomeFatalAfterTheCommitRecord(t *testing.T) {
 		row                        int
 	}{
 		{"statement_timeout before the COMMIT", `SET LOCAL statement_timeout = '200ms'`, "57014", writeUnknown, 7},
-		{"lock_timeout before the COMMIT", `SET LOCAL lock_timeout = '200ms'`, "55P03", writeRolledBack, 8},
+		{"lock_timeout before the COMMIT", `SET LOCAL lock_timeout = '200ms'`, "55P03", writeUnknown, 8},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := pgxdb.Write(ctx, pool, pgxdb.At("probe: write"), func(tx pgx.Tx) error {

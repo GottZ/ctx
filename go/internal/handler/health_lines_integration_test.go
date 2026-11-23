@@ -22,7 +22,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/provenance"
 	"github.com/GottZ/ctx/internal/schemacontract"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,7 +55,7 @@ func TestHealthLinesPerMinute(t *testing.T) {
 
 	// A known state first: the database answers and every role is served (the
 	// state is process-wide).
-	HealthStatus(context.Background(), sh.pool, []backends.Backend{operatorRow("i504-minute-base", embed, i504Roles...)}, true, "ok")
+	HealthStatus(context.Background(), sh.pool, seededBackends(operatorRow("i504-minute-base", embed, i504Roles...)), true, "ok")
 
 	contract, has := schemacontract.LatestReport()
 	contractValue := schemaContractHealthValue(contract, has)

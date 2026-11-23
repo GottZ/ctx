@@ -1,0 +1,84 @@
+# Class corpus of issue #517: a weekday with a time of day. Written with its expectations before any rule change (sha256 of the list b8522c3d33c1e9a5).
+# Asked at noon UTC of the day. Expected dates: "-" none, "*" any; otherwise alternatives split by " OR ", the dates of one alternative by ";" (holdout506Fits). Hour: the hour of the first date, "-" no date carries one, "*" not judged. Tense: DetectVerbTense, "notpast" future or neutral, "any" not judged.
+# id, day, kind (F: the new reading is right, F2: the first-name reading, G: a counter-case), expected rule (ja/nein/egal), expected dates, hour, tense, disputed (s or -), question, the dates of the rules at c367fd44 as JSON or nil, the tense at c367fd44.
+K2-01	2026-11-22	F	ja	2026-11-17	8	any	-	Was the cluster down on Tuesday morning?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	past
+K2-02	2026-11-22	F	ja	2026-11-21	23	any	-	Who restarted spark on saturday night?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	past
+K2-03	2026-11-22	F	ja	2026-11-19	23	any	-	Which alerts fired Thursday night?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	neutral
+K2-04	2026-11-22	F	ja	2026-11-20	15	any	-	What was the state of the queue on Friday afternoon?	[{"ref":"nachmittags","date":"2026-11-22","end":null,"dir":"today","hour":15}]	past
+K2-05	2026-11-22	F	ja	2026-11-16	8	any	-	Was lief am Montagmorgen schief?	nil	past
+K2-06	2026-11-22	F	ja	2026-11-17	19	any	-	Wurde am Dienstagabend noch was eingecheckt?	nil	past
+K2-07	2026-11-22	F	ja	2026-11-23	8	any	-	Can we deploy on Monday morning?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-08	2026-11-22	F	ja	2026-11-24	15	any	-	Treffen wir uns Dienstagnachmittag?	nil	neutral
+K2-09	2026-11-22	F	ja	2026-11-25	19	any	-	Am Mittwochabend ist Wartung	nil	neutral
+K2-10	2026-11-22	F	ja	2026-11-27	10	any	-	Was steht am Freitagvormittag an?	nil	future
+K2-11	2026-11-22	F	ja	2026-11-23	8	any	-	Montag früh deployen wir	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-12	2026-11-22	F	ja	2026-11-20	19	any	-	Was war am Freitag Abend los?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K2-13	2026-11-22	F	ja	2026-11-19	23	any	-	Wer hatte Donnerstagnacht Bereitschaft?	nil	past
+K2-14	2026-11-22	F	ja	2026-11-18	19	any	-	What happened on Wednesday evening?	[{"ref":"abends","date":"2026-11-22","end":null,"dir":"today","hour":19}]	past
+K2-15	2026-11-22	F	ja	2026-11-26	8	any	-	Is the maintenance window Thursday morning?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-16	2026-11-22	F	ja	2026-11-23	19	any	-	Am Montag-Abend ist das Release	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K2-17	2026-11-22	F	ja	2026-11-21	23	any	-	Who was on call Saturday night?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	past
+K2-18	2026-11-22	F	ja	2026-11-21	8	any	-	Was ist am Samstagmorgen passiert?	nil	past
+K2-19	2026-11-22	F	ja	2026-11-24	12	any	-	Wann genau ist Dienstagmittag das Standup?	nil	neutral
+K2-20	2026-11-22	F	ja	2026-11-20	23	any	-	Did the backup run on Friday night?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	past
+K2-21	2026-11-22	F	ja	2026-11-18	15	any	-	Lief der Job am Mittwochnachmittag durch?	nil	past
+K2-22	2026-11-22	F	ja	2026-11-27	15	any	-	Freitagnachmittag Deployment?	nil	neutral
+K2-23	2026-11-22	F	ja	2026-11-23	15	any	-	Let's sync Monday afternoon	[{"ref":"nachmittags","date":"2026-11-22","end":null,"dir":"today","hour":15}]	neutral
+K2-24	2026-11-22	F	ja	2026-11-19	15	any	-	The outage on Thursday afternoon - what caused it?	[{"ref":"nachmittags","date":"2026-11-22","end":null,"dir":"today","hour":15}]	past
+K2-25	2026-11-22	F	ja	2026-11-18	8	any	-	Was haben wir Mittwochmorgen besprochen?	nil	past
+K2-26	2026-11-22	F	ja	2026-11-26	10	any	-	Am Donnerstagvormittag fällt der Server aus	nil	future
+K2-27	2026-11-22	F	ja	2026-11-24	19	any	-	What's planned for Tuesday evening?	[{"ref":"abends","date":"2026-11-22","end":null,"dir":"today","hour":19}]	neutral
+K2-28	2026-11-22	F	ja	2026-11-16	8	any	-	Am Montag früh ist der Server abgestürzt	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	past
+K2-29	2026-11-22	F	ja	2026-11-16	23	any	-	Monday night deploy failed?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	past
+K2-30	2026-11-22	F	ja	2026-11-20	*	any	-	Was lief am Freitag spät abends?	[{"ref":"abends","date":"2026-11-22","end":null,"dir":"today","hour":19}]	past
+K2-31	2026-11-22	F	ja	2026-11-22 OR 2026-11-29	19	any	-	Sonntagabend ist das Wartungsfenster	nil	neutral
+K2-32	2026-11-22	F	ja	2026-11-17	*	any	-	Was the server slow early Tuesday?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	past
+K2-33	2026-11-22	F	ja	2026-11-20	*	any	-	late Friday the job died	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	neutral
+K2-34	2026-11-22	F	ja	2026-11-17	*	any	-	Welche Morning-Standups hatten wir am Dienstag?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	past
+K2-35	2026-11-22	F	ja	2026-11-27	8	any	-	Am Freitag ist Betriebsausflug, morgens um 8 geht es los	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-36	2026-11-22	F	ja	2026-11-16	*	any	-	Am Montag haben wir früh deployed	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	past
+K2-37	2026-11-22	F	ja	2026-11-26	*	any	-	Is the late shift on Thursday covered?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	neutral
+K2-38	2026-11-22	G	ja	2026-11-16	-	any	-	Was the Monday release late?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	past
+K2-39	2026-11-22	G	ja	2026-11-24	-	any	-	Ist das Meeting am Dienstag zu früh angesetzt?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-40	2026-11-22	G	ja	2026-11-23	-	any	-	Monday is too early for the release	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-41	2026-11-22	G	ja	2026-11-20	-	any	-	Kam das Paket am Freitag zu spät?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	past
+K2-42	2026-11-22	G	ja	2026-11-22 OR 2026-11-22;2026-11-20	*	any	-	Was ist heute Abend? Am Freitag war nichts los.	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	neutral
+K2-43	2026-11-22	G	ja	2026-11-22 OR 2026-11-20;2026-11-22	*	any	-	What happened on Friday, and what broke this morning?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	past
+K2-44	2026-11-22	G	ja	2026-11-22	19	any	-	Wie war das Freitag-Release, und was steht heute Abend an?	[{"ref":"heute","date":"2026-11-22","end":null,"dir":"today"}]	past
+K2-45	2026-11-22	G	ja	2026-11-22	19	any	-	Wer ist Herr Montag, der heute Abend kommt?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K2-46	2026-11-22	G	ja	2026-11-18	-	any	-	Did the nightly job fail on Wednesday?	[{"ref":"Wednesday","date":"2026-11-18","end":null,"dir":"past"}]	past
+K2-47	2026-11-22	G	ja	2026-11-23	-	any	-	Frühschicht am Montag - wer ist eingeteilt?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K2-48	2026-11-22	G	ja	2026-11-23	-	any	-	Montag ist früh genug für den Fix	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-49	2026-11-22	G	ja	2026-11-24	-	any	-	Can we do it Tuesday, or is that too late?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	neutral
+K2-50	2026-11-22	G	ja	2026-11-20	-	any	-	Lief am Freitag alles nach Plan, oder kam der Fix zu spät?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	past
+K2-51	2026-11-22	G	ja	2026-11-27	-	any	-	Ist Freitag noch früh genug für das Release?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-52	2026-11-22	G	ja	2026-11-17	-	any	-	Was the late fee charged on Tuesday?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	past
+K2-53	2026-11-22	G	ja	2026-11-22	8	any	-	Was ist heute morgens passiert, nachdem der Montags-Job lief?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	past
+K2-54	2026-11-22	G	ja	2026-11-25	-	any	-	Wird der Mittwoch-Termin zu spät?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	future
+K2-55	2026-11-22	G	ja	2026-11-19	-	any	-	Did the early warning fire on Thursday?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	past
+K2-56	2026-11-22	G	ja	2026-11-26	-	any	s	Kommt das Update am Donnerstag zu früh?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-57	2026-11-22	G	ja	2026-11-21 OR 2026-11-21;2026-11-20	*	any	-	Was lief gestern Abend schief, nachdem am Freitag deployed wurde?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K2-58	2026-11-22	G	egal	*	*	any	-	Montags früh läuft immer der Backup	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-59	2026-11-22	G	ja	2026-11-16	-	any	-	Montag kam der Bericht viel zu spät	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	past
+K2-60	2026-11-22	G	ja	2026-11-27	-	any	-	Is Friday too late for the cutover?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	neutral
+K2-61	2026-11-22	G	ja	2026-11-27	-	any	-	Is the Friday deadline too early?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-62	2026-11-22	G	ja	2026-11-23	-	any	-	Ist der Montag zu spät für die Abgabe?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	neutral
+K2-63	2026-11-22	G	ja	2026-11-17	-	any	-	Did the Tuesday standup start late?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	past
+K2-64	2026-11-22	G	ja	2026-11-23	-	any	-	Wer hat am Montag die Spätschicht?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K2-65	2026-11-22	G	nein	-	-	any	-	Wird der Montag-Release früher fertig?	nil	future
+K2-66	2026-11-22	G	egal	*	*	any	-	Am Montag ist der Server abends immer langsam	[{"ref":"abends","date":"2026-11-22","end":null,"dir":"today","hour":19}]	neutral
+K2-67	2026-11-22	G	ja	2026-11-18	-	any	-	Was the release on Wednesday early or late?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	past
+K2-68	2026-11-22	F	ja	2026-11-17	*	any	-	Did the late-night job run on Tuesday?	[{"ref":"nachts","date":"2026-11-22","end":null,"dir":"today","hour":23}]	past
+K2-69	2026-11-22	G	ja	2026-11-23	-	any	-	Montag passt, aber nicht zu früh	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-70	2026-11-22	G	ja	2026-11-26	-	any	-	Is the cutover on Thursday early enough?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	neutral
+K2-71	2026-11-22	G	ja	2026-11-20	-	any	-	Lief der Deploy am Freitag zu früh an?	[{"ref":"morgens","date":"2026-11-22","end":null,"dir":"today","hour":8}]	past
+B2-01	2026-03-18	F	ja	2026-03-16	19	any	-	Was ist am Montagabend passiert?	nil	past
+B2-02	2026-03-18	F	ja	2026-03-20	8	any	-	Can we pair on Friday morning?	[{"ref":"morgens","date":"2026-03-18","end":null,"dir":"today","hour":8}]	neutral
+B2-03	2026-03-18	F	ja	2026-03-17	23	any	-	Who was paged Tuesday night?	[{"ref":"nachts","date":"2026-03-18","end":null,"dir":"today","hour":23}]	past
+B2-04	2026-03-18	F	ja	2026-03-19	15	any	-	Am Donnerstagnachmittag ist Review	nil	neutral
+B2-05	2026-03-18	G	ja	2026-03-13	-	any	-	Was the Friday deploy late?	[{"ref":"nachts","date":"2026-03-18","end":null,"dir":"today","hour":23}]	past
+B2-06	2026-03-18	G	ja	2026-03-23	-	any	-	Ist Montag zu früh für den Launch?	[{"ref":"morgens","date":"2026-03-18","end":null,"dir":"today","hour":8}]	neutral
+B2-07	2026-03-18	G	ja	2026-03-18 OR 2026-03-18;2026-03-16	*	any	-	What broke this morning? We also had issues on Monday.	[{"ref":"morgens","date":"2026-03-18","end":null,"dir":"today","hour":8}]	past
+B2-08	2026-03-18	F	ja	2026-03-14	23	any	-	Lief Samstagnacht der Backup?	nil	past
+B2-09	2026-03-18	F	ja	2026-03-22	8	any	-	Am Sonntag früh ist Wartung	[{"ref":"morgens","date":"2026-03-18","end":null,"dir":"today","hour":8}]	neutral
+B2-10	2026-03-18	G	ja	2026-03-18	19	any	-	Wie war das Montag-Meeting, und was ist heute Abend?	[{"ref":"heute","date":"2026-03-18","end":null,"dir":"today"}]	past

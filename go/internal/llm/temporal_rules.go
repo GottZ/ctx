@@ -27,7 +27,9 @@ import (
 
 // --- Tokenizer ---.
 
-// ruleTokenize splits query on whitespace and hyphens, trims punctuation, lowercases.
+// ruleTokenize splits query on whitespace and hyphens, trims punctuation,
+// lowercases — the words of clauseTokens, without a conjunction that joins
+// two clauses (coordinate).
 func ruleTokenize(query string) []string {
 	return clauseTokens(query).words
 }
@@ -55,12 +57,21 @@ type clauseWords struct {
 	// joinedNext: the word is joined to the next one by a hyphen
 	// ("Wochenende-Flag", "friday-deploy-script"), issue #506.
 	joinedNext []bool
+	// written: the word starts with an upper-case letter as written, also in
+	// a question whose case caps disregards (afterCapital, issue #517).
+	written []bool
 	// closing caches the table of closingParticiples, filled once per
 	// question by the first clause that needs it (issue #506).
 	closing *[]int
 	// lang is the language of the whole question (questionLanguage), read
 	// once by clauseTokens.
 	lang int
+	// clauseS and clauseE hold, per word, the start and the end of its
+	// clause (clauseOf), filled by clauseTokens once the clauses are final
+	// (issue #517): walked per call, the bounds cost time quadratic in a long
+	// clause that a check asks once per candidate (the year proof per year,
+	// the German Perfekt per auxiliary for its closing clause).
+	clauseS, clauseE []int
 }
 
 // clauseTokens tokenizes query into clauseWords.
@@ -115,6 +126,7 @@ func clauseTokens(query string) clauseWords {
 	}
 	c.markJoins(lower)
 	c.lang = c.languageOf(0, len(c.words))
+	c.written = append([]bool(nil), c.caps...)
 	// A question written in capitals, or with every word capitalized, says
 	// nothing by its case.
 	n, m := 0, 0
@@ -133,7 +145,263 @@ func clauseTokens(query string) clauseWords {
 	// The spoken forms colloquial maps are words of the language as well
 	// ("gab's" counts as "gab").
 	c.lang = c.languageOf(0, len(c.words))
+	c.coordinate()
+	c.indexClauses()
 	return c
+}
+
+// indexClauses fills clauseS and clauseE from starts.
+func (c *clauseWords) indexClauses() {
+	n := len(c.words)
+	c.clauseS, c.clauseE = make([]int, n), make([]int, n)
+	for i := 0; i < n; i++ {
+		if i > 0 && !c.starts[i] {
+			c.clauseS[i] = c.clauseS[i-1]
+		} else {
+			c.clauseS[i] = i
+		}
+	}
+	for i := n - 1; i >= 0; i-- {
+		if i+1 < n && !c.starts[i+1] {
+			c.clauseE[i] = c.clauseE[i+1]
+		} else {
+			c.clauseE[i] = i + 1
+		}
+	}
+}
+
+// clauseConjunctions join words, phrases and clauses. Between two clauses
+// that each have a finite verb of their own the conjunction starts a clause
+// (coordinate, issue #517): "Was wurde am Dienstag gemerged und was wird am
+// Donnerstag deployed?" asks for a Tuesday that has been and a Thursday to
+// come; between words and phrases it joins them ("am Montag und Dienstag",
+// "Wer hat am Montag gemerged und am Dienstag deployed?").
+var clauseConjunctions = toWordSet("und", "and", "oder", "or")
+
+// englishFiniteWords are the English auxiliaries, modals and forms of "to
+// be", and the forms of the simple past that are no participle: a clause
+// with one has a finite verb (finiteClause). The other forms on -ed are the
+// participle as often ("Will it be fixed and deployed on Monday?").
+var englishFiniteWords = toWordSet("will", "would", "shall", "should", "can", "could", "may", "might", "must",
+	"is", "are", "am", "was", "were", "has", "have", "had", "do", "does", "did",
+	"won't", "wouldn't", "can't", "cannot", "couldn't", "shouldn't", "isn't", "aren't", "wasn't", "weren't",
+	"hasn't", "haven't", "hadn't", "don't", "doesn't", "didn't",
+	"broke", "ran", "went", "saw", "wrote", "came", "took", "began", "fell")
+
+// germanSubjects are the German pronouns that are the subject wherever they
+// stand in a clause ("und am Dienstag testen wir"); "es" and "sie" are the
+// object as often and count only where they open it, and "ihr" is the
+// possessive and the dative as often ("Wir haben Max und ihr Team am Montag
+// getroffen") and counts nowhere.
+var germanSubjects = toWordSet("ich", "du", "er", "wir", "man")
+
+// bothLanguageWords are words of finiteWord's sets that are another word in
+// the other language: the German "was" and "am" are the English "was" and
+// "am", the English "war", "bin", "man" and "er" the German ones.
+var bothLanguageWords = toWordSet("was", "am", "war", "bin", "man", "er")
+
+// finiteWord reports whether w, in a sentence of the language lang, is a
+// finite verb a clause has of its own, or a German subject pronoun, which a
+// finite verb comes with (coordinate): a German sentence reads the German
+// sets, an English one the English, one of both languages either without
+// the words both languages have (bothLanguageWords).
+func finiteWord(w string, lang int) bool {
+	if futureVerbSet[w] {
+		return true
+	}
+	switch lang {
+	case langGerman:
+		return germanFiniteVerb(w) || germanSubjects[w]
+	case langEnglish:
+		return englishFiniteWords[w]
+	}
+	return !bothLanguageWords[w] && (germanFiniteVerb(w) || germanSubjects[w] || englishFiniteWords[w])
+}
+
+// finiteOpening reports whether the words [s, e) of c open with a subject or
+// an interrogative before its verb: an English subject pronoun ("and we will
+// ship", "and it broke"), "es" or "sie" ("und es läuft"), or an
+// interrogative before a word that is no preposition and no date ("und wer
+// reviewt am Donnerstag?", not "und was am Dienstag?").
+func (c clauseWords) finiteOpening(s, e, lang int) bool {
+	if s >= e {
+		return false
+	}
+	w := c.words[s]
+	if lang != langGerman && englishSubjects[w] && w != "who" || lang != langEnglish && (w == "es" || w == "sie") {
+		return true
+	}
+	if (germanInterrogatives[w] || englishEmbedOpeners[w]) && s+1 < e {
+		next := c.words[s+1]
+		return !firstPrepositions[next] && !englishNPJoiners[next] && !dateWord(next)
+	}
+	return false
+}
+
+// englishPerfectAux are the English auxiliaries of the perfect.
+var englishPerfectAux = toWordSet("has", "have", "had", "hasn't", "haven't", "hadn't", "'ve")
+
+// perfectBracket reports whether the words [s, e) of c, a conjunct in a
+// sentence of the language lang, have the verb of a Perfekt or a state: a
+// German auxiliary of the Perfekt with a participle at the conjunct's end
+// ("und am Dienstag ist der Build gebrochen", "und sind am Dienstag
+// zurückgerollt"), or an English auxiliary of the perfect before "been" or a
+// form on -ed ("and on Tuesday it has stopped"). The rules read "sein" with
+// the participle of a verb that does not take it as a state, which names no
+// time; behind a clause in the past the conjunct reports what followed, so
+// it keeps the tense it shares with that clause rather than a neutral one of
+// its own (issue #517).
+func (c clauseWords) perfectBracket(s, e, lang int) bool {
+	last := c.words[e-1]
+	closes := c.participleAt(s, e-1) || seinParticiple(last) || strings.Contains(last, "ge") && (strings.HasSuffix(last, "t") || strings.HasSuffix(last, "en"))
+	for i := s; i < e; i++ {
+		w := c.words[i]
+		if lang != langEnglish && perfektAux[w] && closes {
+			return true
+		}
+		if lang != langGerman && englishPerfectAux[w] && i+1 < e && englishPerfectParticiple(c.words[i+1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// englishPerfectParticiple reports whether w, right behind an English
+// auxiliary of the perfect, has the shape of a participle: a form on -ed, or
+// one on -en, -ne, -wn or -un of at least four letters ("broken", "been",
+// "gone", "done", "shown", "begun") that is no determiner or pronoun.
+func englishPerfectParticiple(w string) bool {
+	if englishParticiple(w) {
+		return true
+	}
+	if utf8.RuneCountInString(w) < 4 || englishDeterminers[w] || englishSubjects[w] {
+		return false
+	}
+	for _, end := range []string{"en", "ne", "wn", "un"} {
+		if strings.HasSuffix(w, end) {
+			return true
+		}
+	}
+	return false
+}
+
+// pastWord reports whether word k of c, in a conjunct that starts at s and a
+// clause that ends at e, in a sentence of the language lang, is a verb in the
+// past the conjunct names its time by (coordinate): a German simple past the
+// rules know, an English past form ("was", "did", "deployed") that no form of
+// "be" makes a passive, or an English verb on -ed right behind its subject
+// ("It worked on Monday").
+func (c clauseWords) pastWord(s, k, e, lang int) bool {
+	w := c.words[k]
+	if lang != langEnglish && germanPastVerbs[w] {
+		return true
+	}
+	if lang == langGerman || lang == langMixed && w == "was" {
+		return false
+	}
+	words := c.words[s:e]
+	return (englishPastVerbs[w] || englishFinitePast(words, k-s)) && !englishPassiveAt(words, k-s)
+}
+
+// coordinate starts a clause at each conjunction of clauseConjunctions that
+// stands between two clauses with a finite verb each (finiteWord or
+// finiteOpening, in the language of the sentence), issue #517, and takes the
+// conjunction out of the words: like a comma it is no word of either clause.
+// The conjuncts are the words from the last such start (or the clause's) to
+// the conjunction and from the conjunction to the next one (or the clause's
+// end); each word is read once.
+func (c *clauseWords) coordinate() {
+	var drop []int
+	lang, se := langMixed, 0
+	for s := 0; s < len(c.words); {
+		e := s + 1
+		for e < len(c.words) && !c.starts[e] {
+			e++
+		}
+		if s >= se {
+			var ss int
+			ss, se = c.sentenceOf(s)
+			lang = c.lang // the language of a question of one sentence
+			if ss > 0 || se < len(c.words) {
+				lang = c.sentenceLanguage(ss, se)
+			}
+		}
+		drop = c.coordinateClause(s, e, lang, drop)
+		s = e
+	}
+	c.dropWords(drop)
+}
+
+// conjunct is what coordinate reads of the words of a conjunct: a finite verb
+// of its own (finiteWord, finiteOpening), a verb in the past (pastWord), an
+// auxiliary of the German Perfekt.
+type conjunct struct{ finite, past, aux bool }
+
+// add reads word i of c into the conjunct that starts at s, in a clause that
+// ends at e.
+func (k conjunct) add(c *clauseWords, s, i, e, lang int) conjunct {
+	k.finite = k.finite || finiteWord(c.words[i], lang)
+	k.past = k.past || c.pastWord(s, i, e, lang)
+	k.aux = k.aux || lang != langEnglish && perfektAux[c.words[i]]
+	return k
+}
+
+// coordinateClause appends to drop the conjunctions of the clause [s, e)
+// that start a clause (coordinate) and marks the word behind each as a
+// clause start.
+func (c *clauseWords) coordinateClause(s, e, lang int, drop []int) []int {
+	ls := s
+	left := conjunct{finite: c.finiteOpening(s, e, lang)}
+	for j := s; j < e; {
+		if j == ls || !clauseConjunctions[c.words[j]] {
+			left = left.add(c, ls, j, e, lang)
+			j++
+			continue
+		}
+		re := j + 1
+		for re < e && !clauseConjunctions[c.words[re]] {
+			re++
+		}
+		scanned(re - j)
+		right := conjunct{finite: c.finiteOpening(j+1, re, lang)}
+		for k := j + 1; k < re; k++ {
+			right = right.add(c, j+1, k, e, lang)
+		}
+		// A conjunct whose verb is a Perfekt or a state behind one in the
+		// past reports what followed and shares that past ("Am Montag war
+		// alles grün und am Dienstag ist der Build gebrochen"); behind one in
+		// the present it has a tense of its own.
+		shared := j+1 < re && c.perfectBracket(j+1, re, lang) && (left.past || left.aux && c.participleAt(ls, j-1))
+		if left.finite && right.finite && j+1 < re && !shared {
+			drop = append(drop, j)
+			c.starts[j+1] = true
+			ls, left = j+1, right
+			left.finite = true
+		} else {
+			left = conjunct{left.finite || right.finite, left.past || right.past, left.aux || right.aux}
+		}
+		j = re
+	}
+	return drop
+}
+
+// dropWords takes the words at the sorted indexes drop out of c.
+func (c *clauseWords) dropWords(drop []int) {
+	if len(drop) == 0 {
+		return
+	}
+	n, k := 0, 0
+	for i := range c.words {
+		if k < len(drop) && drop[k] == i {
+			k++
+			continue
+		}
+		c.words[n], c.starts[n], c.caps[n], c.offs[n] = c.words[i], c.starts[i], c.caps[i], c.offs[i]
+		c.sentence[n], c.upper[n], c.joinedNext[n], c.written[n] = c.sentence[i], c.upper[i], c.joinedNext[i], c.written[i]
+		n++
+	}
+	c.words, c.starts, c.caps, c.offs = c.words[:n], c.starts[:n], c.caps[:n], c.offs[:n]
+	c.sentence, c.upper, c.joinedNext, c.written = c.sentence[:n], c.upper[:n], c.joinedNext[:n], c.written[:n]
 }
 
 // colloquialForms are spoken forms of German auxiliaries and verbs a
@@ -244,6 +512,135 @@ func (c clauseWords) inCompound(i int) bool {
 	return c.joinedNext[i] && !names(c.words[i+1]) || i > 0 && c.joinedNext[i-1] && !names(c.words[i-1])
 }
 
+// titleWords are the words of address and the titles a surname follows:
+// "Herr Freitag", "Frau Dr. Sonntag", "Prof. Montag", "Mr Friday", "Mrs.
+// Monday" (issue #517). titleArticles before "Herr" or "Frau" make it the
+// noun, which a weekday as a date may follow ("Kam die Frau Montag oder
+// Dienstag?").
+var (
+	titleWords    = toWordSet("herr", "herrn", "frau", "dr", "prof", "mr", "mrs", "ms", "miss")
+	titleArticles = toWordSet("der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "einem", "einen", "the", "a")
+)
+
+// surnameAt reports whether word i of c, a weekday, is a surname: right
+// behind a title word in its clause (issue #517) — "Was hat Herr Freitag
+// gesagt?" names no Friday. A title written in capitals is an acronym ("DR
+// Monday", "MS Teams"), and one behind an article the noun.
+func (c clauseWords) surnameAt(i int) bool {
+	if i == 0 || c.starts[i] || !titleWords[c.words[i-1]] || c.upper[i-1] || commonTitleWords[c.words[i-1]] && !c.caps[i-1] {
+		return false
+	}
+	return i < 2 || !titleArticles[c.words[i-2]]
+}
+
+// commonTitleWords are titles that are other words as well when written in
+// lower case: "ms" the milliseconds, "miss" the verb ("Did you miss
+// Monday?"); they are a title only with their capital (issue #517).
+var commonTitleWords = toWordSet("ms", "miss")
+
+// notADay reports whether word i of c, a weekday or the weekend, names no day:
+// it is joined to a word that names none (inCompound) or a surname
+// (surnameAt).
+func (c clauseWords) notADay(i int) bool {
+	return c.inCompound(i) || c.surnameAt(i)
+}
+
+// dayWeekdays returns the indexes of the words of c that are a weekday naming
+// a day (notADay), with the weekday each names.
+func (c clauseWords) dayWeekdays() []struct {
+	wd  time.Weekday
+	idx int
+	ref string
+} {
+	all := findAllWeekdays(c.words)
+	n := 0
+	for _, w := range all {
+		if !c.notADay(w.idx) {
+			all[n] = w
+			n++
+		}
+	}
+	return all[:n]
+}
+
+// dayPartHours are the words of a part of the day that may follow a weekday
+// and belong to it, with the hour matchTimeOfDay gives the part (issue
+// #517): "Tuesday morning", "saturday night", "Freitag Abend", "Montag früh",
+// "Montag-Abend". dayPartsBefore are those English puts before the weekday
+// ("early Tuesday", "late Friday"); behind it "early" and "late" say how a
+// thing came, not when ("Was the Monday release late?" is no night).
+var (
+	dayPartHours = map[string]int{
+		"morgen": 8, "früh": 8, "vormittag": 10, "mittag": 12, "nachmittag": 15, "abend": 19, "nacht": 23, "spät": 23,
+		"morgens": 8, "vormittags": 10, "mittags": 12, "nachmittags": 15, "abends": 19, "nachts": 23,
+		"morning": 8, "noon": 12, "midday": 12, "afternoon": 15, "evening": 19, "night": 23,
+	}
+	dayPartsBefore = map[string]int{"early": 8, "late": 23}
+	// compoundDayParts are the parts of the day German compounds a weekday
+	// with: "Montagmorgen", "Dienstagabend", "Freitagnachmittag".
+	compoundDayParts = map[string]int{"morgen": 8, "früh": 8, "vormittag": 10, "mittag": 12, "nachmittag": 15, "abend": 19, "nacht": 23}
+)
+
+// weekdayCompound returns the weekday and the hour of a German weekday
+// compounded with a part of the day ("montagmorgen", "dienstagabend"), issue
+// #517.
+func weekdayCompound(w string) (time.Weekday, int, bool) {
+	if len(w) < len("montagfrüh") {
+		return 0, 0, false
+	}
+	for wd, name := range weekdayStemsDE {
+		if rest, ok := strings.CutPrefix(w, name); ok {
+			if h, ok := compoundDayParts[rest]; ok {
+				return time.Weekday(wd), h, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+// weekdayStemsDE are the German weekday names in lower case, by weekday.
+var weekdayStemsDE = func() (out [7]string) {
+	for i, name := range weekdayNameDE {
+		out[i] = strings.ToLower(name)
+	}
+	return out
+}()
+
+// weekdayWord returns the weekday w names: a weekday name of either language
+// or a German weekday compounded with a part of the day.
+func weekdayWord(w string) (time.Weekday, bool) {
+	if wd, ok := weekdayMapDE[w]; ok {
+		return wd, true
+	}
+	if wd, ok := weekdayMapEN[w]; ok {
+		return wd, true
+	}
+	wd, _, ok := weekdayCompound(w)
+	return wd, ok
+}
+
+// dayPartAt returns the hour of the part of the day that belongs to word i
+// of c, a weekday (issue #517): the part it is compounded with
+// ("Montagmorgen"), the word of a part of the day right behind it in its
+// clause ("Tuesday morning", "Freitag Abend", "Montag-Abend") or, in
+// English, right before it ("early Tuesday", "late Friday").
+func (c clauseWords) dayPartAt(i int) (int, bool) {
+	if _, h, ok := weekdayCompound(c.words[i]); ok {
+		return h, true
+	}
+	if i+1 < len(c.words) && !c.starts[i+1] {
+		if h, ok := dayPartHours[c.words[i+1]]; ok {
+			return h, true
+		}
+	}
+	if i > 0 && !c.starts[i] {
+		if h, ok := dayPartsBefore[c.words[i-1]]; ok {
+			return h, true
+		}
+	}
+	return 0, false
+}
+
 // dashAt reports whether the byte i of lower is a hyphen between spaces, a
 // dash.
 func dashAt(lower string, i int) bool {
@@ -278,8 +675,14 @@ func abbreviation(w string) bool {
 	return len(w) <= 2 && strings.Trim(w, "0123456789") == ""
 }
 
-// clauseOf returns the words [s, e) of the clause that holds word i.
+// clauseOf returns the words [s, e) of the clause that holds word i: from
+// the table of indexClauses, or — for words whose clauses are not final yet
+// — walked, which counts as the words it reads (ruleScanHook).
 func (c clauseWords) clauseOf(i int) (s, e int) {
+	if c.clauseS != nil {
+		scanned(1)
+		return c.clauseS[i], c.clauseE[i]
+	}
 	s = i
 	for s > 0 && !c.starts[s] {
 		s--
@@ -288,6 +691,7 @@ func (c clauseWords) clauseOf(i int) (s, e int) {
 	for e < len(c.words) && !c.starts[e] {
 		e++
 	}
+	scanned(e - s)
 	return s, e
 }
 
@@ -724,10 +1128,16 @@ func (c clauseWords) wholeTense() string {
 // year or a day date —, as clauseTokens' offsets count.
 func (c clauseWords) firstDateWord(query string) (int, bool) {
 	for i, w := range c.words {
-		_, de := weekdayMapDE[w]
+		_, de := weekdayWord(w)
 		_, en := weekdayMapEN[w]
 		_, month := lookupMonth(w)
 		_, year := isYear(w)
+		// A weekday or the weekend that names no day (notADay: in a
+		// compound, a surname) is no date word: "The friday-deploy-script
+		// failed, but we will ship on Monday" asks for Monday (issue #517).
+		if (de || en || w == "wochenende" || w == "weekend") && c.notADay(i) {
+			continue
+		}
 		if de || en || w == "wochenende" || w == "weekend" || month && !monthWords[w] || year || dayKeywords[w] {
 			if ds := findDayDates(query); len(ds) > 0 && ds[0].start < c.offs[i] && len(query) == len(strings.ToLower(query)) {
 				return ds[0].start, true
@@ -1053,7 +1463,7 @@ func (c clauseWords) afterFirstConstituent(s, e int) int {
 // dateWord reports whether w names a day, a week, a month or a year: a
 // weekday, the weekend, a month name, a four-digit year or a day date.
 func dateWord(w string) bool {
-	_, de := weekdayMapDE[w]
+	_, de := weekdayWord(w)
 	_, en := weekdayMapEN[w]
 	_, month := lookupMonth(w)
 	_, year := isYear(w)
@@ -1065,8 +1475,11 @@ func dateWord(w string) bool {
 // simple past (germanPastShape) and is no noun — written with an upper-case
 // letter where no clause starts —, no day word on -te ("heute", "letzte",
 // "nächste", "Mitte") and no past subjunctive of a modal (modalSubjunctives).
+// A clause has one finite verb: a word right before a finite verb the rules
+// know is none, whatever its shape ("ab 2050 punkten gilt der Block als
+// relevant": "punkten" is the noun the number counts), issue #517.
 func (c clauseWords) finitePastAt(i, e int) bool {
-	if i < 0 || i >= e || c.caps[i] && !c.starts[i] {
+	if i < 0 || i >= e || c.caps[i] && !c.starts[i] || i+1 < e && germanFiniteVerb(c.words[i+1]) {
 		return false
 	}
 	w := c.words[i]
@@ -1124,6 +1537,9 @@ func englishPassiveAt(words []string, i int) bool {
 		case englishBeForms[w]:
 			scanned(i - j)
 			return true
+		case (pastVerbSet[w] || englishParticiple(w)) && j+2 == i && (words[j+1] == "and" || words[j+1] == "or"):
+			// A participle coordinated with this one shares its auxiliary:
+			// "Will it be fixed and deployed on Monday?" (issue #517).
 		case englishNotPassive[w] || pastVerbSet[w] || englishParticiple(w) || englishClauseOpeners[w],
 			englishSubjects[w] && w != "who" && (j == 0 || !englishBeForms[words[j-1]]),
 			englishDeterminers[w] && j > 0 && !englishBeForms[words[j-1]] && !englishNPJoiners[words[j-1]]:
@@ -1300,18 +1716,26 @@ var (
 // Montag zu deployen"). A clause with none of them ("Am Montag,", "On
 // Monday,") takes the tense of the question.
 func (c clauseWords) hasOwnVerb(s, e int) bool {
-	if clauseOpeners[c.words[s]] {
+	if clauseOpeners[c.words[s]] || hortatives[c.words[s]] {
 		return true
 	}
 	for i := s; i < e; i++ {
 		w := c.words[i]
-		if subjectWords[w] || copulaWords[w] || pastVerbSet[w] || futureVerbSet[w] || perfektAux[w] ||
+		if subjectWords[w] || copulaWords[w] || pastVerbSet[w] || futureVerbSet[w] || perfektAux[w] || germanFiniteWords[w] ||
 			w == "zu" && i+1 < e {
 			return true
 		}
 	}
 	return c.participleAt(s, e-1)
 }
+
+// hortatives are the imperative of "lassen" that opens a German clause of a
+// proposal ("Lass uns am Freitag reden", "Lasst uns …", "Lassen Sie uns
+// …"): the clause has a verb of its own, the imperative, which names no past
+// (issue #517). Without it the clause took the tense of the whole question —
+// in "Lass uns am Freitag über den Bug reden, den wir am Montag hatten" the
+// past of the relative clause.
+var hortatives = toWordSet("lass", "lasst", "lassen")
 
 // perfektAux are the finite forms of "haben" and "sein", and the past
 // subjunctive of both ("hätte gemacht", "wäre gegangen"), that make the
@@ -1536,7 +1960,9 @@ func (c clauseWords) clausePerfekt(s, e int, closing *[]int) bool {
 			continue
 		}
 		for j := i + 1; j < e && j <= i+5; j++ {
-			if w := c.words[j]; knownParticiples[w] && !participleExceptions[w] || perfektParticiplePat.MatchString(w) || ierenParticiple(w) {
+			// The exceptions hold for the pattern as for the list: "haben wir
+			// am montag gehalt auf dem konto?" has no participle (issue #517).
+			if w := c.words[j]; (knownParticiples[w] || perfektParticiplePat.MatchString(w) || ierenParticiple(w)) && !participleExceptions[w] {
 				return true
 			}
 		}
@@ -1852,6 +2278,18 @@ func hasRecurrence(tokens []string) bool {
 	return false
 }
 
+// recurrence is hasRecurrence for the words of c, without a weekday plural
+// that names no day (notADay): the "Mittwochs" of "Was war am Montag mit dem
+// Mittwochs-Job?" asks for no Wednesdays (issue #517).
+func (c clauseWords) recurrence() bool {
+	for i, tok := range c.words {
+		if recurrenceKeywords[tok] || isWeekdayPlural(tok) && !c.notADay(i) {
+			return true
+		}
+	}
+	return false
+}
+
 // isWeekdayPlural returns true for German weekday names with -s suffix
 // (dienstags, montags, mittwochs, donnerstags, freitags, samstags, sonntags).
 func isWeekdayPlural(tok string) bool {
@@ -2041,6 +2479,50 @@ func leftToWindow(query string, matches []dayDate) bool {
 	return !yearless
 }
 
+// reEdgeBefore matches an edge word of matchOpenEdge (with "dem" or "the")
+// right before a day date; its group is the word.
+var reEdgeBefore = regexp.MustCompile(`(?i)\b(ab|vor|nach|before|after)(?:\s+(?:dem|the))?\s+$`)
+
+// opposingEdges reports whether query has two day dates, each right behind
+// an edge word of matchOpenEdge, one opening a window towards the future
+// ("ab", "nach", "after") and one towards the past ("vor", "before"), that
+// leave a day between them: the window between them, which matchOpenEdge
+// reads as it reads two years ("What happened after 2026-03-15 and before
+// 2026-03-20?" is 16 to 19 March, issue #517). Edges that leave no day
+// between them ("vor dem 15.03.2026 und nach dem 20.03.2026" asks for the
+// time outside) stay the two days. Each date reads only the words right
+// before it (wordBefore, and the one before an article).
+func opposingEdges(query string, matches []dayDate) bool {
+	if len(matches) != 2 {
+		return false
+	}
+	lower := strings.ToLower(query)
+	var start, end time.Time
+	from, until := 0, 0
+	for _, m := range matches {
+		before := wordBefore(lower, m.start)
+		if w := strings.TrimRight(before, asciiSpace); w == "dem" || w == "the" {
+			before = wordBefore(lower, m.start-len(before)) + before
+		}
+		g := reEdgeBefore.FindStringSubmatch(before)
+		if g == nil {
+			return false
+		}
+		switch g[1] {
+		case "vor", "before":
+			until++
+			end = m.day.AddDate(0, 0, -1)
+		case "ab":
+			from++
+			start = m.day
+		default:
+			from++
+			start = m.day.AddDate(0, 0, 1)
+		}
+	}
+	return from == 1 && until == 1 && !end.Before(start)
+}
+
 // dayDateLeftToWindow returns the day date of query left to the window
 // rules (leftToWindow), formatted, or "".
 func dayDateLeftToWindow(query string) string {
@@ -2078,7 +2560,7 @@ func matchDayDates(query string, deferToSeitBis bool) *TemporalResult {
 			return rangeResult(sref+" – "+query[matches[0].dateStart:matches[0].dateEnd], fmtDate(start), fmtDate(matches[0].day), "range")
 		}
 	}
-	if deferToSeitBis && leftToWindow(query, matches) {
+	if deferToSeitBis && (leftToWindow(query, matches) || opposingEdges(query, matches)) {
 		return nil
 	}
 	ref := func(m dayDate) string { return query[m.dateStart:m.dateEnd] }
@@ -2786,28 +3268,63 @@ var (
 func matchTimeOfDay(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
 	today := now.Format("2006-01-02")
+	var r *TemporalResult
 	// Reference hour per pattern (middle of each daypart).
-	mk := func(ref string, hour int) *TemporalResult {
+	mk := func(ref string, hour int) {
 		h := hour
-		return &TemporalResult{
+		r = &TemporalResult{
 			Dates: []TemporalDate{{Ref: ref, Date: today, Dir: "today", Hour: &h}},
 		}
 	}
 	switch {
 	case reMorgens.MatchString(lower):
-		return mk("morgens", 8) // 07:00-10:00
+		mk("morgens", 8) // 07:00-10:00
 	case reVormittags.MatchString(lower):
-		return mk("vormittags", 10) // 10:00-12:00
+		mk("vormittags", 10) // 10:00-12:00
 	case reMittags.MatchString(lower):
-		return mk("mittags", 12) // 12:00-14:00
+		mk("mittags", 12) // 12:00-14:00
 	case reNachmittags.MatchString(lower):
-		return mk("nachmittags", 15) // 14:00-17:00
+		mk("nachmittags", 15) // 14:00-17:00
 	case reAbends.MatchString(lower):
-		return mk("abends", 19) // 17:00-22:00
+		mk("abends", 19) // 17:00-22:00
 	case reNachts.MatchString(lower):
-		return mk("nachts", 23) // 22:00-06:00
+		mk("nachts", 23) // 22:00-06:00
+	default:
+		return nil
 	}
-	return nil
+	// A part of the day that belongs to a weekday is a time of that day, not
+	// of today: the weekday rules read it with its hour (dayPartAt). And a
+	// weekday that names a day answers before a time-of-day word that belongs
+	// to none, unless the word is today's ("heute Abend", "this morning"):
+	// "early", "late", "früh" and "spät" say how a thing came as often as
+	// when ("Was the Monday release late?", "Ist das Meeting am Dienstag zu
+	// früh angesetzt?"), issue #517.
+	c := clauseTokens(query)
+	weekdays := c.dayWeekdays()
+	for _, w := range weekdays {
+		if _, ok := c.dayPartAt(w.idx); ok {
+			return nil
+		}
+	}
+	if len(weekdays) > 0 && !c.todaysDayPart() {
+		return nil
+	}
+	return r
+}
+
+// todayWords make the part of the day right behind them today's ("heute
+// Abend", "this morning"), issue #517.
+var todayWords = toWordSet("heute", "today", "this")
+
+// todaysDayPart reports whether c has a word of a part of the day right
+// behind a word of todayWords.
+func (c clauseWords) todaysDayPart() bool {
+	for i := 1; i < len(c.words); i++ {
+		if _, ok := dayPartHours[c.words[i]]; ok && todayWords[c.words[i-1]] {
+			return true
+		}
+	}
+	return false
 }
 
 func matchRelativeDays(query string, now time.Time) *TemporalResult {
@@ -2906,6 +3423,28 @@ func matchWeekend(query string, now time.Time) *TemporalResult {
 	return rangeResult("am Wochenende", fmtDate(nextSat), fmtDate(nextSun), "future")
 }
 
+// weekdayMentions counts the weekday names in lower, a lowercased question,
+// as substrings (the German names, the English ones): an upper bound of its
+// weekday words, read without tokenizing it.
+func weekdayMentions(lower string) int {
+	n := 0
+	for i := range weekdayStemsDE {
+		n += strings.Count(lower, weekdayStemsDE[i]) + strings.Count(lower, strings.ToLower(weekdayNameEN[i]))
+	}
+	return n
+}
+
+// afterCapital reports whether word i of c stands right behind a word in its
+// clause that is written with a capital and is no acronym, not the word that
+// opens the clause. It reads the case as written (written), also where a
+// question capitalizes most of its words: German capitalizes its nouns, and a
+// short question with a name is mostly capitals ("Am Dienstag hat Anna
+// Freitag angerufen"). A question with every word capitalized loses a
+// weekday beyond the first here, as the rules lost it before issue #517.
+func (c clauseWords) afterCapital(i int) bool {
+	return i > 0 && !c.starts[i] && !c.starts[i-1] && c.written[i-1] && !c.upper[i-1]
+}
+
 // findAllWeekdays returns all weekday tokens found in the query with their positions.
 func findAllWeekdays(tokens []string) []struct {
 	wd  time.Weekday
@@ -2930,6 +3469,12 @@ func findAllWeekdays(tokens []string) []struct {
 				idx int
 				ref string
 			}{wd, i, weekdayNameEN[wd]})
+		} else if wd, _, ok := weekdayCompound(tok); ok {
+			results = append(results, struct {
+				wd  time.Weekday
+				idx int
+				ref string
+			}{wd, i, weekdayNameDE[wd]})
 		}
 	}
 	return results
@@ -2937,27 +3482,35 @@ func findAllWeekdays(tokens []string) []struct {
 
 func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
-	tokens := ruleTokenize(query)
 
+	// First: every weekday of the question that names a day (notADay: no
+	// compound, no surname) — a disjunction or conjunction ("Montag oder
+	// Dienstag", "Monday or Tuesday") and two clauses with a weekday each,
+	// with or without a conjunction ("Am Mittwoch hatten wir 3 Incidents, am
+	// Freitag werden wir das Postmortem halten", issue #517).
 	hasConjunction := strings.Contains(lower, " und ") || strings.Contains(lower, " and ")
 	hasDisjunction := strings.Contains(lower, " oder ") || strings.Contains(lower, " or ")
-
-	if !hasConjunction && !hasDisjunction {
-		return nil
+	if !hasConjunction && !hasDisjunction && weekdayMentions(lower) < 2 {
+		return nil // no two weekdays, no conjunction: nothing for either branch
 	}
-
-	// First: check for weekday disjunction/conjunction ("Montag oder Dienstag", "Monday or Tuesday"),
-	// not counting a weekday in a compound (inCompound).
 	c := clauseTokens(query)
-	weekdays := findAllWeekdays(tokens)
-	n := 0
-	for _, w := range weekdays {
-		if !c.inCompound(w.idx) {
-			weekdays[n] = w
-			n++
+	weekdays := c.dayWeekdays()
+	if !hasConjunction && !hasDisjunction {
+		// Without a conjunction a weekday beyond the first right behind a
+		// word written with a capital inside its clause may be a surname
+		// ("Am Dienstag hat Max Montag die Migration gemacht", "Am Mittwoch
+		// hat die Frau Montag angerufen"); it counts only elsewhere ("…, am
+		// Freitag werden wir …", "Deployed Monday, rolled back Wednesday"),
+		// issue #517.
+		n := 0
+		for k, w := range weekdays {
+			if k == 0 || !c.afterCapital(w.idx) {
+				weekdays[n] = w
+				n++
+			}
 		}
+		weekdays = weekdays[:n]
 	}
-	weekdays = weekdays[:n]
 	if len(weekdays) >= 2 {
 		// Each weekday by the tense of its own clause (tenseAt): "We
 		// deployed on Monday, and we will deploy on Monday" names two days
@@ -2975,14 +3528,20 @@ func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 			key := fmtDate(d)
 			if !seen[key] {
 				seen[key] = true
-				dates = append(dates, TemporalDate{
-					Ref: w.ref, Date: key, Dir: dir,
-				})
+				td := TemporalDate{Ref: w.ref, Date: key, Dir: dir}
+				if h, ok := c.dayPartAt(w.idx); ok {
+					td.Hour = &h
+				}
+				dates = append(dates, td)
 			}
 		}
 		if len(dates) >= 2 {
 			return multiResult(dates)
 		}
+	}
+
+	if !hasConjunction && !hasDisjunction {
+		return nil
 	}
 
 	// Then: simple keyword conjunction/disjunction (heute und morgen, etc.)
@@ -3020,12 +3579,13 @@ func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 }
 
 func matchWeekday(query string, tokens []string, now time.Time) *TemporalResult {
-	// The first weekday not in a compound (inCompound, issue #506).
+	// The first weekday that names a day: not in a compound (issue #506), not
+	// a surname (issue #517).
 	c := clauseTokens(query)
 	var wd time.Weekday
 	wdIdx, found := -1, false
 	for i := range c.words {
-		if w, _, ok := findWeekday(c.words[i : i+1]); ok && !c.inCompound(i) {
+		if w, ok := weekdayWord(c.words[i]); ok && !c.notADay(i) {
 			wd, wdIdx, found = w, i, true
 			break
 		}
@@ -3054,7 +3614,13 @@ func matchWeekday(query string, tokens []string, now time.Time) *TemporalResult 
 	if _, ok := weekdayMapEN[tokens[wdIdx]]; ok {
 		ref = weekdayNameEN[wd]
 	}
-	return singleResult(ref, fmtDate(d), dir)
+	r := singleResult(ref, fmtDate(d), dir)
+	// A part of the day that belongs to the weekday gives the hour: the day
+	// is the weekday's, the hour the part's (issue #517).
+	if h, ok := c.dayPartAt(wdIdx); ok {
+		r.Dates[0].Hour = &h
+	}
+	return r
 }
 
 func matchSimpleKeywords(query string, now time.Time) *TemporalResult {
@@ -3407,10 +3973,11 @@ func (p *yearProof) clause(s, e int) clauseCount {
 // off.
 func (p *yearProof) stands(off int) bool {
 	s, e := 0, len(p.c.words)
-	if i := p.c.wordAt(off); i >= 0 {
+	i := p.c.wordAt(off)
+	if i >= 0 {
 		s, e = p.c.clauseOf(i)
 	}
-	if p.clause(s, e).word {
+	if p.clause(s, e).word || i >= 0 && p.c.countsAParticipleNoun(i+1, e) {
 		return false
 	}
 	if !p.read {
@@ -3429,6 +3996,29 @@ func (p *yearProof) stands(off int) bool {
 		}
 	}
 	return true
+}
+
+// countsAParticipleNoun reports whether the year at word y of c, in the
+// clause that ends at e, counts the noun behind it (issue #517): an English
+// participle and a plural noun follow it, an attribute and its noun ("After
+// 2021 failed logins the account locks"), and the noun phrase ends there —
+// with its clause, or before a determiner or a subject pronoun that starts
+// what the phrase leads into. Before a verb the noun phrase is the subject
+// and the year the window's edge ("After 2025 failed logins lock the
+// account", "Before 2025 released versions had no SBOM").
+func (c clauseWords) countsAParticipleNoun(y, e int) bool {
+	if y+2 >= e || !englishParticiple(c.words[y+1]) || !englishPlural(c.words[y+2]) {
+		return false
+	}
+	return y+3 == e || englishDeterminers[c.words[y+3]] || englishSubjects[c.words[y+3]]
+}
+
+// englishPlural reports whether w has the shape of an English plural noun:
+// a word of at least four letters on -s that is no English verb form of
+// "be", "have" or "do" and does not end in -ss ("logins", "attempts",
+// "builds"; not "was", "has", "does", "access").
+func englishPlural(w string) bool {
+	return utf8.RuneCountInString(w) >= 4 && strings.HasSuffix(w, "s") && !strings.HasSuffix(w, "ss") && !englishNotPassive[w] && !englishBeForms[w]
 }
 
 // hasCountWord reports whether words hold a word of countWords or one that
@@ -3645,8 +4235,9 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 	}
 	query = dateSpaces.Replace(query)
 	now = truncDate(now)
-	tokens := ruleTokenize(query)
-	recur := hasRecurrence(tokens)
+	cw := clauseTokens(query)
+	tokens := cw.words
+	recur := cw.recurrence()
 
 	// Priority 1: day dates, ISO and dot form (most specific) — pure linear
 	if r := matchDayDates(query, true); r != nil {
@@ -3748,7 +4339,7 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 
 	// Priority 10: Multi-keyword (heute und morgen, Montag oder Dienstag)
 	if r := matchMultiKeyword(query, now); r != nil {
-		if len(findAllWeekdays(tokens)) >= 2 {
+		if len(cw.dayWeekdays()) >= 2 {
 			if recur {
 				r.DimensionWeights = dwWeekday()
 			} else {

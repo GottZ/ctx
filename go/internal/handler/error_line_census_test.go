@@ -46,6 +46,7 @@ var rawErrorLines = map[string]int{
 	"confirm_core.go":         2, // staged payload unmarshal and parse
 	"context_manage.go":       1, // answer projection of a read block
 	"context_store.go":        2, // detached write-log and temporal goroutines
+	"health_notice.go":        1, // the database ping of a probe round, on the round's own context (issue #519)
 	"ingest.go":               2, // detached write-log and temporal goroutines
 	"llmlog.go":               2, // query build and row scan
 	"loop_guard.go":           1, // federation hop chain without instance identity (wiring defect)

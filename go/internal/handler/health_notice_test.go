@@ -56,7 +56,7 @@ func healthCalls(t *testing.T, snap []backends.Backend, n int) *rejectLogCapture
 	pool := brokenPool(t)
 	logs := installRejectLogCapture(t)
 	for range n {
-		HealthStatus(context.Background(), pool, snap, true, "ok")
+		HealthStatus(context.Background(), pool, seededBackends(snap...), true, "ok")
 	}
 	return logs
 }
@@ -183,9 +183,9 @@ func TestHealthLogsAnUnreachableBackendOncePerChange(t *testing.T) {
 		pool := brokenPool(t)
 		logs := installRejectLogCapture(t)
 		for range 3 {
-			HealthStatus(ctx, pool, snap, true, "ok")
+			HealthStatus(ctx, pool, seededBackends(snap...), true, "ok")
 		}
-		HealthStatus(context.Background(), pool, snap, true, "ok") // still up: no recovery line
+		HealthStatus(context.Background(), pool, seededBackends(snap...), true, "ok") // still up: no recovery line
 		for _, role := range i504Roles {
 			for _, l := range []slog.Level{slog.LevelError, slog.LevelWarn, slog.LevelInfo} {
 				if recs := healthRoleLines(logs, l, role, row.Name); len(recs) != 0 {
@@ -207,56 +207,58 @@ func TestHealthForgetsTheDreamRoleWhileDreamIsOff(t *testing.T) {
 
 	pool := brokenPool(t)
 	for range 2 {
-		HealthStatus(context.Background(), pool, embedOnly, false, "ok")
+		HealthStatus(context.Background(), pool, seededBackends(embedOnly...), false, "ok")
 	}
 	logs := healthCalls(t, embedOnly, 3)
 	wantOneLine(t, logs, backends.RoleDream, "", slog.LevelWarn, "ctx backends seed", 2)
 }
 
 // TestHealthOneLinePerChangeUnderConcurrency — many /health requests at the
-// same time observe one change of state: exactly one line per role.
+// same time observe one change of state: exactly one line per role. The
+// requests of a burst share their probe round (issue #519), so a burst is one
+// observation, or a few when late requests start a round of their own; the
+// recovery, which wants three answers in a row, gets three bursts.
 func TestHealthOneLinePerChangeUnderConcurrency(t *testing.T) {
 	var down atomic.Bool
 	row := operatorRow("i504-conc", flakyBackend(t, &down), i504Roles...)
 	serving := []backends.Backend{row}
 	pool := brokenPool(t)
-	burst := func(t *testing.T, snap []backends.Backend) *rejectLogCapture {
-		t.Helper()
-		logs := installRejectLogCapture(t)
+	burst := func(snap []backends.Backend) {
+		bp := seededBackends(snap...)
 		var wg sync.WaitGroup
 		start := make(chan struct{})
 		for range 32 {
 			wg.Go(func() {
 				<-start
-				HealthStatus(context.Background(), pool, snap, true, "ok")
+				HealthStatus(context.Background(), pool, bp, true, "ok")
 			})
 		}
 		close(start)
 		wg.Wait()
-		return logs
 	}
 	healthCalls(t, serving, 1) // a known state
 
 	for _, step := range []struct {
-		name    string
-		snap    []backends.Backend
-		down    bool
-		backend string
-		level   slog.Level
-		want    string
-		debug   int
+		name       string
+		snap       []backends.Backend
+		down       bool
+		bursts     int
+		backend    string
+		warn, info int
 	}{
-		{"the roles lose their backend", nil, false, "", slog.LevelWarn, "ctx backends seed", 31},
-		{"the roles get it back", serving, false, "", slog.LevelInfo, "enabled again", 0},
-		{"the backend stops answering", serving, true, row.Name, slog.LevelWarn, "backend ping failed", 31},
-		// two answers at DEBUG, the INFO with the third, nothing after it
-		{"the backend answers again", serving, false, row.Name, slog.LevelInfo, "answers again", recoveryAnswers - 1},
+		{"the roles lose their backend", nil, false, 1, "", 1, 0},
+		{"the roles get it back", serving, false, 1, "", 0, 1},
+		{"the backend stops answering", serving, true, 1, row.Name, 1, 0},
+		{"the backend answers again", serving, false, recoveryAnswers, row.Name, 0, 1},
 	} {
 		t.Run(step.name, func(t *testing.T) {
 			down.Store(step.down)
-			logs := burst(t, step.snap)
+			logs := installRejectLogCapture(t)
+			for range step.bursts {
+				burst(step.snap)
+			}
 			for _, role := range i504Roles {
-				wantOneLine(t, logs, role, step.backend, step.level, step.want, step.debug)
+				wantLines(t, logs, role, step.backend, step.warn, step.info)
 			}
 		})
 	}

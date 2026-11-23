@@ -1,8 +1,6 @@
 package handler
 
 import (
-	"context"
-	"errors"
 	"log/slog"
 	"sync"
 
@@ -18,11 +16,13 @@ import (
 // answer. The answer of /health does not change.
 //
 // One value serves the process (healthLines): /health and the status
-// collector (StatusCollector.buildCheap) probe through the same HealthStatus
-// with the same budget, and a change of state logs once however many of
-// their calls observe the same state at the same time (calls that observe
-// different states, on snapshots taken before and after a reload, log each
-// change they apply). The state is kept where its reason is found:
+// collector (StatusCollector.buildCheap) probe through the same HealthStatus,
+// in rounds (healthRound, issue #519) that every call arriving meanwhile
+// shares, and a round records what it finds here in the order the rounds
+// began — a round that ends after a newer round applied its findings is
+// dropped (current) — so a change of state logs once, also when a reload
+// falls between concurrent calls. The state is kept where its reason is
+// found:
 //
 //   - per role, why no backend of it is probed (roleProbed): the shared pool
 //     has no row of the role, or its rows are all disabled. A WARN names the
@@ -48,17 +48,20 @@ import (
 //   - the database ping (database): an ERROR when it starts failing, an INFO
 //     when it answers again.
 //
-// A probe whose caller left (its context cancelled: the client of /health
-// went away, the status collector stopped) observes nothing about the target:
-// it is neither an outage nor a recovery, logs at DEBUG only and changes no
-// state. A role that is not probed (dream while dream.enabled is off) is
-// forgotten.
+// A caller that leaves stops waiting for its round, not the round: what the
+// round finds is recorded whatever its callers do, so a backend that hangs is
+// found down when the round's budget ends (issue #519). A role that is not
+// probed (dream while dream.enabled is off) is forgotten.
 type healthNotice struct {
 	mu          sync.Mutex
 	roles       map[string]roleProbe  // role → what its last probe found
 	served      map[string]roleServed // role with candidates → whether its walk reached one that answers
 	unreachable map[probeKey]int      // role and backend found unreachable → probes in a row it answered since
 	dbDown      bool
+
+	rounds  map[healthRoundKey]*healthRound // the rounds in flight
+	started uint64                          // the number of the last round begun
+	applied uint64                          // the number of the newest round that recorded a finding
 }
 
 // healthRecoveryAnswers is the number of probes in a row a backend found
@@ -102,10 +105,26 @@ type roleServed struct {
 // URL the probe requests.
 type probeKey struct{ role, name, host string }
 
+// current reports whether round seq may record a finding: no newer round has
+// recorded one. A round begins with the snapshot it probes (healthNotice.round),
+// so a round over a snapshot taken before a reload that ends after a round
+// over the new snapshot recorded is dropped, at DEBUG — its findings describe
+// a pool that is gone, and applying them would log a change back and forth.
+// Called with n.mu held.
+func (n *healthNotice) current(seq uint64) bool {
+	if seq < n.applied {
+		slog.Debug("health check: a probe round ended after a newer one recorded its findings — its findings are dropped",
+			"round", seq, "newer_round", n.applied)
+		return false
+	}
+	n.applied = seq
+	return true
+}
+
 // roleProbed records which candidates the probe of role found (rows: the
 // shared pool's rows of the role, enabled or not) and logs a change of the
 // role's state.
-func (n *healthNotice) roleProbed(role string, rows int, candidates []*backends.Backend) {
+func (n *healthNotice) roleProbed(seq uint64, role string, rows int, candidates []*backends.Backend) {
 	probe := roleCandidates
 	switch {
 	case len(candidates) > 0:
@@ -116,6 +135,9 @@ func (n *healthNotice) roleProbed(role string, rows int, candidates []*backends.
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if !n.current(seq) {
+		return
+	}
 	prev, seen := n.roles[role]
 	if n.roles == nil {
 		n.roles = make(map[string]roleProbe)
@@ -144,10 +166,13 @@ func (n *healthNotice) roleProbed(role string, rows int, candidates []*backends.
 // forgets the unreachable backends of role the walk did not reach and logs a
 // change of the role's served state (see healthNotice). A walk without
 // candidates leaves the role to roleProbed's line and forgets its served
-// state. A walk its caller abandoned does not end here.
-func (n *healthNotice) walked(role string, reached []*backends.Backend, served bool) {
+// state.
+func (n *healthNotice) walked(seq uint64, role string, reached []*backends.Backend, served bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if !n.current(seq) {
+		return
+	}
 	n.retain(role, reached)
 	if len(reached) == 0 {
 		delete(n.served, role)
@@ -199,10 +224,13 @@ func (n *healthNotice) retain(role string, candidates []*backends.Backend) {
 
 // pinged records the result of the probe of backend b for role (err nil:
 // reachable) and logs a change of state.
-func (n *healthNotice) pinged(ctx context.Context, role string, b *backends.Backend, err error) {
+func (n *healthNotice) pinged(seq uint64, role string, b *backends.Backend, err error) {
 	key := probeKey{role: role, name: b.Name, host: b.Host}
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if !n.current(seq) {
+		return
+	}
 	answers, down := n.unreachable[key]
 	switch {
 	case err == nil && !down:
@@ -213,8 +241,6 @@ func (n *healthNotice) pinged(ctx context.Context, role string, b *backends.Back
 	case err == nil:
 		delete(n.unreachable, key)
 		slog.Info("health check: backend answers again", "backend", b.Name, "role", role, "answers_in_a_row", healthRecoveryAnswers)
-	case callerLeft(ctx, err):
-		slog.Debug("health check: backend ping abandoned, its caller left", "backend", b.Name, "role", role, "error", err)
 	case down:
 		n.unreachable[key] = 0
 		slog.Debug("health check: backend ping failed", "backend", b.Name, "role", role, "error", err)
@@ -228,25 +254,26 @@ func (n *healthNotice) pinged(ctx context.Context, role string, b *backends.Back
 }
 
 // forgetRole drops the state of a role that is not probed.
-func (n *healthNotice) forgetRole(role string) {
+func (n *healthNotice) forgetRole(seq uint64, role string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if !n.current(seq) {
+		return
+	}
 	delete(n.roles, role)
 	delete(n.served, role)
 	n.retain(role, nil)
 }
 
 // database records the result of the database ping (err nil: it answered)
-// and logs a change of state. A ping its caller abandoned observed nothing:
-// DEBUG, and the state stays.
-func (n *healthNotice) database(ctx context.Context, err error) {
+// and logs a change of state.
+func (n *healthNotice) database(seq uint64, err error) {
 	const msg = "health check: database ping failed"
-	if err != nil && callerLeft(ctx, err) {
-		slog.Debug("health check: database ping abandoned, its caller left", "error", err)
-		return
-	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if !n.current(seq) {
+		return
+	}
 	switch {
 	case err == nil:
 		if n.dbDown {
@@ -257,14 +284,6 @@ func (n *healthNotice) database(ctx context.Context, err error) {
 		slog.Debug(msg, "error", err)
 	default:
 		n.dbDown = true
-		logRequestError(ctx, msg, "error", err)
+		slog.Error(msg, "error", err)
 	}
-}
-
-// callerLeft reports whether err is the cancellation of ctx itself — the
-// caller of the probe went away — rather than an answer of its target. A
-// probe that ran out of its own budget (context.DeadlineExceeded) found a
-// target that did not answer in time: that is the target's state.
-func callerLeft(ctx context.Context, err error) bool {
-	return errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled)
 }

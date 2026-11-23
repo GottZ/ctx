@@ -26,6 +26,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"slices"
 	"time"
 
@@ -3301,10 +3302,28 @@ func (c *Config) GatewaySettings() oai.Settings {
 	}
 }
 
+// DefaultDBConnectTimeout bounds one connection attempt to the database
+// (connect_timeout in the DSN, issue #519): the dial, TLS and the startup
+// and authentication exchange. Without it a database that accepts and never
+// answers held every attempt for good — the pool starts each attempt apart
+// from the acquire that asked for it, so a storm of /health requests left up
+// to MaxConns (20) attempts open, each holding a pool slot, and the listener's
+// connection waited the same way. 10 s is far above a healthy connect (a few
+// milliseconds on the container network, a TLS handshake over a WAN included)
+// and survives three lost SYNs (1 + 2 + 4 s); after it, pgx ends the attempt
+// and the next one starts afresh. Fixed by design; an operator who wants
+// another bound sets libpq's PGCONNECT_TIMEOUT (whole seconds, 0 = wait
+// without end), which DSN then leaves to pgx.
+const DefaultDBConnectTimeout = 10 * time.Second
+
 // DSN returns the PostgreSQL connection string. User and password are
-// URL-encoded to handle special characters.
+// URL-encoded to handle special characters. It carries connect_timeout
+// (DefaultDBConnectTimeout) unless PGCONNECT_TIMEOUT is set: a value in the
+// DSN would take precedence over the operator's variable, so the DSN leaves
+// it out then, and pgx reads the variable — as it does an empty one, which
+// counts as unset.
 func (c *Config) DSN() string {
-	return fmt.Sprintf(
+	dsn := fmt.Sprintf(
 		"postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		url.QueryEscape(c.Server.DBUser),
 		url.QueryEscape(c.Server.DBPass),
@@ -3313,4 +3332,8 @@ func (c *Config) DSN() string {
 		c.Server.DB,
 		c.Server.DBSSL,
 	)
+	if os.Getenv("PGCONNECT_TIMEOUT") == "" {
+		dsn += fmt.Sprintf("&connect_timeout=%d", int(DefaultDBConnectTimeout/time.Second))
+	}
+	return dsn
 }

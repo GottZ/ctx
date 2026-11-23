@@ -1,0 +1,43 @@
+# Class corpus of issue #517: the points of the bot review of #516 (1, 4, 5, 6). Written with its expectations before any rule change (sha256 of the list 7cae541fc69c73a7).
+# Asked at noon UTC of the day. Expected dates: "-" none, "*" any; otherwise alternatives split by " OR ", the dates of one alternative by ";" (holdout506Fits). Hour: the hour of the first date, "-" no date carries one, "*" not judged. Tense: DetectVerbTense, "notpast" future or neutral, "any" not judged.
+# id, day, kind (F: the new reading is right, F2: the first-name reading, G: a counter-case), expected rule (ja/nein/egal), expected dates, hour, tense, disputed (s or -), question, the dates of the rules at c367fd44 as JSON or nil, the tense at c367fd44.
+K7-01	2026-11-22	F	ja	2026-03-16..2026-03-19	*	any	-	What happened after 2026-03-15 and before 2026-03-20?	[{"ref":"2026-03-15","date":"2026-03-15","end":null,"dir":"past"},{"ref":"2026-03-20","date":"2026-03-20","end":null,"dir":"past"}]	past
+K7-02	2026-11-22	F	ja	2026-03-16..2026-03-19	*	any	-	Was lief nach dem 15.03.2026 und vor dem 20.03.2026?	[{"ref":"15.03.2026","date":"2026-03-15","end":null,"dir":"past"},{"ref":"20.03.2026","date":"2026-03-20","end":null,"dir":"past"}]	past
+K7-03	2026-11-22	F	ja	2026-03-15..2026-03-19	*	any	-	Was passierte ab 2026-03-15 und vor 2026-03-20?	[{"ref":"2026-03-15","date":"2026-03-15","end":null,"dir":"past"},{"ref":"2026-03-20","date":"2026-03-20","end":null,"dir":"past"}]	past
+K7-04	2026-11-22	F	ja	2026-03-16..2026-03-31	*	any	-	Was war vor dem 01.04.2026 und nach dem 15.03.2026?	[{"ref":"01.04.2026","date":"2026-04-01","end":null,"dir":"past"},{"ref":"15.03.2026","date":"2026-03-15","end":null,"dir":"past"}]	past
+K7-05	2026-11-22	F	ja	2026-03-16..2026-03-31	*	any	-	after 2026-03-15 and before 2026-04-01	[{"ref":"2026-03-15","date":"2026-03-15","end":null,"dir":"past"},{"ref":"2026-04-01","date":"2026-04-01","end":null,"dir":"past"}]	neutral
+K7-06	2026-11-22	F	ja	2026-11-02..2026-11-14	*	any	-	Was kam nach dem 2026-11-01 und vor dem 2026-11-15?	[{"ref":"2026-11-01","date":"2026-11-01","end":null,"dir":"past"},{"ref":"2026-11-15","date":"2026-11-15","end":null,"dir":"past"}]	past
+K7-07	2026-11-22	F	ja	2025-01-01..2025-01-30	*	any	-	Logs after 2024-12-31 and before 2025-01-31	[{"ref":"2024-12-31","date":"2024-12-31","end":null,"dir":"past"},{"ref":"2025-01-31","date":"2025-01-31","end":null,"dir":"past"}]	neutral
+K7-08	2026-11-22	G	ja	2026-03-20;2026-03-15 OR >=2026-03-21	*	any	s	after 2026-03-20 and before 2026-03-15	[{"ref":"2026-03-20","date":"2026-03-20","end":null,"dir":"past"},{"ref":"2026-03-15","date":"2026-03-15","end":null,"dir":"past"}]	neutral
+K7-09	2026-11-22	G	ja	>=2026-03-16	*	any	-	What happened after 2026-03-15?	[{"ref":"after 2026-03-15?","date":"2026-03-16","end":null,"dir":"from"}]	past
+K7-10	2026-11-22	G	ja	<=2026-03-19	*	any	-	Was war vor dem 20.03.2026?	[{"ref":"vor 20.03.2026?","date":"2026-03-19","end":null,"dir":"until"}]	past
+K7-11	2026-11-22	G	ja	2026-03-15;2026-03-20	*	any	-	Was war am 2026-03-15 und am 2026-03-20?	[{"ref":"2026-03-15","date":"2026-03-15","end":null,"dir":"past"},{"ref":"2026-03-20","date":"2026-03-20","end":null,"dir":"past"}]	past
+K7-12	2026-11-22	G	ja	2026-03-15..2026-03-20	*	any	-	zwischen dem 15.03.2026 und dem 20.03.2026	[{"ref":"15.03.2026 – 20.03.2026","date":"2026-03-15","end":"2026-03-20","dir":"range"}]	neutral
+K7-13	2026-11-22	G	ja	2025-01-01..2025-12-31	*	any	-	nach 2024 und vor 2026	[{"ref":"nach 2024 und vor 2026","date":"2025-01-01","end":"2025-12-31","dir":"range"}]	neutral
+K7-14	2026-11-22	G	ja	2026-03-15	*	any	-	Was geschah vor und nach dem 15.03.2026?	[{"ref":"15.03.2026","date":"2026-03-15","end":null,"dir":"past"}]	past
+K7-15	2026-11-22	G	ja	2026-03-15;2026-03-16 OR >=2026-03-16	*	any	s	after 2026-03-15 and before 2026-03-16	[{"ref":"2026-03-15","date":"2026-03-15","end":null,"dir":"past"},{"ref":"2026-03-16","date":"2026-03-16","end":null,"dir":"past"}]	neutral
+K7-16	2026-11-22	G	ja	2026-03-15..2026-03-20	*	any	-	Was lief vom 15.03.2026 bis 20.03.2026?	[{"ref":"15.03.2026 – 20.03.2026","date":"2026-03-15","end":"2026-03-20","dir":"range"}]	past
+K7-17	2026-11-22	G	ja	>=2026-03-16	*	any	-	Was kam nach dem 15.03.2026, und was war am Montag davor?	[{"ref":"nach 15.03.2026, und was","date":"2026-03-16","end":null,"dir":"from"}]	past
+K7-18	2026-11-22	F	ja	2026-11-23	*	any	-	haben wir am montag gehalt auf dem konto?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K7-19	2026-11-22	F	ja	2026-11-27	*	any	-	Wann haben wir am Freitag Gehalt?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K7-20	2026-11-22	F	ja	2026-11-27	*	any	-	Haben wir am Freitag Gericht?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K7-21	2026-11-22	F	ja	2026-11-24	*	any	-	haben wir am dienstag gebiet b?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K7-22	2026-11-22	G	ja	2026-11-16	*	any	-	Haben wir am Montag Verlust gemacht?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K7-23	2026-11-22	G	ja	2026-11-28	*	any	-	Hat das Büro am Samstag geöffnet?	[{"ref":"Samstag","date":"2026-11-28","end":null,"dir":"future"}]	neutral
+K7-24	2026-11-22	G	ja	2026-11-16	*	any	-	Haben wir am Montag Bericht erstattet?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K7-25	2026-11-22	G	ja	2026-11-17	*	any	-	haben wir am dienstag gehalt bekommen?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K7-26	2026-11-22	G	ja	2026-11-20	*	any	-	Haben wir am Freitag gefeiert?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K7-27	2026-11-22	G	ja	2026-11-16	*	any	-	Hat er am Montag gelacht?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K7-28	2026-11-22	F	ja	2026-11-16	*	any	-	Was war am Montag mit dem Mittwochs-Job?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K7-29	2026-11-22	F	ja	2026-11-16	*	any	-	Wie lief der Freitags-Deploy am Montag?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K7-30	2026-11-22	G	egal	*	*	any	-	Was läuft montags?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K7-31	2026-11-22	F	ja	2026-11-23	*	notpast	-	The friday-deploy-script failed, but we will ship on Monday	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"}]	past
+K7-32	2026-11-22	F	ja	2026-11-23	*	notpast	-	Das Wochenende-Flag war falsch, am Montag fixen wir es	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	past
+K7-33	2026-11-22	G	ja	2026-11-23	*	notpast	-	Der Mittwochs-Job ist kaputt, aber am Montag deployen wir	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K7-34	2026-11-22	G	ja	2026-11-16	*	past	-	Was the Monday deploy broken?	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]	past
+K7-35	2026-11-22	G	ja	2026-11-20	*	past	-	The friday deploy failed	[{"ref":"Friday","date":"2026-11-20","end":null,"dir":"past"}]	past
+B7-01	2026-03-18	F	ja	2026-03-02..2026-03-09	*	any	-	What happened after 2026-03-01 and before 2026-03-10?	[{"ref":"2026-03-01","date":"2026-03-01","end":null,"dir":"past"},{"ref":"2026-03-10","date":"2026-03-10","end":null,"dir":"past"}]	past
+B7-02	2026-03-18	F	ja	2026-02-02..2026-02-27	*	any	-	Was war nach dem 01.02.2026 und vor dem 28.02.2026?	[{"ref":"01.02.2026","date":"2026-02-01","end":null,"dir":"past"},{"ref":"28.02.2026","date":"2026-02-28","end":null,"dir":"past"}]	past
+B7-03	2026-03-18	G	ja	>=2026-03-02	*	any	-	after 2026-03-01	[{"ref":"after 2026-03-01","date":"2026-03-02","end":null,"dir":"from"}]	neutral
+B7-04	2026-03-18	F	ja	2026-03-23	*	any	-	haben wir am montag gehalt?	[{"ref":"Montag","date":"2026-03-16","end":null,"dir":"past"}]	past
+B7-05	2026-03-18	G	ja	2026-03-16	*	any	-	haben wir am montag gehalt bekommen?	[{"ref":"Montag","date":"2026-03-16","end":null,"dir":"past"}]	past

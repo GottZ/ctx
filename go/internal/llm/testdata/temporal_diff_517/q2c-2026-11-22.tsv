@@ -1,0 +1,9 @@
+# Differential test of the temporal rules (issue #517): corpus q2c, asked on 2026-11-22 at noon UTC.
+# question, rules output at c367fd44 (the base of issue #517); for a changed output also its verdict (fixed / disputed / broken), the output now and a note.
+Was haben wir von März bis Mai festgelegt?	["von märz bis mai festgelegt?|2026-03-01..2026-05-31|range"] linear=0.60,weekday=0.40
+Was haben wir von Montag bis Mittwoch übersehen?	["von montag bis mittwoch übersehen?|2026-11-16..2026-11-18|range"] linear=0.60,weekday=0.40
+Weißt du noch, was wir von März bis Mai besprochen haben?	["von märz bis mai besprochen haben?|2026-03-01..2026-05-31|range"] linear=0.60,weekday=0.40
+Was Damien off from Monday to Wednesday?	["from monday to wednesday?|2026-11-16..2026-11-18|range"] linear=0.60,weekday=0.40
+Was steht von März bis Mai an?	["von märz bis mai an?|2027-03-01..2027-05-31|range"] linear=0.60,weekday=0.40
+Was haben wir am Wochenende vergessen?	["am Wochenende|2026-11-21..2026-11-22|past"] weekday=1.00
+Was ist im Mai schiefgelaufen?	nil

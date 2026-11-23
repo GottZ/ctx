@@ -39,6 +39,14 @@ func TestRules_DifferentialAgainstTheSecondBase(t *testing.T) {
 	checkDifferential(t, "testdata/temporal_diff_506")
 }
 
+// TestRules_DifferentialAgainstTheThirdBase is the same gate against
+// c367fd44 (the base of issue #517): the base column of
+// testdata/temporal_diff_517 is the rules' output there, over the same
+// corpora, so that every answer issue #517 changed carries its verdict.
+func TestRules_DifferentialAgainstTheThirdBase(t *testing.T) {
+	checkDifferential(t, "testdata/temporal_diff_517")
+}
+
 // checkDifferential runs the differential gate over the corpora in dir. A
 // gate that checks no question proves nothing: a directory without a corpus
 // file, and a file without a question, fail it (issue #506).

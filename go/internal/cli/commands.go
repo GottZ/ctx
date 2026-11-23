@@ -539,29 +539,41 @@ func listMetaCmd(getClient func() (*Client, error)) *cobra.Command {
 
 // ── digest ───────────────────────────────────────────────────────────.
 
-// digestCallBudget is the client budget of `ctx digest` (issue #505). The
-// digest ends with its client (issue #490), so the main client's 120 s would
-// cut a digest that runs longer and leave the topic map unwritten; its time
-// grows with the blocks of the read window (measured: about 55 µs per block
-// on a test database, no model call — extrapolated, about one minute at 1 M
-// blocks and ten at 10 M), and the server rolls its write deadline while it
-// runs. 30 minutes is above that and still ends a digest that hangs (on a
-// lock, say), which without a budget held the CLI until Ctrl-C. Unlike
-// purge, whose run goes on on the server whatever the client does, the
-// digest ends with the call. The CLI has no --timeout option; the budgets
-// are named per command. A variable for tests.
-var digestCallBudget = 30 * time.Minute
+// digestCallBudget is the client budget of `ctx digest` (issue #505), the
+// default of its --timeout option (issue #519). The digest ends with its
+// client (issue #490), so the main client's 120 s would cut a digest that
+// runs longer and leave the topic map unwritten. Since the topic map is
+// capped (#518), a digest's time grows with the blocks of the read window at
+// about 3–5 µs per block (measured through POST /api/digest on a test
+// database, no model call: 0.19 s at 10,000 blocks, 0.67 s at 100,000, 5.3 s
+// at 1 M, 11 s at 3 M; up to 9 µs per block under heavy host load) —
+// extrapolated 30–90 s at 10 M. 5 minutes is three times the slowest of
+// those and still ends a digest that hangs (on a lock, say) six times sooner
+// than the 30 minutes the uncapped map needed. A larger read window takes
+// --timeout. Unlike purge, whose run goes on on the server whatever the
+// client does, the digest ends with the call. A variable for tests.
+var digestCallBudget = 5 * time.Minute
 
 func digestCmd(getClient func() (*Client, error)) *cobra.Command {
+	var timeout time.Duration
 	get := func() (*Client, error) {
 		c, err := getClient()
 		if err != nil {
 			return nil, err
 		}
-		return c.withTimeout(digestCallBudget), nil
+		return c.withTimeout(timeout), nil
 	}
-	return simpleCmd("digest", []string{"d"}, "Rebuild topic map", "digest", nil,
+	cmd := simpleCmd("digest", []string{"d"}, "Rebuild topic map", "digest", nil,
 		func([]string) map[string]any { return map[string]any{"trigger": "manual"} }, get)
+	cmd.Flags().DurationVar(&timeout, "timeout", digestCallBudget,
+		"how long the call waits for the digest's answer, e.g. 90s or 10m (0 waits without end); the digest ends with the call")
+	cmd.PreRunE = func(*cobra.Command, []string) error {
+		if timeout < 0 {
+			return fmt.Errorf("--timeout must be 0 (no limit) or positive, got %v", timeout)
+		}
+		return nil
+	}
+	return cmd
 }
 
 // ── guard ────────────────────────────────────────────────────────────.

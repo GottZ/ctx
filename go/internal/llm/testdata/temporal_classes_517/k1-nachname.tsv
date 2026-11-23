@@ -1,0 +1,70 @@
+# Class corpus of issue #517: a weekday that is a surname. Written with its expectations before any rule change (sha256 of the list 28a6aa1d68000f8a).
+# Asked at noon UTC of the day. Expected dates: "-" none, "*" any; otherwise alternatives split by " OR ", the dates of one alternative by ";" (holdout506Fits). Hour: the hour of the first date, "-" no date carries one, "*" not judged. Tense: DetectVerbTense, "notpast" future or neutral, "any" not judged.
+# id, day, kind (F: the new reading is right, F2: the first-name reading, G: a counter-case), expected rule (ja/nein/egal), expected dates, hour, tense, disputed (s or -), question, the dates of the rules at c367fd44 as JSON or nil, the tense at c367fd44.
+K1-01	2026-11-22	F	nein	-	*	any	-	Was hat Herr Freitag zum Schema gesagt?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K1-02	2026-11-22	F2	nein	-	*	any	-	Wer ist Max Montag?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K1-03	2026-11-22	F	nein	-	*	any	-	Wer ist Frau Sonntag aus dem Datenschutz?	[{"ref":"Sonntag","date":"2026-11-29","end":null,"dir":"future"}]	neutral
+K1-04	2026-11-22	F	nein	-	*	any	-	Hat Frau Montag den Vertrag schon unterschrieben?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K1-05	2026-11-22	F	nein	-	*	any	-	Was meint Herr Dr. Freitag zur Migration?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K1-06	2026-11-22	F	nein	-	*	any	-	Bitte Herrn Sonntag die Logs schicken	[{"ref":"Sonntag","date":"2026-11-29","end":null,"dir":"future"}]	neutral
+K1-07	2026-11-22	F	nein	-	*	any	-	Mr Friday wants the report	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K1-08	2026-11-22	F	nein	-	*	any	-	What did Mrs. Monday say about the budget?	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]	past
+K1-09	2026-11-22	F	nein	-	*	any	-	Is Ms Sunday still on the team?	[{"ref":"Sunday","date":"2026-11-29","end":null,"dir":"future"}]	neutral
+K1-10	2026-11-22	F	nein	-	*	any	-	Ask Dr Friday about the incident report	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K1-11	2026-11-22	F	nein	-	*	any	-	Prof. Montag hat das Paper geschrieben	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K1-12	2026-11-22	F	nein	-	*	any	-	Lieber Herr Mittwoch, wo liegt das Backup?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]	neutral
+K1-13	2026-11-22	F	nein	-	*	any	-	Frau Freitags Ticket ist noch offen	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K1-14	2026-11-22	F	nein	-	*	any	-	Wann kommt Herr Sonntag zurück?	[{"ref":"Sonntag","date":"2026-11-29","end":null,"dir":"future"}]	neutral
+K1-15	2026-11-22	F	nein	-	*	any	-	Wie erreiche ich Frau Donnerstag?	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]	neutral
+K1-16	2026-11-22	F	nein	-	*	any	-	Has Mr. Saturday merged the PR?	[{"ref":"Saturday","date":"2026-11-21","end":null,"dir":"past"}]	past
+K1-17	2026-11-22	F	nein	-	*	any	-	Who is Mrs Friday?	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K1-18	2026-11-22	F	nein	-	*	any	-	Was hat Frau Dr. Montag empfohlen?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K1-19	2026-11-22	F	nein	-	*	any	-	E-Mail von Herrn Freitag zum Rollout	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K1-20	2026-11-22	F	nein	-	*	any	-	Mr. Monday from the security team called	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K1-21	2026-11-22	F	nein	-	*	any	-	was hat herr freitag gesagt?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K1-22	2026-11-22	F	ja	2026-11-24	*	any	-	Dr. Montag operiert am Dienstag	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K1-23	2026-11-22	F	ja	2026-11-17	*	any	-	Herr Freitag hat am Dienstag angerufen	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K1-24	2026-11-22	F	ja	2026-11-18	*	any	-	Mrs. Friday called on Wednesday	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K1-25	2026-11-22	F	ja	2026-11-26	*	any	-	Frau Montag präsentiert am Donnerstag	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K1-26	2026-11-22	F2	nein	-	*	any	-	Max Montag hat den Server neu gestartet	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K1-27	2026-11-22	F2	nein	-	*	any	s	Was schreibt Anna Freitag im Ticket?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K1-28	2026-11-22	F2	nein	-	*	any	-	Is Robin Friday on call this week?	[{"ref":"diese Woche","date":"2026-11-16","end":"2026-11-22","dir":"range"}]	neutral
+K1-29	2026-11-22	F2	nein	-	*	any	s	Ich habe mit Paul Sonntag telefoniert	[{"ref":"Sonntag","date":"2026-11-15","end":null,"dir":"past"}]	past
+K1-30	2026-11-22	F2	nein	-	*	any	-	Wer ist eigentlich Lisa Montag?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K1-31	2026-11-22	G	ja	2026-11-20	*	any	-	Am Freitag hat Herr Müller den PR gemerged	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K1-32	2026-11-22	G	ja	2026-11-23	*	any	-	Frau Sommer kommt am Montag	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K1-33	2026-11-22	G	ja	2026-11-13 OR 2026-11-20 OR 2026-11-27	*	any	-	Freitag, der 13.	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K1-34	2026-11-22	G	ja	2026-11-16	*	any	-	Am Montag hat Max Montag den Server neu gestartet	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K1-35	2026-11-22	G	ja	2026-11-27	*	any	-	Herr Freitag kommt am Freitag	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K1-36	2026-11-22	G	ja	2026-11-23	*	any	-	Kommt Max Montag?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K1-37	2026-11-22	G	ja	2026-11-27	*	any	-	Hat Lisa Freitag Zeit?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K1-38	2026-11-22	G	ja	2026-11-24	*	any	-	Kann Tom Dienstag?	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]	neutral
+K1-39	2026-11-22	G	ja	2026-11-25	*	any	-	Ist Anna Mittwoch im Büro?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]	neutral
+K1-40	2026-11-22	G	ja	2026-11-20	*	any	s	Hat Jonas Freitag deployed?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K1-41	2026-11-22	G	ja	2026-11-16	*	any	-	Mr. Smith, Monday was a disaster	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]	past
+K1-42	2026-11-22	G	ja	2026-11-27	*	any	-	Mrs Jones will present on Friday	[{"ref":"Friday","date":"2026-11-27","end":null,"dir":"future"}]	future
+K1-43	2026-11-22	G	ja	2026-11-20	*	any	-	Did Mr Brown deploy on Friday?	[{"ref":"Friday","date":"2026-11-20","end":null,"dir":"past"}]	past
+K1-44	2026-11-22	G	ja	2026-11-23	*	any	-	Herr Meier, am Montag ist das Review	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K1-45	2026-11-22	G	ja	2026-11-26	*	any	-	Frau Schmidt, Donnerstag passt mir	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]	neutral
+K1-46	2026-11-22	G	ja	2026-11-27	*	any	-	Ist das Büro Freitag geöffnet?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K1-47	2026-11-22	G	ja	2026-11-24	*	any	-	Wird der Server Dienstag gepatcht?	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]	future
+K1-48	2026-11-22	G	ja	2026-11-23	*	any	-	Treffen wir Herrn Schulz am Montag?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K1-49	2026-11-22	G	ja	2026-11-20	*	any	-	Was hat Frau Weber am Freitag präsentiert?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K1-50	2026-11-22	G	ja	2026-11-19	*	any	-	Was hat Herr Doktor Lang am Donnerstag gesagt?	[{"ref":"Donnerstag","date":"2026-11-19","end":null,"dir":"past"}]	past
+K1-51	2026-11-22	G	ja	2026-11-25	*	any	-	Ask Dr. Patel on Wednesday	[{"ref":"Wednesday","date":"2026-11-25","end":null,"dir":"future"}]	neutral
+K1-52	2026-11-22	G	ja	2026-11-21	*	any	-	Was Mr. Lee on call on Saturday?	[{"ref":"Saturday","date":"2026-11-21","end":null,"dir":"past"}]	past
+K1-53	2026-11-22	G	ja	2026-11-16	*	any	-	Wer war Montag im Büro, Herr Schmidt?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K1-54	2026-11-22	G	ja	2026-11-23	*	any	-	Montag hat Frau Klein Urlaub	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K1-55	2026-11-22	G	ja	2026-11-16;2026-11-17	*	any	-	Kam die Frau Montag oder Dienstag?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"},{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K1-56	2026-11-22	G	ja	2026-11-23	*	any	-	Kann Herr Becker Montag?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K1-57	2026-11-22	G	ja	2026-11-20	*	any	s	Hat Kollegin Freitag gemerged?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+B1-01	2026-03-18	F	nein	-	*	any	-	Was hat Herr Sonntag zur Roadmap gesagt?	[{"ref":"Sonntag","date":"2026-03-15","end":null,"dir":"past"}]	past
+B1-02	2026-03-18	F	ja	2026-03-20	*	any	-	Frau Montag präsentiert am Freitag	[{"ref":"Montag","date":"2026-03-23","end":null,"dir":"future"}]	neutral
+B1-03	2026-03-18	F	nein	-	*	any	-	Who approved the request from Mr Tuesday?	[{"ref":"Tuesday","date":"2026-03-17","end":null,"dir":"past"}]	past
+B1-04	2026-03-18	F	ja	2026-03-18	*	any	-	Ist Frau Freitag heute im Büro?	[{"ref":"Freitag","date":"2026-03-20","end":null,"dir":"future"}]	neutral
+B1-05	2026-03-18	F	nein	-	*	any	-	Dr. Montag leitet das Projekt	[{"ref":"Montag","date":"2026-03-23","end":null,"dir":"future"}]	neutral
+B1-06	2026-03-18	G	ja	2026-03-13	*	any	-	Am Freitag hat Herr Wagner den Hotfix gebaut	[{"ref":"Freitag","date":"2026-03-13","end":null,"dir":"past"}]	past
+B1-07	2026-03-18	G	ja	2026-03-16	*	any	-	Kam Max Montag?	[{"ref":"Montag","date":"2026-03-16","end":null,"dir":"past"}]	past
+B1-08	2026-03-18	G	ja	2026-03-20	*	any	-	Mr. Green, Friday is the deadline	[{"ref":"Friday","date":"2026-03-20","end":null,"dir":"future"}]	neutral
+B1-09	2026-03-18	G	ja	2026-03-23	*	any	-	Kann Herr Becker Montag?	[{"ref":"Montag","date":"2026-03-23","end":null,"dir":"future"}]	neutral
+B1-10	2026-03-18	G	ja	2026-03-17	*	any	-	Lief am Dienstag bei Frau Sonntag alles glatt?	[{"ref":"Dienstag","date":"2026-03-17","end":null,"dir":"past"}]	past

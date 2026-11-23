@@ -1,17 +1,21 @@
 package handler
 
-// Issue #504, review of the linked pull request: the probes of /health end
-// with the request that asked for them, and their budget ends before the
-// compose healthcheck gives up.
+// Issue #504, review of the linked pull request, and issue #519: what the
+// probes of /health cost does not grow with its requests, and their budget
+// ends before the compose healthcheck gives up.
 //
-// A /health that kept its probes past its client let every anonymous request
-// hold a probe of each hanging backend for the whole budget: 2,000 requests in
-// a second whose clients left after 20 ms held about 10,000 goroutines and
-// 2,000 connections to the backend for five seconds. And a budget equal to the
-// compose healthcheck's timeout (5 s) let Docker give up first while a chat
-// backend hung, so the container went unhealthy over a backend, not over its
-// database. A probe that a client abandoned is neither an outage nor a
-// recovery: it logs nothing above DEBUG and changes no state.
+// A /health that kept one probe per request past its client let every
+// anonymous request hold a probe of each hanging backend for the whole
+// budget: 2,000 requests in a second whose clients left after 20 ms held
+// about 10,000 goroutines and 2,000 connections to the backend for five
+// seconds. #504 ended the probes with their request — and with it, a backend
+// that hung while every caller left first was never found down (#519). Now
+// the probes run in rounds (healthRound) that every request arriving
+// meanwhile shares: a storm holds one probe per backend, which ends with the
+// round's budget, whatever the clients do. And a budget equal to the compose
+// healthcheck's timeout (5 s) let Docker give up first while a chat backend
+// hung, so the container went unhealthy over a backend, not over its
+// database.
 
 import (
 	"bufio"
@@ -19,12 +23,10 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,97 +34,41 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-// hangingHost accepts connections and never answers; open counts the
-// connections that are open.
-type hangingHost struct {
-	l    net.Listener
-	open atomic.Int64
-}
-
-func newHangingHost(t *testing.T) *hangingHost {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := &hangingHost{l: l}
-	go func() {
-		for {
-			c, err := l.Accept()
-			if err != nil {
-				return
-			}
-			h.open.Add(1)
-			go func() {
-				_, _ = io.Copy(io.Discard, c) // until the peer closes
-				h.open.Add(-1)
-				_ = c.Close()
-			}()
-		}
-	}()
-	t.Cleanup(func() { _ = l.Close() })
-	return h
-}
-
-func (h *hangingHost) url() string { return "http://" + h.l.Addr().String() }
 
 // healthServer serves /health over snap (Dream on, the database refusing).
 func healthServer(t *testing.T, snap []backends.Backend) *HealthHandler {
 	t.Helper()
-	st := &swapStore{}
-	st.p.Store(healthTestConfig())
-	bp := backends.NewPool(nil, nil)
-	bp.SeedSnapshotForTest(snap)
-	return NewHealthHandler(brokenPool(t), st, bp, nil)
+	return roundHandler(brokenPool(t), seededBackends(snap...))
 }
 
-// TestHealthProbesEndWithTheirClient — 200 /health requests at once while the
-// chat backend hangs, each client gone after 100 ms: within half a second
-// after the last client left, the process is back at the goroutines it had
-// before and no connection to the backend is open.
-func TestHealthProbesEndWithTheirClient(t *testing.T) {
-	const (
-		requests = 200
-		giveUp   = 100 * time.Millisecond
-		settle   = 500 * time.Millisecond
-		// The connections open at the hanging backend are the measure: a
-		// probe in flight holds one, and none may be left. The goroutine
-		// count is process-wide — the servers' connection goroutines that are
-		// still closing and the package's other tests are in it; the CI
-		// runner's two cores read 40 and then 163 against 19 before — so it
-		// only bounds the case from above: probes that outlive their requests
-		// keep about five goroutines per request (1,006 for these 200), and
-		// three per request still tells that apart.
-		slack = 3 * requests
-	)
-	// The probes' transport (http.DefaultTransport) keeps up to two idle
-	// connections per host, also one it finished dialing for a request that
-	// was cancelled meanwhile: bounded, no probe. They are closed before
-	// counting; a probe in flight keeps its connection busy, not idle.
-	idle := func() { http.DefaultTransport.(*http.Transport).CloseIdleConnections() }
-	hang := newHangingHost(t)
+// TestHealthStormHoldsOneProbePerBackend — 200 /health requests at once while
+// the chat backend hangs, each client gone after 100 ms: the backend saw one
+// connection — the round the requests shared — and none is left once the
+// round's budget ended.
+func TestHealthStormHoldsOneProbePerBackend(t *testing.T) {
+	const requests = 200
+	setHealthBudget(t, time.Second)
+	hang := newCountingHangHost(t)
 	up := slowBackend(t, 0, nil)
 	h := healthServer(t, []backends.Backend{
 		operatorRow("i504-storm-e", up, backends.RoleEmbed, backends.RoleDream),
-		operatorRow("i504-storm-c", hang.url(), backends.RoleSynthesis),
+		operatorRow("i504-storm-c", "http://"+hang.l.Addr().String(), backends.RoleSynthesis),
 	})
+	t.Cleanup(func() { waitHealthRounds(t) }) // after srv.Close: a handler that came late may start a round
 	srv := httptest.NewServer(http.HandlerFunc(h.Health))
 	t.Cleanup(srv.Close)
 	installRejectLogCapture(t)
-	time.Sleep(50 * time.Millisecond)
-	idle()
-	base := runtime.NumGoroutine()
 
 	tr := &http.Transport{MaxIdleConnsPerHost: requests}
 	t.Cleanup(tr.CloseIdleConnections)
 	cl := &http.Client{Transport: tr}
 	var wg sync.WaitGroup
+	start := make(chan struct{})
 	for range requests {
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), giveUp)
+			<-start
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
 			if resp, err := cl.Do(req); err == nil {
@@ -131,20 +77,14 @@ func TestHealthProbesEndWithTheirClient(t *testing.T) {
 			}
 		})
 	}
+	close(start)
 	wg.Wait()
-	deadline := time.Now().Add(settle)
-	idle()
-	goroutines, open := runtime.NumGoroutine(), hang.open.Load()
-	for (goroutines > base+slack || open != 0) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-		idle()
-		goroutines, open = runtime.NumGoroutine(), hang.open.Load()
-	}
-	t.Logf("%v after the last of %d clients left: %d goroutines (%d before), %d connections open at the hanging backend",
-		settle, requests, goroutines, base, open)
-	if goroutines > base+slack || open != 0 {
-		t.Errorf("%v after the clients left: %d goroutines (%d before) and %d connections to the hanging backend, want at most %d and 0 — the probes outlived their requests",
-			settle, goroutines, base, open, base+slack)
+	waitHealthRounds(t)
+	waitUntil(t, 20*time.Second, "the round's connection to close", func() bool { return hang.open.Load() == 0 })
+	t.Logf("%d requests whose clients left after 100 ms: %d connections at the hanging backend, at most %d open at once",
+		requests, hang.accepted.Load(), hang.peak.Load())
+	if n := hang.accepted.Load(); n != 1 {
+		t.Errorf("the hanging backend saw %d connections for %d requests within one budget, want 1 — the requests did not share their round", n, requests)
 	}
 }
 
@@ -216,8 +156,8 @@ func TestHealthAnswersBeforeTheComposeHealthcheckGivesUp(t *testing.T) {
 	wantOneLine(t, logs, backends.RoleSynthesis, "row-i504-clock", slog.LevelWarn, "backend ping failed", 0)
 }
 
-// switchableBackend serves GET / by mode: 200, 503, or no answer until the
-// request ends.
+// switchableBackend serves GET / by mode: 200, 503, no answer until the
+// request ends, or 200 after 100 ms.
 func switchableBackend(t *testing.T, mode *atomic.Int32) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -226,6 +166,12 @@ func switchableBackend(t *testing.T, mode *atomic.Int32) string {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		case backendHangs:
 			<-r.Context().Done()
+		case backendSlow:
+			select {
+			case <-time.After(100 * time.Millisecond):
+				w.WriteHeader(http.StatusOK)
+			case <-r.Context().Done():
+			}
 		default:
 			w.WriteHeader(http.StatusOK)
 		}
@@ -238,6 +184,7 @@ const (
 	backendUp int32 = iota
 	backendDown
 	backendHangs
+	backendSlow
 )
 
 // healthLinesAbove returns the /health records at INFO and above.
@@ -252,11 +199,14 @@ func healthLinesAbove(logs *rejectLogCapture) []rejectLogRecord {
 }
 
 // TestHealthClientThatLeavesFirstChangesNothing — a client that leaves before
-// the budget ends (`ctx statusline` gives up after 500 ms) ends the probes of
-// its request at once. What they did not finish is neither an outage nor a
-// recovery: no WARN, no INFO, and an outage already known stays known.
+// the budget ends (`ctx statusline` gives up after 500 ms) gets its answer
+// at once, and what its round finds is recorded as if it had waited: an
+// outage already known stays known while the backend hangs, and an answer
+// count in progress goes on while the backend answers after the clients
+// left.
 func TestHealthClientThatLeavesFirstChangesNothing(t *testing.T) {
-	const leaveAfter = 50 * time.Millisecond
+	const leaveAfter = 20 * time.Millisecond
+	setHealthBudget(t, 300*time.Millisecond)
 	var mode atomic.Int32
 	up := slowBackend(t, 0, nil)
 	snap := []backends.Backend{
@@ -264,70 +214,43 @@ func TestHealthClientThatLeavesFirstChangesNothing(t *testing.T) {
 		operatorRow("i504-early", switchableBackend(t, &mode), backends.RoleSynthesis),
 	}
 	h := healthServer(t, snap)
+	t.Cleanup(func() { waitHealthRounds(t) })
 	early := func(t *testing.T) {
 		t.Helper()
-		logs := installRejectLogCapture(t)
 		for range 3 {
-			req := httptest.NewRequest(http.MethodGet, "/health", nil)
-			ctx, cancel := context.WithCancel(req.Context())
-			time.AfterFunc(leaveAfter, cancel)
 			start := time.Now()
-			h.Health(httptest.NewRecorder(), req.WithContext(ctx))
-			cancel()
+			if got := askHealth(h, leaveAfter); got != nil && mode.Load() == backendHangs {
+				t.Errorf("a client that left after %v got %v while the backend hangs", leaveAfter, got)
+			}
 			if took := time.Since(start); took > leaveAfter+time.Second {
-				t.Errorf("/health answered %v after its client left at %v — its probes outlived the request", took, leaveAfter)
+				t.Errorf("/health answered %v after its client left at %v — the request waited for its round", took, leaveAfter)
 			}
 		}
-		if lines := healthLinesAbove(logs); len(lines) != 0 {
-			t.Errorf("abandoned probes wrote %+v, want nothing above DEBUG", lines)
-		}
+		waitHealthRounds(t)
 	}
 
 	healthCalls(t, snap, 3) // a known state: the backend answers, the role is served
-	t.Run("an answering backend that hangs while the client leaves", func(t *testing.T) {
-		mode.Store(backendHangs)
-		early(t)
-	})
-	t.Run("a known outage stays known", func(t *testing.T) {
+	t.Run("a known outage stays known while the backend hangs", func(t *testing.T) {
 		mode.Store(backendDown)
 		logs := healthCalls(t, snap, 1)
 		wantOneLine(t, logs, backends.RoleSynthesis, "row-i504-early", slog.LevelWarn, "backend ping failed", 0)
+		logs = installRejectLogCapture(t)
 		mode.Store(backendHangs)
 		early(t)
 		mode.Store(backendDown)
-		logs = healthCalls(t, snap, 1)
+		healthCalls(t, snap, 1)
 		if lines := healthRoleLines(logs, slog.LevelWarn, backends.RoleSynthesis, "row-i504-early"); len(lines) != 0 {
 			t.Errorf("the outage was forgotten while clients left early: %+v", lines)
 		}
-		if lines := healthRoleLines(logs, slog.LevelDebug, backends.RoleSynthesis, "row-i504-early"); len(lines) != 1 {
-			t.Errorf("%d DEBUG lines for the backend still down, want 1", len(lines))
-		}
 	})
-	t.Run("an answer count in progress survives a client that leaves", func(t *testing.T) {
+	t.Run("an answer count goes on while the clients leave", func(t *testing.T) {
 		mode.Store(backendDown)
 		healthCalls(t, snap, 1) // down (known or new)
 		mode.Store(backendUp)
 		healthCalls(t, snap, 2) // two answers in a row, not yet back
-		mode.Store(backendHangs)
-		early(t)
-		mode.Store(backendUp)
-		logs := healthCalls(t, snap, 1)
+		mode.Store(backendSlow)
+		logs := installRejectLogCapture(t)
+		early(t) // the round's answer comes after the first client left: the third answer
 		wantOneLine(t, logs, backends.RoleSynthesis, "row-i504-early", slog.LevelInfo, "answers again", 0)
-	})
-	t.Run("a database that hangs while the client leaves", func(t *testing.T) {
-		mode.Store(backendUp)
-		healthCalls(t, snap, 3) // the backend answers again (the INFO comes here)
-		db := newHangingHost(t)
-		pool, err := pgxpool.New(context.Background(), "postgres://test:test@"+db.l.Addr().String()+"/test?sslmode=disable")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(pool.Close)
-		st := &swapStore{}
-		st.p.Store(healthTestConfig())
-		bp := backends.NewPool(nil, nil)
-		bp.SeedSnapshotForTest(snap)
-		h = NewHealthHandler(pool, st, bp, nil)
-		early(t)
 	})
 }
