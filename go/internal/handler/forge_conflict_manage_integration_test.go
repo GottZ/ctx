@@ -590,8 +590,10 @@ func TestForgeConflictManage(t *testing.T) {
 		}
 
 		code, body, raw = e.do(t, e.h, e.adminA, "forge-stamp-reset", map[string]any{"project_id": proj.ID, "all": true})
-		if code != http.StatusOK || body["reset"] != float64(2) || fmt.Sprint(body["legs"]) != "[issues]" {
-			t.Fatalf("stamp-reset of the project: %d %s, want reset 2", code, raw)
+		// The first mapping's stamp is NULL already: only the second is
+		// written and counted.
+		if code != http.StatusOK || body["reset"] != float64(1) || fmt.Sprint(body["legs"]) != "[issues]" {
+			t.Fatalf("stamp-reset of the project: %d %s, want reset 1 (the mapping with a stamp)", code, raw)
 		}
 		if stamped(id) || stamped(id2) {
 			t.Error("a mapping kept its forge stamp after the project-wide reset")

@@ -400,7 +400,10 @@ func (r *Resolver) resolveLocked(ctx context.Context, tx pgx.Tx, project store.P
 // the zero time), so the next run lists the entity although its stamp lies
 // behind the saved since; a run already under way cannot save a cursor past
 // it. The project row is locked first, then the mapping rows. Both steps
-// commit together, with the audit row; a repeat does the same again.
+// commit together, with the audit row. Only mappings with a stamp or a
+// snapshot to drop count; a reset that changes none holds no leg and writes
+// no audit row — a repeat after the held listing ran is a no-op. A block
+// that is archived or out of the project's scope is ErrConflictNotFound.
 func (r *Resolver) ResetStamps(ctx context.Context, project store.ProjectRow, blockID string, stamp store.AuditStamp) (ResetResult, error) {
 	var res ResetResult
 	err := pgxdb.Write(ctx, r.pool, pgxdb.Stages{Begin: "forge: stamp reset begin", Commit: "forge: stamp reset commit"}, func(tx pgx.Tx) error {
@@ -418,6 +421,9 @@ func (r *Resolver) ResetStamps(ctx context.Context, project store.ProjectRow, bl
 		}
 		if !found {
 			return ErrConflictNotFound
+		}
+		if n == 0 {
+			return nil // nothing to reset: no hold, no audit row
 		}
 		res.Reset = n
 		for _, k := range kinds {

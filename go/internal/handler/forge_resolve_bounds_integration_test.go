@@ -79,3 +79,34 @@ func TestForgeResolveArchivedBlockStampReset(t *testing.T) {
 		t.Errorf("a refused call on an archived block changed state:\nbefore %s\nafter  %s", before, after)
 	}
 }
+
+// A project-wide reset rewrites only the mappings that have a stamp or a
+// snapshot to drop, and answers the count it changed: a second reset leaves
+// every row version and the cursor as they are.
+func TestForgeResolveResetAllWithNothingToReset(t *testing.T) {
+	e := newFCMEnv(t)
+	ctx := context.Background()
+	proj := e.project(t, "rbr")
+	ids := []string{e.flag(t, proj, 1), e.flag(t, proj, 2), e.flag(t, proj, 3)}
+	if code, body, raw := e.do(t, e.h, e.adminA, "forge-stamp-reset", map[string]any{"project_id": proj.ID, "all": true}); code != http.StatusOK || body["reset"] != float64(3) {
+		t.Fatalf("the first reset: %d %s", code, raw)
+	}
+	versions := func() string {
+		var v string
+		if err := e.pool.QueryRow(ctx, `SELECT string_agg(xmin::text, ',' ORDER BY block_id) FROM context_project_sync_map WHERE block_id = ANY($1::uuid[])`, ids).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	v0, s0 := versions(), e.snapshot(t, ids, []string{proj.ID})
+	code, body, raw := e.do(t, e.h, e.adminA, "forge-stamp-reset", map[string]any{"project_id": proj.ID, "all": true})
+	if code != http.StatusOK || body["reset"] != float64(0) {
+		t.Errorf("the second reset: %d %s, want reset 0", code, raw)
+	}
+	if v1 := versions(); v1 != v0 {
+		t.Errorf("the second reset rewrote mapping rows: row versions %s -> %s", v0, v1)
+	}
+	if s1 := e.snapshot(t, ids, []string{proj.ID}); s1 != s0 {
+		t.Errorf("the second reset changed state:\nbefore %s\nafter  %s", s0, s1)
+	}
+}

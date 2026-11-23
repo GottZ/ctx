@@ -232,9 +232,11 @@ func forgeSeenJSON(seen *ForgeSeen) (any, error) {
 // one (docs/architecture.md, forge sync), whose fetches every pull skipped
 // as older. found=false: blockID names no such mapping (an archived block, a
 // block out of the project's scope — the 404 a resolution gives there;
-// nothing written). It returns the rows it reset and the entity kinds among
-// them (the legs whose fetch cursor the caller holds). Tx-bound; the caller
-// holds the project row, the mapping rows come after it.
+// nothing written). Only rows with a stamp or a snapshot to drop are
+// written — a repeated reset of 100 000 mappings rewrote every row (WAL,
+// dead tuples) to change nothing. It returns the rows it changed and the
+// entity kinds among them (the legs whose fetch cursor the caller holds).
+// Tx-bound; the caller holds the project row, the mapping rows come after it.
 func ResetForgeStamps(ctx context.Context, tx pgx.Tx, projectID, scope, blockID string) (found bool, n int, kinds []string, err error) {
 	var block any
 	if blockID != "" {
@@ -256,6 +258,7 @@ func ResetForgeStamps(ctx context.Context, tx pgx.Tx, projectID, scope, blockID 
 		UPDATE context_project_sync_map
 		   SET forge_updated_at = NULL, metadata = metadata - 'forge_seen'
 		 WHERE project_id = $1::uuid AND ($2::uuid IS NULL OR block_id = $2::uuid)
+		   AND (forge_updated_at IS NOT NULL OR metadata ? 'forge_seen')
 		RETURNING entity_kind`, projectID, block)
 	if err != nil {
 		return false, 0, nil, fmt.Errorf("store: reset forge stamps: %w", err)
