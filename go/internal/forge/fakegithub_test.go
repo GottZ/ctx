@@ -61,6 +61,7 @@ type fakeGitHub struct {
 	patches     []fakePatch // issue PATCHes that landed, in landing order
 	before      func()      // one-shot seam of the next issue PATCH
 	after       func()
+	commentNext func() // one-shot seam after the next comment PATCH landed, before its answer (commentSeam)
 	stampAnswer fakeStampAnswer
 	pageHolds   map[int]chan struct{} // issue-listing pages held until closed (holdPage)
 	pagesServed atomic.Int64          // issue-listing requests served
@@ -206,6 +207,14 @@ func (f *fakeGitHub) comment(t *testing.T, id int64) fakeComment {
 func (f *fakeGitHub) seam(before, after func()) {
 	f.mu.Lock()
 	f.before, f.after = before, after
+	f.mu.Unlock()
+}
+
+// commentSeam arms the next comment PATCH: after runs once the PATCH
+// landed, before the forge answers it.
+func (f *fakeGitHub) commentSeam(after func()) {
+	f.mu.Lock()
+	f.commentNext = after
 	f.mu.Unlock()
 }
 
@@ -483,10 +492,15 @@ func (f *fakeGitHub) serveCommentPatch(w http.ResponseWriter, r *http.Request) {
 			out = &c
 		}
 	}
+	next := f.commentNext
+	f.commentNext = nil
 	f.mu.Unlock()
 	if out == nil {
 		http.NotFound(w, r)
 		return
+	}
+	if next != nil {
+		next()
 	}
 	f.answer(w, http.StatusOK, map[string]any{"id": out.ID, "body": out.Body}, out.Updated)
 }

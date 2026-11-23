@@ -131,6 +131,10 @@ type SyncStatus struct {
 	BackoffSet  bool      `json:"backoff_set"`
 	RunID       string    `json:"run_id,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
+	// advanced: a pull leg of this run saved a fetch cursor past the one it
+	// started from (noteAdvanced); with Applied and Pushed it is what
+	// truncated asks of a run a bound cut.
+	advanced bool
 }
 
 // TenantStatusFn resolves the owning tenant's status for a scope; found=false ⇒
@@ -367,21 +371,24 @@ func (m *SyncManager) runSync(base context.Context, project store.ProjectRow, dr
 	}()
 	ctx, cancel := context.WithTimeout(base, m.runDeadline())
 	defer cancel()
-	// failed ends the run on err, named as the deadline when the run met it.
-	failed := func(backoffN int, err error) {
+	etag, since, backoffN := readCursor(project.SyncCursor)
+	// failed ends the run on err; a run its deadline cut is no failure at
+	// the forge and ends as truncated.
+	failed := func(err error) {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			err = errRunDeadline(m.runDeadline())
+			m.truncated(base, project.ID, runID, backoffN, errRunDeadline(m.runDeadline()))
+			return
 		}
 		m.handleWireError(base, project.ID, runID, backoffN, err)
 	}
 
 	token, err := m.resolveToken(ctx, project)
 	if err != nil {
-		msg := "token resolve failed"
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			msg = errRunDeadline(m.runDeadline()).Error()
+			failed(err)
+			return
 		}
-		m.finish(project.ID, runID, msg, true, false)
+		m.finish(project.ID, runID, "token resolve failed", true, false)
 		return
 	}
 	repo, err := repoRefFromForge(project.Forge)
@@ -390,8 +397,6 @@ func (m *SyncManager) runSync(base context.Context, project store.ProjectRow, dr
 		return
 	}
 	client := m.newForge(token)
-
-	etag, since, backoffN := readCursor(project.SyncCursor)
 
 	// Issue leg: fetch + 3-way apply per page, committing the etag/since cursor
 	// AFTER each successful page apply (I-G — I-F left the durable advance to us).
@@ -412,7 +417,7 @@ func (m *SyncManager) runSync(base context.Context, project store.ProjectRow, dr
 		case errors.Is(err, errPageBound):
 			bounded = err
 		default:
-			failed(backoffN, err)
+			failed(err)
 			return
 		}
 	}
@@ -422,14 +427,14 @@ func (m *SyncManager) runSync(base context.Context, project store.ProjectRow, dr
 		cEtag, cSince := readCommentCursor(project.SyncCursor)
 		if err := m.pullComments(ctx, project, client, repo, cEtag, cSince, bounded == nil); err != nil && !errors.Is(err, ErrNotModified) {
 			if !errors.Is(err, errPageBound) {
-				failed(backoffN, err)
+				failed(err)
 				return
 			}
 			bounded = err
 		}
 	}
 	if bounded != nil {
-		m.handleWireError(base, project.ID, runID, backoffN, bounded)
+		m.truncated(base, project.ID, runID, backoffN, bounded)
 		return
 	}
 
@@ -452,12 +457,14 @@ func (m *SyncManager) runSync(base context.Context, project store.ProjectRow, dr
 		}
 		m.mu.Unlock()
 		if err != nil {
-			failed(backoffN, err)
+			failed(err)
 			return
 		}
 	}
 
-	// SUCCESS. Backoff/error are cleared and last_sync_at stamped; backoff_n reset.
+	// SUCCESS — also where the deadline passed while the push's last write
+	// was on the wire: the write is let finish (Pusher.section) and the pass
+	// had nothing left, so the deadline cut nothing (issue #474). Backoff/error are cleared and last_sync_at stamped; backoff_n reset.
 	// The etag/since fetch cursors were advanced per page inside the legs above (I-F
 	// with applyIssues==nil advances nothing — no apply happened).
 	_ = store.SetProjectSyncState(base, m.pool, project.ID, store.SyncStatePatch{
@@ -501,6 +508,7 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 			if !maxSeen.IsZero() {
 				etag, at := legCursor(firstETag, n, page.NextURL, maxSeen, relist)
 				m.commitFetchCursor(ctx, project.ID, "issues", etag, at, hold, page.NextURL == "", nil)
+				m.noteAdvanced(project.ID, since, at)
 			}
 		}
 		if page.NextURL == "" {
@@ -548,6 +556,7 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 		if !maxSeen.IsZero() {
 			etag, at := legCursor(firstETag, n, page.NextURL, maxSeen, relist)
 			m.commitFetchCursor(ctx, project.ID, "comments", etag, at, hold, page.NextURL == "", orphansUntil(maxSeen))
+			m.noteAdvanced(project.ID, since, at)
 		}
 		if page.NextURL == "" {
 			return nil
@@ -789,6 +798,49 @@ func (m *SyncManager) addApplied(projectID string, res ApplyResult) {
 		st.PullSkipped += res.Skipped
 	}
 	m.mu.Unlock()
+}
+
+// noteAdvanced records that a leg saved a fetch cursor at past since, the
+// one the run started the leg from (truncated).
+func (m *SyncManager) noteAdvanced(projectID string, since, at time.Time) {
+	if !at.After(since) {
+		return
+	}
+	m.mu.Lock()
+	if st := m.runs[projectID]; st != nil {
+		st.advanced = true
+	}
+	m.mu.Unlock()
+}
+
+// truncated ends a run that a bound cut — a leg's page bound (errPageBound)
+// or the run's deadline (errRunDeadline) — before its work was done (issue
+// #474). Neither is a failure at the forge: last_error names the bound and
+// sync_status is error, as before, and the next run goes on from the saved
+// cursor. A run that moved on — a leg saved a fetch cursor past where it
+// started, or an entity was applied or pushed — sets backoff_n to 0 and
+// clears backoff_until, as a success does: the forge answered. One that did
+// not ends as a wire error does (handleWireError, the backoff grows): a
+// forge that answers nothing, or no page within the deadline, is not
+// started against back to back by a caller that reads the backoff. Before,
+// every such run went through handleWireError: a first sync that needs
+// several runs stood at backoff_n 6 and a backoff of 32 min when it was
+// done, although every run moved on.
+func (m *SyncManager) truncated(ctx context.Context, projectID, runID string, backoffN int, err error) {
+	m.mu.Lock()
+	st := m.runs[projectID]
+	advanced := st != nil && (st.advanced || st.Applied > 0 || st.Pushed > 0)
+	m.mu.Unlock()
+	if !advanced {
+		m.handleWireError(ctx, projectID, runID, backoffN, err)
+		return
+	}
+	msg := sanitizeErr(err)
+	_ = store.SetProjectSyncState(ctx, m.pool, projectID, store.SyncStatePatch{
+		SyncStatus: strptr("error"), LastError: &msg, ClearBackoff: true,
+	})
+	_ = store.MergeProjectSyncCursor(ctx, m.pool, projectID, json.RawMessage(`{"backoff_n":0}`))
+	m.finish(projectID, runID, msg, true, false)
 }
 
 // handleWireError stamps backoff_until (Retry-After if the forge gave one, else
