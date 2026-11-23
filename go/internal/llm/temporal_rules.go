@@ -244,6 +244,52 @@ func (c clauseWords) inCompound(i int) bool {
 	return c.joinedNext[i] && !names(c.words[i+1]) || i > 0 && c.joinedNext[i-1] && !names(c.words[i-1])
 }
 
+// titleWords are the words of address and the titles a surname follows:
+// "Herr Freitag", "Frau Dr. Sonntag", "Prof. Montag", "Mr Friday", "Mrs.
+// Monday" (issue #517). titleArticles before "Herr" or "Frau" make it the
+// noun, which a weekday as a date may follow ("Kam die Frau Montag oder
+// Dienstag?").
+var (
+	titleWords    = toWordSet("herr", "herrn", "frau", "dr", "prof", "mr", "mrs", "ms", "miss")
+	titleArticles = toWordSet("der", "die", "das", "den", "dem", "des", "ein", "eine", "einer", "einem", "einen", "the", "a")
+)
+
+// surnameAt reports whether word i of c, a weekday, is a surname: right
+// behind a title word in its clause (issue #517) — "Was hat Herr Freitag
+// gesagt?" names no Friday. A title written in capitals is an acronym ("DR
+// Monday", "MS Teams"), and one behind an article the noun.
+func (c clauseWords) surnameAt(i int) bool {
+	if i == 0 || c.starts[i] || !titleWords[c.words[i-1]] || c.upper[i-1] {
+		return false
+	}
+	return i < 2 || !titleArticles[c.words[i-2]]
+}
+
+// notADay reports whether word i of c, a weekday or the weekend, names no day:
+// it is joined to a word that names none (inCompound) or a surname
+// (surnameAt).
+func (c clauseWords) notADay(i int) bool {
+	return c.inCompound(i) || c.surnameAt(i)
+}
+
+// dayWeekdays returns the indexes of the words of c that are a weekday naming
+// a day (notADay), with the weekday each names.
+func (c clauseWords) dayWeekdays() []struct {
+	wd  time.Weekday
+	idx int
+	ref string
+} {
+	all := findAllWeekdays(c.words)
+	n := 0
+	for _, w := range all {
+		if !c.notADay(w.idx) {
+			all[n] = w
+			n++
+		}
+	}
+	return all[:n]
+}
+
 // dashAt reports whether the byte i of lower is a hyphen between spaces, a
 // dash.
 func dashAt(lower string, i int) bool {
@@ -2937,7 +2983,6 @@ func findAllWeekdays(tokens []string) []struct {
 
 func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
-	tokens := ruleTokenize(query)
 
 	hasConjunction := strings.Contains(lower, " und ") || strings.Contains(lower, " and ")
 	hasDisjunction := strings.Contains(lower, " oder ") || strings.Contains(lower, " or ")
@@ -2947,17 +2992,10 @@ func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 	}
 
 	// First: check for weekday disjunction/conjunction ("Montag oder Dienstag", "Monday or Tuesday"),
-	// not counting a weekday in a compound (inCompound).
+	// not counting a weekday that names no day (notADay: a compound, a
+	// surname).
 	c := clauseTokens(query)
-	weekdays := findAllWeekdays(tokens)
-	n := 0
-	for _, w := range weekdays {
-		if !c.inCompound(w.idx) {
-			weekdays[n] = w
-			n++
-		}
-	}
-	weekdays = weekdays[:n]
+	weekdays := c.dayWeekdays()
 	if len(weekdays) >= 2 {
 		// Each weekday by the tense of its own clause (tenseAt): "We
 		// deployed on Monday, and we will deploy on Monday" names two days
@@ -3020,12 +3058,13 @@ func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 }
 
 func matchWeekday(query string, tokens []string, now time.Time) *TemporalResult {
-	// The first weekday not in a compound (inCompound, issue #506).
+	// The first weekday that names a day: not in a compound (issue #506), not
+	// a surname (issue #517).
 	c := clauseTokens(query)
 	var wd time.Weekday
 	wdIdx, found := -1, false
 	for i := range c.words {
-		if w, _, ok := findWeekday(c.words[i : i+1]); ok && !c.inCompound(i) {
+		if w, _, ok := findWeekday(c.words[i : i+1]); ok && !c.notADay(i) {
 			wd, wdIdx, found = w, i, true
 			break
 		}
@@ -3645,7 +3684,8 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 	}
 	query = dateSpaces.Replace(query)
 	now = truncDate(now)
-	tokens := ruleTokenize(query)
+	cw := clauseTokens(query)
+	tokens := cw.words
 	recur := hasRecurrence(tokens)
 
 	// Priority 1: day dates, ISO and dot form (most specific) — pure linear
@@ -3748,7 +3788,7 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 
 	// Priority 10: Multi-keyword (heute und morgen, Montag oder Dienstag)
 	if r := matchMultiKeyword(query, now); r != nil {
-		if len(findAllWeekdays(tokens)) >= 2 {
+		if len(cw.dayWeekdays()) >= 2 {
 			if recur {
 				r.DimensionWeights = dwWeekday()
 			} else {

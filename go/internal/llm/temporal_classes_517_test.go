@@ -131,7 +131,7 @@ func TestRules_ClassCorporaOfIssue517(t *testing.T) {
 // the rules answered right when issue #517's pull request landed: a floor
 // that keeps its improvements counted.
 var classCorpusFloor = map[string]int{
-	"k1-nachname":      30,
+	"k1-nachname":      58,
 	"k2-tageszeit":     9,
 	"k3-klauseln":      34,
 	"k4-ellipse":       4,
