@@ -357,7 +357,9 @@ func issuesConflictsCmd(getClient func() (*Client, error), project *string) *cob
 			"over the entity. An issue deleted on the forge or moved to another repository is\n" +
 			"never listed again and keeps its gate: archive its block, and the push and the\n" +
 			"count leave it out. For an issue the forge still has, `resolve --keep local` opens\n" +
-			"the gate (the next push sends the edits made since). `ctx project issues sync --status`\n" +
+			"the gate: the next push sends the edits made since over the forge's version of the\n" +
+			"fields they touch, without a flag — also over a forge change no pull has seen yet\n" +
+			"(a gated row's forge side is forge_unknown). `ctx project issues sync --status`\n" +
 			"counts them as gated.",
 		Example: `  ctx project issues conflicts
   ctx project issues conflicts --limit 20 --after <cursor>
@@ -384,8 +386,10 @@ func issuesResolveCmd(getClient func() (*Client, error), project *string) *cobra
 			"Pass the flag token `conflicts` printed as --expect, and the resolution is refused\n" +
 			"(exit 1) if the flag changed since it was listed. A mapping that is no longer\n" +
 			"flagged is left unchanged — except one behind the push gate of a remote\n" +
-			"resolution (`conflicts --gated`): --keep local opens its gate. Needs a tenant-admin\n" +
-			"key; each resolution is audited.",
+			"resolution (`conflicts --gated`): --keep local opens its gate, and the next push\n" +
+			"sends the edits made since over the forge's version of the fields they touch,\n" +
+			"without a flag — also over a forge change no pull has seen yet (a gated row's\n" +
+			"forge side is forge_unknown). Needs a tenant-admin key; each resolution is audited.",
 		Example: `  ctx project issues resolve <block-id> --keep remote
   ctx project issues resolve <block-id> --keep local --expect <flag>`,
 		Args: cobra.ExactArgs(1),
