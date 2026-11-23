@@ -282,6 +282,24 @@ func TestBackgroundDigestIsNotStartedByItsOwnMap(t *testing.T) {
 	if !strings.Contains(f.mapText(t, f.scope), "a source block") {
 		t.Error("the map does not list the written block")
 	}
+
+	// The map's type, system-meta, is digested: the map's first write added it
+	// to its own source, and the map lists itself from the next write of
+	// another block on — not from a run its own notification started.
+	if strings.Contains(f.mapText(t, f.scope), " topic-map-"+f.scope+"\n") {
+		t.Fatal("the map lists itself without a write after its first one")
+	}
+	f.write(t, f.scope, "another source block")
+	f.flush(t)
+	f.debouncePassed()
+	f.s.digestTick(ctx)
+	f.flush(t)
+	if text := f.mapText(t, f.scope); !strings.Contains(text, " topic-map-"+f.scope+"\n") || !strings.Contains(text, "another source block") {
+		t.Errorf("after another write the map does not list itself and the new block:\n%s", text)
+	}
+	if got := f.runs(); got != 2 {
+		t.Errorf("%d runs for two block writes, want 2", got)
+	}
 }
 
 // TestBackgroundDigestKeepsAWriteThatArrivesDuringTheRun is the counter-check

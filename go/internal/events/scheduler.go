@@ -318,15 +318,19 @@ type Scheduler struct {
 	writeGen uint64
 
 	// digestMaps holds the ids of the topic maps the background digest of this
-	// process wrote (issue #525). A map is the digest's output, never its
-	// source, and its write notifies like any other: counted as a write, the
-	// notification of the map one run wrote made the digest pending again —
-	// whenever it arrived after the run's end — and the digest ran again after
-	// every debounce. A notification naming one of these ids is no write for
-	// the digest. Another instance's run writes the same rows (a map's row is
-	// its category, title and scope), so its maps are known here once this
-	// process has written them itself. One id per map row: bounded by the
-	// topic maps the process ever wrote.
+	// process wrote (issue #525). A map is the digest's output, and its write
+	// notifies like any other: counted as a write, the notification of the map
+	// one run wrote made the digest pending again — whenever it arrived after
+	// the run's end — and the digest ran again after every debounce. A
+	// notification naming one of these ids is no write for the digest. A
+	// rewrite of a map changes no line of a map: where the map's own type is
+	// digested (system-meta is, by default), its line shows its id, title and
+	// scope, and the rewrite keeps all three. Only the first write of a map
+	// adds it to its own source, and the map lists itself from the next write
+	// of another block on. Another instance's run writes the same rows (a
+	// map's row is its category, title and scope), so its maps are known here
+	// once this process has written them itself. One id per map row: bounded
+	// by the topic maps the process ever wrote.
 	digestMaps map[string]struct{}
 	// digestRun is the open notes of the background digest run under way, nil
 	// between runs (beginDigestRun, endDigestRun).

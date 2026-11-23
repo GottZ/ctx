@@ -8,6 +8,8 @@ package digest
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/blocktype"
@@ -17,12 +19,15 @@ import (
 
 // TestMapSourceGroupsCategoriesInByteOrder runs the production source query
 // over a column whose collation orders the categories otherwise than their
-// bytes do, and reads the order the categories arrive in. The test database
-// of either image compares by bytes (C.UTF-8 on the CI image, and the template
-// copies keep it), so the column carries the linguistic collation the
-// production image's cluster has as its default (en_US.utf8), as a glibc or an
-// ICU collation, whichever the image provides: the query decides its own
-// order only if that order does not change.
+// bytes do, and reads the order the categories arrive in. The CI image's test
+// database compares by bytes (C.UTF-8), so the column carries the linguistic
+// collation the production image's cluster has as its default (en_US.utf8,
+// which that image's test database has already), as a glibc or an ICU
+// collation, whichever the image provides: the query decides its own order
+// only if that order does not change. Its plan then shows the sort itself:
+// one sort, every key of it in "C" — no key, the title included, compared in
+// the database's collation (a title key would pass the order check, since
+// the builder needs only the grouping, and cost what the fix took away).
 //
 // RED before issue #525: the source query sorted in the database's (here the
 // column's) collation — "alpha" before "Zeta", where bytes put "Zeta" first —
@@ -100,6 +105,42 @@ func TestMapSourceGroupsCategoriesInByteOrder(t *testing.T) {
 	if !equalStrings(arrived, bytesOrder) {
 		t.Fatalf("the source query returned the categories in the order %v (the column's collation %s orders %v), want byte order %v",
 			arrived, coll, linguistic, bytesOrder)
+	}
+
+	// The plan: a sort whose every key is compared in "C".
+	var raw []byte
+	if err := pool.QueryRow(ctx, "EXPLAIN (VERBOSE, FORMAT JSON) "+mapSourceQuery, []string{"private", "work"}, types).Scan(&raw); err != nil {
+		t.Fatalf("explain the source query: %v", err)
+	}
+	var doc []struct {
+		Plan map[string]any `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil || len(doc) != 1 {
+		t.Fatalf("explain json: %v", err)
+	}
+	var keys [][]string
+	var walk func(n map[string]any)
+	walk = func(n map[string]any) {
+		if typ, _ := n["Node Type"].(string); typ == "Sort" || typ == "Incremental Sort" {
+			var k []string
+			for _, v := range n["Sort Key"].([]any) {
+				k = append(k, v.(string))
+			}
+			keys = append(keys, k)
+		}
+		children, _ := n["Plans"].([]any)
+		for _, c := range children {
+			walk(c.(map[string]any))
+		}
+	}
+	walk(doc[0].Plan)
+	if len(keys) != 1 {
+		t.Fatalf("the source query's plan has %d sorts, want 1 (no index orders by bytes, so a plan without a sort takes the order of an index in the database's collation):\n%s", len(keys), raw)
+	}
+	for _, k := range keys[0] {
+		if !strings.HasSuffix(k, `COLLATE "C"`) {
+			t.Fatalf("the source query sorts by %q in the database's collation (sort keys %v)", k, keys[0])
+		}
 	}
 }
 

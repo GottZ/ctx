@@ -41,7 +41,7 @@ import (
 // always was, above it says what it leaves out (see mapBuilder), and the run
 // holds memory bounded by the cap rather than by the corpus. Result reports
 // the map this run wrote; it is the zero value when the run wrote none (off,
-// stub, an empty source).
+// an unchanged stub, an empty source).
 func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry,
 	mode, language, tenantScope, homeScope string, readScopes []string) (Result, error) {
 	if blocktypes == nil {
