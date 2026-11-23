@@ -55,9 +55,9 @@ func TestHealthStormHoldsOneProbePerBackend(t *testing.T) {
 		operatorRow("i504-storm-e", up, backends.RoleEmbed, backends.RoleDream),
 		operatorRow("i504-storm-c", "http://"+hang.l.Addr().String(), backends.RoleSynthesis),
 	})
+	t.Cleanup(func() { waitHealthRounds(t) }) // after srv.Close: a handler that came late may start a round
 	srv := httptest.NewServer(http.HandlerFunc(h.Health))
 	t.Cleanup(srv.Close)
-	t.Cleanup(func() { waitHealthRounds(t) })
 	installRejectLogCapture(t)
 
 	tr := &http.Transport{MaxIdleConnsPerHost: requests}

@@ -441,9 +441,17 @@ func TestHealthStormAgainstAHangingDatabase(t *testing.T) {
 	db := newCountingHangHost(t)
 	up := slowBackend(t, 0, nil)
 	h := roundHandler(hangingDatabasePool(t, db), seededBackends(operatorRow("i519-db", up, i504Roles...)))
-	srv := httptest.NewServer(Logger(http.HandlerFunc(h.Health)))
+	t.Cleanup(func() { waitHealthRounds(t) }) // after srv.Close: a handler that came late may start a round
+	// A client gone after 20 ms may give up before its request reached the
+	// server; the requests that did are counted around the logger.
+	var arrived, logged atomic.Int64
+	logger := Logger(http.HandlerFunc(h.Health))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrived.Add(1)
+		logger.ServeHTTP(w, r)
+		logged.Add(1)
+	}))
 	t.Cleanup(srv.Close)
-	t.Cleanup(func() { waitHealthRounds(t) })
 	logs := installRejectLogCapture(t)
 
 	var wg sync.WaitGroup
@@ -461,7 +469,10 @@ func TestHealthStormAgainstAHangingDatabase(t *testing.T) {
 	}
 	wg.Wait()
 	waitHealthRounds(t)
-	waitUntil(t, 20*time.Second, "the request lines", func() bool { return len(logs.withMsg("http request")) >= 200 })
+	waitUntil(t, 20*time.Second, "the request lines", func() bool { return logged.Load() == arrived.Load() })
+	if n := arrived.Load(); n < 100 {
+		t.Fatalf("only %d of 200 requests reached the server — the storm proves nothing", n)
+	}
 
 	waited := 0
 	for _, r := range logs.withMsg("http request") {
@@ -475,8 +486,8 @@ func TestHealthStormAgainstAHangingDatabase(t *testing.T) {
 			errs++
 		}
 	}
-	t.Logf("200 requests: %d request lines with waited_for=db_connection, %d database ERROR lines, %d connection attempts accepted by the database, %d open at most",
-		waited, errs, db.accepted.Load(), db.peak.Load())
+	t.Logf("200 requests, %d reached the server: %d request lines with waited_for=db_connection, %d database ERROR lines, %d connection attempts accepted by the database, %d open at most",
+		arrived.Load(), waited, errs, db.accepted.Load(), db.peak.Load())
 	if waited != 0 {
 		t.Errorf("%d request lines with waited_for=db_connection, want 0 — one per request is no change of state", waited)
 	}

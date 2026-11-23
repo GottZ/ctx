@@ -40,9 +40,9 @@ func TestStatusCollectorProbesWithTheHealthBudget(t *testing.T) {
 
 	done := make(chan *cheapSnapshot, 1)
 	go func() { done <- c.buildCheap(context.Background(), cfg) }()
-	// The backend answers once the test lets it, long after the budget: a
-	// collector off the budget gets that answer.
-	release := time.AfterFunc(5*time.Second, func() { hold.Store(false) })
+	// The backend answers once the test lets it, ten budgets later: a
+	// collector on a budget of its own (/health's 4 s, say) gets that answer.
+	release := time.AfterFunc(2*time.Second, func() { hold.Store(false) })
 	defer release.Stop()
 	snap := <-done
 	waitHealthRounds(t)
