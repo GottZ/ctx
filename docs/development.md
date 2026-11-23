@@ -188,18 +188,24 @@ result of the planner input.
 **A red nightly opens an issue.** The last job of `ci.yml`, `nightly-report`,
 waits for every job of a scheduled run and runs
 `.github/scripts/nightly-report.sh`: when one of them failed or was cancelled
-(a job that ran out of its time), it opens one issue with the label
-`nightly-red`, assigned to both maintainers, naming the red jobs and linking
-the run — or, while such an issue is open, adds a comment to it, so a red
-streak stays one issue; when every job is green again it closes the issue with
-a comment that links the green run. Only that job may write (`issues: write`),
+(a job that ran out of its time), it opens one issue titled "Nightly CI run is
+red" with the label `nightly-red`, naming the red jobs and linking the run,
+and assigns it to both maintainers — or, while such an issue is open, adds a
+comment to the oldest one, so a red streak stays one issue; when every job is
+green again it closes every such issue with a comment that links the green
+run. It finds its issue by label and exact title in the REST list of open
+issues (not the search index, which can lag behind an issue opened moments
+before), and writes nothing when that read fails; an assignment that fails
+leaves the issue and a warning. Only that job may write (`issues: write`),
 only on a schedule run in this repository (not on a fork); a dispatch runs it
 read-only and writes what it would do to the job summary. The label is created
 on the first red run. `bash .github/scripts/nightly-report.test.sh` checks the
-script's decisions against a stubbed `gh` (the `lint` job runs it). GitHub
-disables a scheduled workflow of a public repository after 60 days without
-activity in the repository; then there is no nightly run and no report until
-the workflow is enabled again in the Actions tab.
+script's decisions against a stubbed `gh` over consecutive nights, and that
+the job waits for every job a schedule runs (the `lint` job runs it; locally
+`TMPDIR` must allow executables). GitHub disables a scheduled workflow of a
+public repository after 60 days without activity in the repository; then
+there is no nightly run and no report until the workflow is enabled again in
+the Actions tab.
 
 The two images differ in more than their versions, and plan and cost pins see
 the difference:
@@ -207,19 +213,21 @@ the difference:
 | | `timescale/timescaledb-ha:pg18` (CI) | `pgvector-timescaledb:pg18` (production) |
 |---|---|---|
 | Versions | PostgreSQL 18.7, TimescaleDB 2.32.1 on 2026-11-22 (the tag floats) | PostgreSQL 18.6, TimescaleDB 2.31.0 (`db-image/Dockerfile` pins the base image by digest and the TimescaleDB packages by version) |
-| Planner inputs | set by `timescaledb-tune` at start, sized from the `TS_TUNE_MEMORY=2GB` and `TS_TUNE_NUM_CPUS=2` that `testdb` passes (so they do not follow the host): `work_mem` 32 MB, `effective_cache_size` about 1.9 GB, `max_parallel_workers_per_gather` 1; its `random_page_cost` 1.1 is overridden to 4 by `testdb` (below) | PostgreSQL's defaults: `random_page_cost` 4, `work_mem` 4 MB, `effective_cache_size` 4 GB, `max_parallel_workers_per_gather` 2 |
+| Planner inputs | set by `timescaledb-tune` at start, sized from the `TS_TUNE_MEMORY=2GB` and `TS_TUNE_NUM_CPUS=2` that `testdb` passes (so they do not follow the host): `work_mem` 32 MB, `effective_cache_size` 1.5 GB, `max_parallel_workers_per_gather` 1; its `random_page_cost` 1.1 is overridden to 4 by `testdb` (below) | PostgreSQL's defaults: `random_page_cost` 4, `work_mem` 4 MB, `effective_cache_size` 4 GB, `max_parallel_workers_per_gather` 2 |
 | JIT | not available (`pg_jit_available()` is false), `jit = off` | available, `jit = on` |
 | Collation of the cluster | `C.UTF-8` | `en_US.utf8` |
 
 A deployment prices pages with `random_page_cost` 4 unless its operator set
-another value. `testdb` starts every container, on either image, with
+another value. Every container `testdb` starts, on either image, runs with
 `-c random_page_cost=4` (`testdb.DeploymentRandomPageCost`; the command line
 wins over the CI image's `postgresql.conf`), so a test that sets no value of
 its own plans with a deployment's page cost in the per-PR jobs and in the
-nightly job alike (issue #514: the per-PR jobs used to run at the CI image's
-1.1, where two cost pins and a plan pin that failed at 4 passed in every pull
-request; it costs those jobs no time). The other planner inputs in the table
-still differ. Three tests need JIT and skip on the CI image:
+nightly job on the production image alike (issue #514: the per-PR jobs used to
+run at the CI image's 1.1, where two cost pins and a plan pin that failed at 4
+passed in every pull request). A schedule or dispatch run of
+`integration-tests` sets `PGOPTIONS='-c random_page_cost=1.1'`, so every night
+also runs the whole suite at 1.1, the value an operator tuning for SSD storage
+sets. The other planner inputs in the table still differ. Three tests need JIT and skip on the CI image:
 `TestMigration177_JitOfAFirstCallDoesNotStick`,
 `TestTransitionTablePlansDoNotKeepJit` and
 `TestMigration180ReplansABackendThatKeptJit`. A plan or cost pin that fails on

@@ -16,13 +16,19 @@
 #   GITHUB_STEP_SUMMARY (optional)
 #
 # Red is a job that failed or was cancelled (a job that runs out of its
-# timeout-minutes ends cancelled); skipped and success are green. Red and no
-# open issue: the label is created (or kept, --force) and one issue opened.
-# Red and an open issue: a comment on it — never a second issue, so a red
-# streak stays one issue; with several open ones (opened by hand), the oldest
-# gets the comment. Green and an open issue: closed with a comment that links
-# the run. The open issue is the one with the label and exactly the title
-# below; when that lookup fails, the script stops before it writes anything.
+# timeout-minutes ends cancelled); skipped and success are green.
+#
+# The report's issues are the open issues with the label and exactly the
+# title below, read from the REST list of the repository's issues (not from
+# the search index, which `gh issue list --label` reads and which can lag
+# behind an issue opened moments ago). When that read fails, the script stops
+# before it writes anything.
+#
+# Red and no such issue: the label is created (or kept, --force), one issue
+# opened, then assigned (an assignment that fails leaves the issue and a
+# warning). Red and such an issue: a comment on the oldest — never a second
+# issue, so a red streak stays one issue. Green: every such issue is closed
+# with a comment that links the run.
 set -euo pipefail
 
 LABEL=nightly-red
@@ -58,10 +64,12 @@ while read -r job result; do
   esac
 done <<<"$results"
 
-open=$(gh issue list --repo "$REPO" --state open --label "$LABEL" --json number,title --limit 100) ||
+# The REST list holds pull requests too; they carry a pull_request key.
+listed=$(gh api "repos/$REPO/issues?state=open&labels=$LABEL&per_page=100") ||
   fail "could not list the open issues with label $LABEL"
-issue=$(jq -r --arg t "$TITLE" '[.[] | select(.title == $t) | .number] | min // empty' <<<"$open") ||
+ours=$(jq -r --arg t "$TITLE" '[.[] | select(.pull_request == null and .title == $t) | .number] | sort | .[]' <<<"$listed") ||
   fail "could not read the issue list"
+issue=$(head -n 1 <<<"$ours")
 
 body=$(mktemp)
 trap 'rm -f "$body"' EXIT
@@ -79,7 +87,8 @@ if [ "${#red_jobs[@]}" -gt 0 ]; then
   if [ -n "$issue" ]; then action="comment on #$issue"; else action="open an issue"; fi
 elif [ -n "$issue" ]; then
   echo "The nightly run of ci.yml on $today is green again: $RUN_URL" >"$body"
-  action="close #$issue"
+  numbers=$(paste -sd ' ' - <<<"$ours")
+  action="close #${numbers// / #}"
 else
   action="nothing (green, no open issue)"
 fi
@@ -97,13 +106,17 @@ echo "nightly-report ($MODE): ${#red_jobs[@]} red job(s)${red_jobs[*]:+: ${red_j
 
 [ "$MODE" = write ] || exit 0
 if [ "${#red_jobs[@]}" -gt 0 ] && [ -z "$issue" ]; then
-  assign=()
-  [ -z "${ASSIGNEES:-}" ] || assign=(--assignee "$ASSIGNEES")
   gh label create "$LABEL" --repo "$REPO" --force --color B60205 \
     --description "A scheduled run of ci.yml is red (job nightly-report)" >/dev/null
-  gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" "${assign[@]}" --body-file "$body"
+  url=$(gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" --body-file "$body")
+  echo "opened $url"
+  if [ -n "${ASSIGNEES:-}" ] && ! gh issue edit "${url##*/}" --repo "$REPO" --add-assignee "$ASSIGNEES" >/dev/null; then
+    echo "::warning::nightly-report: $url could not be assigned to $ASSIGNEES"
+  fi
 elif [ "${#red_jobs[@]}" -gt 0 ]; then
   gh issue comment "$issue" --repo "$REPO" --body-file "$body"
-elif [ -n "$issue" ]; then
-  gh issue close "$issue" --repo "$REPO" --comment "$(cat "$body")"
+else
+  while read -r n; do
+    [ -z "$n" ] || gh issue close "$n" --repo "$REPO" --comment "$(cat "$body")"
+  done <<<"$ours"
 fi

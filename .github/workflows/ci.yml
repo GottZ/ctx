@@ -834,8 +834,9 @@ jobs:
 
     # The planner input of the tests is a deployment's: internal/testdb starts
     # the container with random_page_cost 4 (DeploymentRandomPageCost) over
-    # the 1.1 timescaledb-tune writes into this image (issue #514); pins whose
-    # plan depends on the value check 1.1 as well.
+    # the 1.1 timescaledb-tune writes into this image (issue #514); a schedule
+    # or dispatch run plans at 1.1 (the test step's PGOPTIONS), and pins whose
+    # plan depends on the value check both in every run.
     env:
       TESTCONTAINERS_RYUK_DISABLED: "false"
       TESTCONTAINERS_PULL_POLICY: "default"
@@ -913,7 +914,16 @@ jobs:
 
       - name: Run integration tests
         working-directory: go
+        env:
+          # The planner input (issue #514): a pull request or push runs at the
+          # container's random_page_cost 4, a deployment's (internal/testdb);
+          # a schedule or dispatch run at 1.1, what an operator tuning for SSD
+          # storage sets, through PGOPTIONS (every connection of the test
+          # binaries, below a test's own setting). The nightly job on the
+          # production image runs at 4, so each night checks both values.
+          PGOPTIONS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '-c random_page_cost=1.1' || '' }}
         run: |
+          echo "planner input: ${PGOPTIONS:-random_page_cost 4 of the test container}"
           # -timeout is PER PACKAGE, and since 2026-08-29 per shard
           # (matrix.pkg_timeout): 15m everywhere, 30m for distill — see that
           # matrix entry for the measurement the 30m comes from.
