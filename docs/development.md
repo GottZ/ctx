@@ -138,15 +138,55 @@ before, and a second failure names both attempts.
 
 **Integration tests against the production image.** `CTX_TEST_PG_IMAGE` names
 the image `internal/testdb` starts; unset, it is `timescale/timescaledb-ha:pg18`,
-the image CI runs. Set to `pgvector-timescaledb:pg18` (built from `db-image/`,
-the image a deployment runs), any integration package runs against the
-production image. `testdb` takes the name as given, without a fallback, so the
-image has to exist locally first (it is not published):
+the image of CI's per-PR integration jobs. Set to `pgvector-timescaledb:pg18`
+(built from `db-image/`, the image a deployment runs), any integration package
+runs against the production image. `testdb` takes the name as given, without a
+fallback, so the image has to exist locally first (it is not published):
 
 ```bash
 docker build -t pgvector-timescaledb:pg18 db-image
 cd go && CTX_TEST_PG_IMAGE=pgvector-timescaledb:pg18 go test -tags=integration -p 1 -count=1 -timeout 30m ./internal/store/
 ```
+
+**The nightly job on the production image.** CI's job
+`integration-production-image` (schedule and `workflow_dispatch` only, never a
+required check) builds this image from `db-image/` in each of its shards and
+runs on it every package whose integration tests start a database container:
+every test binary that links `internal/testdb` or the Testcontainers postgres
+module under `-tags=integration`, computed at run time, so a new package joins
+by itself. The shard table, the `rest` shard (every such package no other shard
+names) and the timeouts are in `.github/scripts/production-image.sh`; the job
+reads its matrix from there. Three commands of that script keep a run from
+passing on the wrong image: `probe` starts the built image once, writes its
+version, `pg_jit_available()`, `random_page_cost`, `work_mem`,
+`effective_cache_size` and collation to the log and the job summary, and fails
+without JIT; `containers` fails unless every container the tests started (the
+Testcontainers reaper aside) came from `CTX_TEST_PG_IMAGE` (`testdb` would
+start the CI image if the variable were empty); `jit-tests` fails when a test
+skipped for want of JIT, or when one of the three JIT tests named below did not
+run in the shard of `internal/store`. Each command runs locally as in the job:
+
+```bash
+CTX_TEST_PG_IMAGE=pgvector-timescaledb:pg18 bash .github/scripts/production-image.sh probe
+bash .github/scripts/production-image.sh packages rest
+```
+
+A dispatch runs it on any branch (`publish_images=false` keeps the image job
+off; a branch never publishes anyway, only the current tip of root does). It
+runs the whole nightly set next to the per-PR jobs — this job, the web live
+tier, the LHCI and trend jobs, the SDK smoke:
+
+```bash
+gh workflow run ci.yml --ref <branch> -f publish_images=false
+```
+
+The job is expected green, with one known exception until its test pins its
+plan: `TestVW4TrigramInnerTiebreak` (`internal/rrf`) wants the GiST index for
+its first plan, and at `random_page_cost` 4 the planner prefers a sequential
+scan of the test's 72 rows. A test that is red there and green in the per-PR
+jobs is a finding about one of the differences below: run it on each image with
+the other image's setting (further down) to tell an image artefact from a
+result of the planner input.
 
 The two images differ in more than their versions, and plan and cost pins see
 the difference:

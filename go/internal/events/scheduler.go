@@ -312,6 +312,13 @@ type Scheduler struct {
 	lastWriteAt   time.Time
 	guardPending  bool
 	digestPending bool
+	// writeGen counts NotifyWrite calls: the corpus state a held digest
+	// failed in (digestHold, issue #518).
+	writeGen uint64
+
+	// digestHold keeps a digest whose run failed for good from running again
+	// until a block is written or a setting changes (issue #518).
+	digestHold digestHold
 
 	// Graceful shutdown: tracks running dream cycles and scheduler lifecycle.
 	dreamWg sync.WaitGroup
@@ -770,6 +777,7 @@ func (s *Scheduler) NotifyWrite() {
 	s.lastWriteAt = time.Now()
 	s.guardPending = true
 	s.digestPending = true
+	s.writeGen++
 }
 
 // Run starts the scheduler. Blocks until ctx is cancelled.
@@ -914,14 +922,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 			}
 
 		case <-digestTicker.C:
-			s.mu.Lock()
-			pending := s.digestPending
-			lastWrite := s.lastWriteAt
-			s.mu.Unlock()
-
-			if pending && !lastWrite.IsZero() && time.Since(lastWrite) >= digestDebounce {
-				s.runDigest(ctx)
-			}
+			s.digestTick(ctx)
 
 		case <-embedCacheTicker.C:
 			s.runSixHourJanitor(ctx)
@@ -2118,6 +2119,29 @@ func (s *Scheduler) runDreamCycle(cfg *config.Config, router *dream.Router, read
 	)
 }
 
+// digestTick is the digest ticker's step: run the digest when it is pending
+// and the debounce after the last write has passed. A held tenant whose
+// configuration generation moved makes it pending (digestHold): a setting
+// changed since its run failed, and it gets one more run.
+func (s *Scheduler) digestTick(ctx context.Context) {
+	s.mu.Lock()
+	pending := s.digestPending
+	lastWrite := s.lastWriteAt
+	s.mu.Unlock()
+
+	if !pending && s.digestHold.configChanged(ctx, s.cfg) {
+		// Pending for real, not only for this tick: a failure of the other
+		// kind in that run keeps it pending and is retried.
+		s.mu.Lock()
+		s.digestPending = true
+		s.mu.Unlock()
+		pending = true
+	}
+	if pending && !lastWrite.IsZero() && time.Since(lastWrite) >= digestDebounce {
+		s.runDigest(ctx)
+	}
+}
+
 // runDigest executes the digest, yielding if queries are active.
 func (s *Scheduler) runDigest(ctx context.Context) {
 	defer guardPanic("digest")
@@ -2137,23 +2161,45 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 	// tenant-overridable scope (config.go:280), or a non-default tenant's titles
 	// would land under a foreign scope. Single-tenant: a 1-element loop over
 	// _global, window = raw read_scopes, home = "private" == the pre-T13 pass.
-	ok := true
-	for _, bt := range s.backgroundTenantsFn(ctx) {
+	//
+	// A tenant whose last run failed on a value the database cannot store is
+	// held until a block is written or its configuration changes (digestHold,
+	// issue #518): its run is skipped and does not keep digestPending set.
+	s.mu.Lock()
+	gen := s.writeGen
+	s.mu.Unlock()
+	ok, succeeded := true, false
+	tenants := s.backgroundTenantsFn(ctx)
+	for _, bt := range tenants {
 		cfg := s.cfg.SnapshotForTenant(ctx, bt.scope)
 		homeScope := effectiveHomeScope(cfg.Scheduler.HomeScope, bt.owned)
+		if s.digestHold.holds(bt.scope, gen, cfg) {
+			slog.Debug("scheduler: digest held — its last run failed on a value the database cannot store, and no block "+
+				"was written and no setting changed since", "scope", homeScope)
+			continue
+		}
 		window := store.IntersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
 		slog.Info("scheduler: running digest", "scope", homeScope)
-		if err := digest.RunDigest(ctx, s.pool, s.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, bt.scope, homeScope, window); err != nil {
-			slog.Error("scheduler: digest error", "error", err)
+		_, err := digest.RunDigest(ctx, s.pool, s.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, bt.scope, homeScope, window)
+		succeeded = succeeded || err == nil
+		if !s.digestHold.settle(bt.scope, homeScope, gen, cfg, err) {
 			ok = false // one tenant's failure must not skip the others
 		}
 	}
+	s.digestHold.retain(tenants)
 	if !ok {
 		return // leave digestPending set → retry next debounce (pre-T13 semantics)
 	}
 
 	s.mu.Lock()
-	s.digestPending = false
+	// A run in which no tenant succeeded wrote no block, so a write since gen
+	// came from elsewhere: it stays pending and ends the hold. After a
+	// success the clear stays unconditional, as before — the run's own map
+	// write notifies too, and keeping that pending would run the digest again
+	// after every debounce.
+	if succeeded || s.writeGen == gen {
+		s.digestPending = false
+	}
 	s.mu.Unlock()
 
 	slog.Info("scheduler: digest complete")
