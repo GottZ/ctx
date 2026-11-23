@@ -12,7 +12,9 @@
 // the uniform 404, no oracle), and block_id and after are checked before
 // the first database access, so a malformed id is a 400 and never reaches a
 // uuid cast (project_id goes through loadOwnedProject like the other forge
-// actions).
+// actions); a valid one is taken in lower case, the spelling the database
+// renders, so the audit row and the answer name the block as every other
+// surface does.
 // The payloads decode strictly: a misspelt expect or all would otherwise drop
 // the guard it names. A resolution and a reset record who did what in
 // context_settings_audit (entity_type forge_sync, store.WriteForgeSyncAudit),
@@ -23,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/forge"
@@ -89,6 +92,7 @@ func (h *ManageHandler) handleForgeConflictList(w http.ResponseWriter, r *http.R
 		forgeBadRequest(w, "limit must not be negative (0 = the default page size)")
 		return
 	}
+	d.After = strings.ToLower(d.After)
 	row, ok := h.loadOwnedProject(w, r, d.ProjectID)
 	if !ok {
 		return
@@ -137,6 +141,7 @@ func (h *ManageHandler) handleForgeConflictResolve(w http.ResponseWriter, r *htt
 		forgeBadRequest(w, "direction must be local or remote")
 		return
 	}
+	d.BlockID = strings.ToLower(d.BlockID)
 	row, ok := h.loadOwnedProject(w, r, d.ProjectID)
 	if !ok {
 		return
@@ -206,6 +211,7 @@ func (h *ManageHandler) handleForgeStampReset(w http.ResponseWriter, r *http.Req
 		forgeBadRequest(w, forgeBlockIDError)
 		return
 	}
+	d.BlockID = strings.ToLower(d.BlockID)
 	row, ok := h.loadOwnedProject(w, r, d.ProjectID)
 	if !ok {
 		return

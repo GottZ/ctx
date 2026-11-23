@@ -451,10 +451,12 @@ const (
 
 // pushLockSQL and pushUnlockSQL take and give back the advisory lock of one
 // entity's push section: the two-key form, class key first, keyed on the
-// block id.
+// block id in its canonical spelling (::uuid::text), so an id sent in upper
+// case names the lock the push holds (issue #509) — the key of a lower-case
+// id is the one the release before took.
 const (
-	pushLockSQL   = `SELECT pg_try_advisory_lock(hashtext('ctx:forge-push'), hashtext($1::text))`
-	pushUnlockSQL = `SELECT pg_advisory_unlock(hashtext('ctx:forge-push'), hashtext($1::text))`
+	pushLockSQL   = `SELECT pg_try_advisory_lock(hashtext('ctx:forge-push'), hashtext($1::uuid::text))`
+	pushUnlockSQL = `SELECT pg_advisory_unlock(hashtext('ctx:forge-push'), hashtext($1::uuid::text))`
 )
 
 // TryLockPushEntity opens the push's section of one entity on conn, a
