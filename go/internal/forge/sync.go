@@ -379,6 +379,10 @@ func (m *SyncManager) runSync(base context.Context, project store.ProjectRow, dr
 	// the forge and ends as truncated.
 	failed := func(err error) {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+				// What failed besides the deadline is named nowhere else.
+				slog.Warn("forge: a step of the sync run failed after its deadline passed", "project", project.ID, "error", err)
+			}
 			m.truncated(base, project.ID, runID, backoffN, errRunDeadline(m.runDeadline()))
 			return
 		}
@@ -1078,8 +1082,14 @@ func repoRefFromForge(raw json.RawMessage) (RepoRef, error) {
 	if f.Owner == "" || f.Repo == "" {
 		return RepoRef{}, fmt.Errorf("forge: owner/repo required in forge config")
 	}
-	if u, err := url.Parse(f.APIBase); err == nil && u.User != nil {
-		return RepoRef{}, errAPIBaseCredentials
+	if f.APIBase != "" {
+		u, err := url.Parse(f.APIBase)
+		switch {
+		case err != nil:
+			return RepoRef{}, errAPIBaseUnparsable
+		case u.User != nil:
+			return RepoRef{}, errAPIBaseCredentials
+		}
 	}
 	return RepoRef{Owner: f.Owner, Repo: f.Repo, APIBase: f.APIBase}, nil
 }
@@ -1093,6 +1103,12 @@ func repoRefFromForge(raw json.RawMessage) (RepoRef, error) {
 // it went unused. Refusing names the change; ignoring it would turn an
 // unauthenticated sync that relied on it into a 401 or 404 without a hint.
 var errAPIBaseCredentials = &configError{"forge: forge.api_base carries credentials (user:password@); the sync does not run with them: remove them from forge.api_base and set the token with forge-token-set"}
+
+// errAPIBaseUnparsable ends a run whose forge.api_base does not parse as a
+// URL (a row written before the API refused it), before its first request:
+// the project API leaves such an api_base out of its answers, and the run
+// ended every time in an unnamed wire error, its backoff growing.
+var errAPIBaseUnparsable = &configError{"forge: forge.api_base does not parse as a URL; the sync does not run: set forge again with PATCH /api/project/{id}"}
 
 // errForgeSpellings ends a run whose forge config names a key in two
 // spellings (repoRefFromForge), before its first request.

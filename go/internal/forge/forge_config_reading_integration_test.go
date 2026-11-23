@@ -49,3 +49,29 @@ func TestARunRefusesAForgeKeyInTwoSpellings(t *testing.T) {
 		t.Errorf("the run's last_error %q — want it to name the key in two spellings, without its values", st.LastError)
 	}
 }
+
+// TestARunRefusesAnAPIBaseThatDoesNotParse: a row written before the API
+// refused it, whose api_base does not parse as a URL. The project API
+// leaves such an api_base out of its answers; the run checked for
+// credentials only where the URL parsed, took the value and ended every run
+// in an unnamed wire error with a growing backoff. It now ends before its
+// first request and names what to change (review round of PR #529).
+func TestARunRefusesAnAPIBaseThatDoesNotParse(t *testing.T) {
+	e := i491Setup(t, "rup", "", fakeIssue{Title: "Crane", Body: "forge body"})
+	raw := `{"kind":"github","owner":"o","repo":"r","api_base":"https://user:secret@ghe.example.com%zz"}`
+	if _, err := e.pool.Exec(context.Background(), `UPDATE context_projects SET forge = $2::jsonb WHERE id = $1::uuid`, e.proj.ID, raw); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := store.GetProjectByID(context.Background(), e.pool, e.proj.ID)
+	if err != nil || proj == nil {
+		t.Fatalf("project row: %v", err)
+	}
+	m := e.i509Mgr(e.pool)
+	if _, err := m.StartSync(context.Background(), *proj, false); err != nil {
+		t.Fatal(err)
+	}
+	st := waitDone(t, m, proj.ID)
+	if !strings.Contains(st.LastError, "forge.api_base") || strings.Contains(st.LastError, "secret") {
+		t.Errorf("the run's last_error %q — want it to name forge.api_base, without its value", st.LastError)
+	}
+}
