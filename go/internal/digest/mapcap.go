@@ -17,14 +17,15 @@ import (
 // 70,000 blocks of realistic titles. The project's target is 1 M–10 M blocks.
 //
 // How many vector bytes a byte of map costs depends on the titles: about 0.6
-// for realistic ones, up to 2.3 for titles built to cost the most (hyphenated
-// compounds of distinct alphanumeric parts, where the parser emits the whole
-// compound and every part; URLs, emitted as URL, host and path), measured on
-// the production image with both configurations. The largest map of such
-// titles that still fits is about 570 KB; a quarter of a mebibyte keeps a
-// margin of more than two over every pattern measured, and over the 3.4 that
-// case folding (two-byte capitals whose lower case takes three bytes) can add
-// in theory. Fixed by that limit, not a tuning knob: the limit is
+// for realistic ones, up to 2.8 for titles built to cost the most (hyphenated
+// compounds of distinct parts, where the parser emits the whole compound and
+// every part, with two-byte capitals in the parts whose lower case takes
+// three bytes; URLs, emitted as URL, host and path), counted as PostgreSQL
+// counts — lexemes and positions — on the production image with both
+// configurations. The largest map of such titles that still fits is about
+// 366 KiB; a quarter of a mebibyte keeps a margin of about 1.4 over the
+// costliest pattern measured, and a map at the cap passes the limit only
+// from 4.0 vector bytes a byte on. Fixed by that limit, not a tuning knob: the limit is
 // PostgreSQL's, and a smaller map is what the root map (root_map.*) is for.
 //
 // Below the cap the map is byte for byte what it was. Above it the map says
@@ -105,7 +106,7 @@ func (h *categoryHeap) Pop() any {
 // (the source query orders by category), holding memory bounded by the cap
 // rather than by the corpus: before issue #518 the run kept every row of the
 // read window in memory: a peak heap of 0.9 to 1.3 GB at 1 M blocks
-// (measured), past the 768 MiB GOMEMLIMIT of the image; about 50 MB now.
+// (measured), past the 768 MiB GOMEMLIMIT of the image; 16 to 80 MB now, by the shape of the corpus.
 //
 // While the full map can still fit, every row is kept, and if it fits in the
 // end the map is rendered exactly as before (renderFull). Once it cannot, the
