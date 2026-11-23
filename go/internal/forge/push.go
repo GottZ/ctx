@@ -320,6 +320,13 @@ func noteNoStamp(blockID, write string, stamp *time.Time) {
 func (p *Pusher) createIssue(ctx context.Context, project store.ProjectRow, client Forge, repo RepoRef,
 	allow func() bool, c *store.IssuePushCandidate, ctxProj issueProjection, ctxH string, ctxFields []byte, res *PushResult) (bool, error) {
 
+	// A run whose deadline passed starts no create (issue #474): the check
+	// comes before the token is spent and the context detached, so a batch
+	// stops at the first create after the deadline instead of sending them
+	// all.
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	if !allow() {
 		res.Throttled = true
 		return false, nil
@@ -389,6 +396,9 @@ func (p *Pusher) pushComment(ctx context.Context, projectID string, client Forge
 	if c.ForgeID == 0 {
 		if c.ParentForgeID == 0 {
 			return true, nil // parent issue not pushed yet — this comment waits
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err // as in createIssue (issue #474)
 		}
 		if !allow() {
 			res.Throttled = true
