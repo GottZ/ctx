@@ -218,3 +218,16 @@ func TestAPushWriteOnTheWireAtTheDeadlineIsRecorded(t *testing.T) {
 		t.Errorf("PATCHes landed after the next run: %d — the advance of the first was lost and the edit went out again", got)
 	}
 }
+
+// TestADeadlineThatEndsTheTokenReadIsNamed: a deadline that passes before
+// the run read its sealed token names the deadline, not a token failure.
+func TestADeadlineThatEndsTheTokenReadIsNamed(t *testing.T) {
+	e := i491Setup(t, "rdt", "", fakeIssue{Title: "Crane", Body: "forge body"})
+	m := e.i509Mgr(e.pool)
+	e.i474Token(t, m)
+	m.SetRunTimeout(time.Nanosecond)
+	st, err := e.i509RunOn(m)
+	if err == nil || !strings.Contains(st.LastError, "deadline") {
+		t.Errorf("the run: last_error %q (%v) — want the deadline named", st.LastError, err)
+	}
+}

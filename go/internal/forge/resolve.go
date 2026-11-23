@@ -216,8 +216,9 @@ func (r *Resolver) ListConflicts(ctx context.Context, project store.ProjectRow, 
 // a remote resolution (issue #509), in the shape of ListConflicts with Gated
 // set: the push leaves them alone until a pull decides over the entity, and
 // an entity the forge no longer lists (deleted, transferred) never gets
-// that pull. A local resolution of such a row opens the gate
-// (ResolveConflict).
+// that pull: its block is archived (the push lists no archived block, and
+// the list leaves it out). A local resolution of a gated row opens the gate
+// of an entity the forge still has (ResolveConflict).
 func (r *Resolver) ListGated(ctx context.Context, project store.ProjectRow, after string, limit int) ([]Conflict, string, error) {
 	return r.list(ctx, project, after, limit, store.ListGatedSyncMaps)
 }
@@ -317,8 +318,9 @@ func (r *Resolver) list(ctx context.Context, project store.ProjectRow, after str
 // and the audit row of every resolution. Before, an entity the forge no
 // longer lists — deleted, or transferred to another repository — kept its
 // gate for good: no pull decides over it, and a resolution answered
-// changed:false. A push to such an entity gets the forge's answer for any
-// mapping of it. The resolution runs under the
+// changed:false; archiving its block is the way out. Opened, its push gets
+// the forge's answer for any mapping of a gone entity (404, or a refused
+// 301) and fails the push leg on every run. The resolution runs under the
 // locks of the sync, in their order: the entity's push lock (tried — a push
 // on the wire is not waited for, ErrPushInFlight), then, for remote, the
 // project row (the cursor), then the block and the mapping row, FOR NO KEY

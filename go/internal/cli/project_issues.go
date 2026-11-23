@@ -355,8 +355,9 @@ func issuesConflictsCmd(getClient func() (*Client, error), project *string) *cob
 			"--gated lists, in the same columns, the mappings behind the push gate of a remote\n" +
 			"resolution instead: not flagged, but left alone by the push until a sync decided\n" +
 			"over the entity. An issue deleted on the forge or moved to another repository is\n" +
-			"never listed again and keeps its gate; `resolve --keep local` opens it (the next\n" +
-			"push sends the edits made since), or archive the block. `ctx project issues sync --status`\n" +
+			"never listed again and keeps its gate: archive its block, and the push and the\n" +
+			"count leave it out. For an issue the forge still has, `resolve --keep local` opens\n" +
+			"the gate (the next push sends the edits made since). `ctx project issues sync --status`\n" +
 			"counts them as gated.",
 		Example: `  ctx project issues conflicts
   ctx project issues conflicts --limit 20 --after <cursor>

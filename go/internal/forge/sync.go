@@ -377,7 +377,11 @@ func (m *SyncManager) runSync(base context.Context, project store.ProjectRow, dr
 
 	token, err := m.resolveToken(ctx, project)
 	if err != nil {
-		m.finish(project.ID, runID, "token resolve failed", true, false)
+		msg := "token resolve failed"
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			msg = errRunDeadline(m.runDeadline()).Error()
+		}
+		m.finish(project.ID, runID, msg, true, false)
 		return
 	}
 	repo, err := repoRefFromForge(project.Forge)
