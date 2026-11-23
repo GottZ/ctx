@@ -423,10 +423,11 @@ func fitSourceCutToBudget(cut, budget int, systemPrompt, question string, source
 	return max(MaxBlockChars, min(cut, (budget-fixed)/n))
 }
 
-// lowConfidenceCut is the number of sources a low_confidence prompt keeps:
+// LowConfidenceCut is the number of sources a low_confidence prompt keeps:
 // the configured value, or the LowConfidenceMaxSources constant for a zero
-// value (see SynthesisSettings.LowConfidenceMaxSources).
-func lowConfidenceCut(s SynthesisSettings) int {
+// value (see SynthesisSettings.LowConfidenceMaxSources). The query handler's
+// title floor reads it to place a named block inside every prompt (issue #507).
+func LowConfidenceCut(s SynthesisSettings) int {
 	if s.LowConfidenceMaxSources <= 0 {
 		return LowConfidenceMaxSources
 	}
@@ -863,7 +864,7 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 
 	// Step 4: Low-confidence source limiting.
 	llmSources := filtered
-	if lowCut := lowConfidenceCut(settings); confidence == ConfidenceLow && len(llmSources) > lowCut {
+	if lowCut := LowConfidenceCut(settings); confidence == ConfidenceLow && len(llmSources) > lowCut {
 		llmSources = llmSources[:lowCut]
 	}
 

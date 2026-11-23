@@ -250,8 +250,8 @@ func position(ids []string, id string) int {
 }
 
 // TestQueryTitleFloorFamily: the named block is among the ten sources for its
-// own title, at the last place, and the nine before it are the nine the
-// pipeline ranks first.
+// own title, at place 2 (the last place a low_confidence prompt carries), and
+// the sources around it keep the pipeline's order.
 func TestQueryTitleFloorFamily(t *testing.T) {
 	e := titleFloorSetup(t)
 	const q = "Orbit nightly report 2026-08-31"
@@ -270,9 +270,11 @@ func TestQueryTitleFloorFamily(t *testing.T) {
 	if got == 0 {
 		t.Fatalf("block for its own title in a family of 45 near-duplicates: not among the 10 sources (fusion position %d)", fp)
 	}
-	if got != 10 {
-		t.Errorf("named block at source %d, want the last place (10)", got)
+	if got != 2 {
+		t.Errorf("named block at source %d, want place 2 (the last a low_confidence prompt carries)", got)
 	}
+	// At limit 20 the floor places the block at 2 as well; without it, the
+	// order is the pipeline's.
 	tw := e.ask(t, q, 20, false)
 	var rest []string
 	var restScores []float64
@@ -282,22 +284,23 @@ func TestQueryTitleFloorFamily(t *testing.T) {
 			restScores = append(restScores, s.Score)
 		}
 	}
-	if strings.Join(ten[:9], ",") != strings.Join(rest[:9], ",") {
-		t.Errorf("first nine sources moved:\n got %v\nwant %v", ten[:9], rest[:9])
+	want := append([]string{rest[0], e.target}, rest[1:9]...)
+	if strings.Join(ten, ",") != strings.Join(want, ",") {
+		t.Errorf("sources around the placed block moved:\n got %v\nwant %v", ten, want)
 	}
 	// The placed block carries the score of the place it took — the score of
-	// the source it displaced — so the sources stay sorted and the synthesis
+	// the source now behind it — so the sources stay sorted and the synthesis
 	// path's score threshold judges that place.
 	tenResp := e.ask(t, q, 10, false)
-	if got := tenResp.Sources[9].Score; got != restScores[9] {
-		t.Errorf("placed block's score %v, want the displaced source's %v", got, restScores[9])
+	if got := tenResp.Sources[1].Score; got != restScores[1] {
+		t.Errorf("placed block's score %v, want the place's %v", got, restScores[1])
 	}
 
 	// A translated question: retrieval runs on the translation, the floor
 	// compares the question the caller sent.
 	tr := e.askPinned(t, q, 10, true, "nightly Orbit report for the last day of August").ids()
-	if p := position(tr, e.target); p != 10 {
-		t.Errorf("translated question: named block at source %d, want 10", p)
+	if p := position(tr, e.target); p != 2 {
+		t.Errorf("translated question: named block at source %d, want 2", p)
 	}
 }
 

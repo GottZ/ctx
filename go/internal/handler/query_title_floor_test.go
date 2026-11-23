@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rrf"
 )
 
@@ -51,14 +52,10 @@ func TestFloorTitleMatchPlacesTheNamedBlockAtTheCutOff(t *testing.T) {
 	if titleFloorIDs(out[10:]) != "b09,b10,b11,b13,b14" {
 		t.Errorf("tail = %s", titleFloorIDs(out[10:]))
 	}
-	// The placed block takes the score of the place it takes, so the list
-	// stays sorted and a score threshold judges the place; its own score is
-	// kept as the original.
-	if out[9].RRFScore != in[9].RRFScore {
-		t.Errorf("placed score %v, want the displaced result's %v", out[9].RRFScore, in[9].RRFScore)
-	}
-	if out[9].RRFScoreOriginal == nil || *out[9].RRFScoreOriginal != want.RRFScore {
-		t.Errorf("rrf_score_original = %v, want the block's own score %v", out[9].RRFScoreOriginal, want.RRFScore)
+	// The placed block takes the score fields of the row whose place it takes,
+	// so the list stays sorted and both labels read what they read there.
+	if out[9].RRFScore != in[9].RRFScore || out[9].RRFScoreOriginal != in[9].RRFScoreOriginal {
+		t.Errorf("placed scores %v/%v, want the displaced row's %v/%v", out[9].RRFScore, out[9].RRFScoreOriginal, in[9].RRFScore, in[9].RRFScoreOriginal)
 	}
 	for i := 1; i < len(out); i++ {
 		if out[i].RRFScore > out[i-1].RRFScore {
@@ -113,14 +110,46 @@ func TestFloorTitleMatchLeavesTheOrder(t *testing.T) {
 	}
 }
 
-// An original score an earlier stage recorded (the gravity's) is kept.
-func TestFloorTitleMatchKeepsAnEarlierOriginal(t *testing.T) {
+// The place's rrf_score_original (the gravity's, the reranker's) comes with
+// the place; the block's own original does not.
+func TestFloorTitleMatchInheritsThePlacesOriginal(t *testing.T) {
 	in := familyList()
-	pre := 0.5
-	in[12].RRFScoreOriginal = &pre
+	own, place := 0.5, 0.25
+	in[12].RRFScoreOriginal = &own
+	in[9].RRFScoreOriginal = &place
 	out := floorTitleMatch(in, "Orbit nightly report 2026-08-13", 10, nil)
-	if out[9].RRFScoreOriginal == nil || *out[9].RRFScoreOriginal != pre {
-		t.Errorf("rrf_score_original = %v, want the earlier stage's %v", out[9].RRFScoreOriginal, pre)
+	if out[9].RRFScoreOriginal == nil || *out[9].RRFScoreOriginal != place {
+		t.Errorf("rrf_score_original = %v, want the place's %v", out[9].RRFScoreOriginal, place)
+	}
+}
+
+// The place of the floor (P2): the last place every synthesis prompt
+// carries — the low_confidence cut — never past the limit.
+func TestTitleFloorPlace(t *testing.T) {
+	cases := []struct{ limit, cut, want int }{
+		{10, 0, llm.LowConfidenceMaxSources}, {10, 2, 2}, {10, 3, 3}, {2, 5, 2}, {1, 2, 1}, {5, 5, 5},
+	}
+	for _, c := range cases {
+		if got := titleFloorPlace(c.limit, llm.SynthesisSettings{LowConfidenceMaxSources: c.cut}); got != c.want {
+			t.Errorf("titleFloorPlace(limit %d, cut %d) = %d, want %d", c.limit, c.cut, got, c.want)
+		}
+	}
+}
+
+// At place 2: the first result stays, the named block follows, the rest move
+// down by one and the tenth leaves at the end of a limit of 10.
+func TestFloorTitleMatchPlaceTwo(t *testing.T) {
+	in := familyList()
+	out := floorTitleMatch(in, "Orbit nightly report 2026-08-13", 2, nil)
+	if got := titleFloorIDs(out[:11]); got != "b00,b12,b01,b02,b03,b04,b05,b06,b07,b08,b09" {
+		t.Errorf("order = %s", got)
+	}
+	if out[1].RRFScore != in[1].RRFScore {
+		t.Errorf("placed score %v, want place 2's %v", out[1].RRFScore, in[1].RRFScore)
+	}
+	// Already at the place or in front of it: nothing moves.
+	if got := titleFloorIDs(floorTitleMatch(in, "Orbit nightly report 2026-08-02", 2, nil)); got != titleFloorIDs(in) {
+		t.Errorf("a block at place 2 moved: %s", got)
 	}
 }
 
@@ -145,13 +174,13 @@ func TestFloorTitleMatchScoreZeroTakesThePlace(t *testing.T) {
 	if out[9].ID != in[12].ID || out[9].RRFScore != in[9].RRFScore {
 		t.Fatalf("place 10 = %s with score %v, want %s with %v", out[9].ID, out[9].RRFScore, in[12].ID, in[9].RRFScore)
 	}
-	if out[9].RRFScoreOriginal == nil || *out[9].RRFScoreOriginal != orig {
-		t.Errorf("rrf_score_original = %v, want the reranker's record %v", out[9].RRFScoreOriginal, orig)
+	if out[9].RRFScoreOriginal != in[9].RRFScoreOriginal {
+		t.Errorf("rrf_score_original = %v, want the place's %v", out[9].RRFScoreOriginal, in[9].RRFScoreOriginal)
 	}
 }
 
 // A row the graph or cluster stage injected carries no derived score field;
-// placed, it stays without one.
+// placed, it takes the place's (here none).
 func TestFloorTitleMatchInjectedRowGetsNoOriginal(t *testing.T) {
 	for _, via := range []string{"graph", "cluster"} {
 		in := familyList()
