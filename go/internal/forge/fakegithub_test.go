@@ -62,6 +62,8 @@ type fakeGitHub struct {
 	before      func()      // one-shot seam of the next issue PATCH
 	after       func()
 	commentNext func() // one-shot seam after the next comment PATCH landed, before its answer (commentSeam)
+	commentPage int    // comments per listing page; 0 = one page (setCommentPages)
+	commentHold func(page int) // runs before a comment listing page is served (nil = none)
 	stampAnswer fakeStampAnswer
 	pageHolds   map[int]chan struct{} // issue-listing pages held until closed (holdPage)
 	pagesServed atomic.Int64          // issue-listing requests served
@@ -215,6 +217,14 @@ func (f *fakeGitHub) seam(before, after func()) {
 func (f *fakeGitHub) commentSeam(after func()) {
 	f.mu.Lock()
 	f.commentNext = after
+	f.mu.Unlock()
+}
+
+// setCommentPages makes the comment listing answer n comments per page,
+// with a next link as the issue listing has (issue #509, P7 of PR #529).
+func (f *fakeGitHub) setCommentPages(n int) {
+	f.mu.Lock()
+	f.commentPage = n
 	f.mu.Unlock()
 }
 
@@ -411,6 +421,27 @@ func (f *fakeGitHub) serveCommentListing(w http.ResponseWriter, r *http.Request)
 		}
 		return match[i].ID < match[j].ID
 	})
+	f.mu.Lock()
+	per, hook := f.commentPage, f.commentHold
+	f.mu.Unlock()
+	if per > 0 {
+		q := r.URL.Query()
+		page, _ := strconv.Atoi(q.Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		if hook != nil {
+			hook(page)
+		}
+		lo, hi := min((page-1)*per, len(match)), min(page*per, len(match))
+		if hi < len(match) {
+			q.Set("page", strconv.Itoa(page+1))
+			for _, line := range f.link(f.srv.URL + r.URL.Path + "?" + q.Encode()) {
+				w.Header().Add("Link", line)
+			}
+		}
+		match = match[lo:hi]
+	}
 	items := make([]map[string]any, 0, len(match))
 	for _, c := range match {
 		items = append(items, map[string]any{

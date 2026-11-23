@@ -142,6 +142,11 @@ func TestAnAdvanceThatLeavesTheBaseUnknownHoldsTheLeg(t *testing.T) {
 	if base, flagged := e.mapping(t); !flagged || base != store.UnknownBaseHash {
 		t.Fatalf("precondition: after the advance base %q, flagged %v — want unknown and flagged", base, flagged)
 	}
+	// The hold write set the hold and dropped the advance's pending mark.
+	var pending bool
+	if err := e.pool.QueryRow(context.Background(), `SELECT metadata ? 'hold_pending' FROM context_project_sync_map WHERE block_id = $1::uuid`, e.id(t)).Scan(&pending); err != nil || pending {
+		t.Errorf("the pending mark after the hold write: %v %v — want it dropped", pending, err)
+	}
 	for run := 1; run <= 2; run++ {
 		st := e.i509MustRun(t)
 		t.Logf("run %d: fetched %d", run, st.Fetched)
