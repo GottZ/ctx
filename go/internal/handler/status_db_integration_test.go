@@ -169,8 +169,9 @@ func TestStatusDBEmbedBacklogGuard(t *testing.T) {
 	}
 
 	// Every partial index over the backfill predicate satisfies the guard:
-	// idx_embedding_pending and, since migration 171, the two pick indexes.
-	for _, ix := range []string{"idx_embedding_pending", "idx_embedding_pending_scope_sens", "idx_embedding_pending_sens"} {
+	// idx_embedding_pending, since migration 171 the two pick indexes, and
+	// since migration 193 the embed-excluded mark's index.
+	for _, ix := range []string{"idx_embedding_pending", "idx_embedding_pending_scope_sens", "idx_embedding_pending_sens", "idx_embedding_pending_type_scope"} {
 		if _, err := pool.Exec(ctx, `DROP INDEX `+ix); err != nil {
 			t.Fatalf("drop guard index %s: %v", ix, err)
 		}

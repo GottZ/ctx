@@ -27,15 +27,21 @@ const EmbedExcludedReconcileBatch = 1000
 // and runs only the direction it needs:
 //
 //   - markEmbedExcludedSQL: answer true. The scope's unmarked pending blocks
-//     of the name with a created_at, on idx_embedding_pending_scope_sens
-//     (scope, sensitivity, created_at, id) as a range of the scope from the
-//     keyset cursor ($3, $4, $5) on, so a batch reads neither another scope
-//     nor what the batches before it passed. created_at is nullable, and a
-//     row comparison with a NULL in it is NULL: such a block would sort last
-//     and turn the cursor into a value no later row compares above, so the
-//     cursor pass leaves them out and markEmbedExcludedNullAtSQL takes them
-//     (from a cursor on id). The statement runs with sorts off
-//     (embedExcludedBatchNoSort).
+//     of the name, on idx_embedding_pending_type_scope (type_name, scope, id)
+//     (migration 193, issue #527) as a range of the name and the scope from
+//     the keyset cursor $3 on, so a batch reads no block of another name or
+//     another scope, nor what the batches before it passed — the form of the
+//     clear on idx_blocks_embed_excluded. The statement runs with sorts off
+//     (embedExcludedBatchNoSort). While that index does not stand as 193
+//     builds it (embedExcludedPendingIndexReadySQL) the reconcile sends
+//     markEmbedExcludedBefore193SQL instead: the scope's range of
+//     idx_embedding_pending_scope_sens (scope, sensitivity, created_at, id)
+//     from the keyset cursor ($3, $4, $5) on, which holds every pending block
+//     of the scope, so each of its statements reads the scope's pending
+//     blocks of every other name and checks the name on the heap — linear in
+//     them (a scope whose sensitivity floor keeps its blocks pending for
+//     good, a long embedding backlog). created_at is NOT NULL since
+//     migration 186, so its row comparison never holds a NULL.
 //   - markEmbedExcludedStaleSQL: answer true. The scope's blocks of the name
 //     marked stale (a vector kept over a content change, issue #198 part B),
 //     on idx_embedding_stale_scope_sens (scope, sensitivity, created_at, id)
@@ -66,12 +72,14 @@ const EmbedExcludedReconcileBatch = 1000
 //     (embedExcludedBatchNoSort).
 //   - embedExcludedMarkLeftSQL, embedExcludedClearLeftSQL: whether a block of
 //     the scope still needs the change, from the start of the range (a block
-//     another worker held, one whose sensitivity moved it behind the cursor).
+//     another worker held, one written or re-typed behind the cursor; before
+//     193, also one whose sensitivity moved it behind the cursor).
 //
-// The mark and the clear batch and their left checks state the scope (and
-// the clear the name) as comparisons over the leading key columns of their
-// index and order by those columns, not as equalities (issue #513; the form
-// of the pending pick, PendingPickSQL, issue #239). With equalities the
+// The mark and the clear batch and their left checks state the name and the
+// scope (the statements before 193 the scope alone) as comparisons over the
+// leading key columns of their index and order by those columns, not as
+// equalities (issue #513; the form of the pending pick, PendingPickSQL,
+// issue #239). With equalities the
 // leading keys are constants of the statement, the order reduces to the last
 // keys, and other indexes deliver that order too: at random_page_cost 4 —
 // PostgreSQL's default, which a deployment keeps unless its operator lowers
@@ -88,16 +96,17 @@ const EmbedExcludedReconcileBatch = 1000
 // gives the order without a sort over every row they admit. For the clear's
 // left check (LIMIT 1) that suffices on every plan measured. A batch takes
 // up to 1 000 rows, and with the same estimate a sort still looked cheaper
-// on some plans — for the mark over the scope's range of idx_context_scope
-// (incremental, the scope its presorted key) or over idx_embedding_pending,
-// at either value and on the generic plan; for the clear, on its generic
-// plan at 4, over the name's range of idx_blocks_type_name in every tenant
-// (4 710 buffers at 100 000 marked blocks of another tenant); for the stale
-// pass and the stale half of the mark's left check, over the stale blocks of
-// the name in every tenant (6 177 buffers at 100 000 stale blocks of another
-// tenant). So each batch, and the mark's left check, runs in a transaction of
-// its own with sorts off (embedExcludedBatchNoSort), where the range of its
-// index is the only path without a sort.
+// on some plans — for the mark before 193 over the scope's range of
+// idx_context_scope (incremental, the scope its presorted key) or over
+// idx_embedding_pending, at either value and on the generic plan; for the
+// clear, on its generic plan at 4, over the name's range of
+// idx_blocks_type_name in every tenant (4 710 buffers at 100 000 marked
+// blocks of another tenant); for the stale pass and the stale half of the
+// mark's left check, over the stale blocks of the name in every tenant
+// (6 177 buffers at 100 000 stale blocks of another tenant). So each batch,
+// and the mark's left check, runs in a transaction of its own with sorts off
+// (embedExcludedBatchNoSort), where the range of its index is the only path
+// without a sort.
 //
 // A block with a fresh vector or an archived one keeps false: it is in no
 // pick index, and the trigger sets the marker when it is unarchived,
@@ -134,6 +143,18 @@ var (
 		UPDATE context_blocks SET embed_excluded = true
 		 WHERE id = ANY(ARRAY(SELECT id FROM context_blocks
 		               WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded
+		                 AND (type_name, scope, id) > ($1::text, $2::text, $3::uuid)
+		                 AND (type_name, scope) <= ($1::text, $2::text)
+		               ORDER BY type_name, scope, id
+		               LIMIT $4
+		               FOR NO KEY UPDATE))
+		   AND NOT embed_excluded
+		RETURNING embed_excluded, id)
+		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded), (SELECT id FROM u ORDER BY id DESC LIMIT 1)`
+	markEmbedExcludedBefore193SQL = `WITH u AS (
+		UPDATE context_blocks SET embed_excluded = true
+		 WHERE id = ANY(ARRAY(SELECT id FROM context_blocks
+		               WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded
 		                 AND type_name = $1 AND created_at IS NOT NULL
 		                 AND (scope, sensitivity, created_at, id) > ($2::text, $3::text, $4::timestamptz, $5::uuid)
 		                 AND scope <= $2::text
@@ -147,17 +168,6 @@ var (
 		  FROM (SELECT 1) one
 		  LEFT JOIN LATERAL (SELECT sensitivity, created_at, id FROM u
 		                      ORDER BY sensitivity DESC, created_at DESC, id DESC LIMIT 1) l ON true`
-	markEmbedExcludedNullAtSQL = `WITH u AS (
-		UPDATE context_blocks SET embed_excluded = true
-		 WHERE id = ANY(ARRAY(SELECT id FROM context_blocks
-		               WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded
-		                 AND scope = $2 AND type_name = $1 AND created_at IS NULL AND id > $4::uuid
-		               ORDER BY id
-		               LIMIT $3
-		               FOR NO KEY UPDATE))
-		   AND NOT embed_excluded
-		RETURNING embed_excluded, id)
-		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE embed_excluded), (SELECT id FROM u ORDER BY id DESC LIMIT 1)`
 	markEmbedExcludedStaleSQL = `WITH u AS (
 		UPDATE context_blocks SET embed_excluded = NOT embed_excluded
 		 WHERE id = ANY(ARRAY(SELECT id FROM context_blocks
@@ -188,15 +198,32 @@ var (
 		   AND embed_excluded
 		RETURNING embed_excluded, id)
 		SELECT (SELECT count(*) FROM u), (SELECT count(*) FROM u WHERE NOT embed_excluded), (SELECT id FROM u ORDER BY id DESC LIMIT 1)`
-	// embedExcludedMarkLeftSQL reads the first unmarked pending and the first
-	// stale block of the name in the order of idx_embedding_pending_scope_sens
-	// and idx_embedding_stale_scope_sens (ORDER BY their key LIMIT 1, the scope
-	// as a range), with sorts off: an unordered EXISTS with equalities was
-	// planned at random_page_cost 4 on idx_context_scope or idx_embedding_pending
-	// and read the whole scope or every pending block of the table (972 and
-	// 884 buffers on the cost pin, 1-2 on the range), and its stale half read
-	// the stale blocks of the name in every tenant.
+	// embedExcludedMarkLeftSQL reads the first unmarked pending block of the
+	// name and the scope in the order of idx_embedding_pending_type_scope
+	// (migration 193) and the first stale one in the order of
+	// idx_embedding_stale_scope_sens (ORDER BY their key LIMIT 1, name and
+	// scope, or the scope, as a range), with sorts off: an unordered EXISTS
+	// with equalities was planned at random_page_cost 4 on idx_context_scope
+	// or idx_embedding_pending and read the whole scope or every pending block
+	// of the table (972 and 884 buffers on the cost pin, 1-2 on the range),
+	// and its stale half read the stale blocks of the name in every tenant.
+	// embedExcludedMarkLeftBefore193SQL is the check while the index of 193
+	// does not stand: its pending half reads the scope's range of
+	// idx_embedding_pending_scope_sens, every pending block of the scope when
+	// none of the name is left.
 	embedExcludedMarkLeftSQL = `SELECT EXISTS (SELECT 1 FROM (
+		              SELECT id FROM context_blocks
+		               WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded
+		                 AND (type_name, scope) >= ($1::text, $2::text) AND (type_name, scope) <= ($1::text, $2::text)
+		               ORDER BY type_name, scope, id
+		               LIMIT 1) first)
+		    OR EXISTS (SELECT 1 FROM (
+		              SELECT id FROM context_blocks
+		               WHERE embedding_stale AND NOT is_archived
+		                 AND type_name = $1 AND scope >= $2::text AND scope <= $2::text
+		               ORDER BY scope, sensitivity, created_at, id
+		               LIMIT 1) first_stale)`
+	embedExcludedMarkLeftBefore193SQL = `SELECT EXISTS (SELECT 1 FROM (
 		              SELECT id FROM context_blocks
 		               WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded
 		                 AND type_name = $1 AND scope >= $2::text AND scope <= $2::text
@@ -243,12 +270,27 @@ var (
 		ORDER BY 1`
 )
 
+// embedExcludedPendingIndexReadySQL tells whether
+// idx_embedding_pending_type_scope stands as migration 193 builds it (valid,
+// ready, the deparsed definition the migration adopts). Migration 193 does
+// not build it above 500 000 rows, nor over an INVALID or foreign index of
+// the name; a re-embed migration swapped by a binary before 193 leaves it on
+// the old column (its predicate then names embedding_old) and drops it with
+// that column at the cleanup. Without it the mark's selection has no range
+// of the name and the scope, so the reconcile sends the statements before
+// 193 (markEmbedExcludedBefore193SQL, embedExcludedMarkLeftBefore193SQL), at
+// their cost. Read once per reconcile pass that has a queued entry.
+const embedExcludedPendingIndexReadySQL = `SELECT EXISTS (SELECT 1 FROM pg_index
+		WHERE indexrelid = to_regclass('public.idx_embedding_pending_type_scope') AND indisvalid AND indisready
+		  AND pg_get_indexdef(indexrelid) = 'CREATE INDEX idx_embedding_pending_type_scope ON public.context_blocks USING btree (type_name, scope, id) WHERE ((embedding IS NULL) AND (NOT is_archived) AND (NOT embed_excluded))')`
+
 // embedExcludedBatchNoSort turns sorts off for a mark or clear batch and the
 // mark's left check, in the statement's own transaction (embedExcludedBatch):
 // every path of its selection besides its index range in key order (the
-// scope's range of idx_embedding_pending_scope_sens or
-// idx_embedding_stale_scope_sens, the name's and scope's range of
-// idx_blocks_embed_excluded) needs a sort, and with sorts off the planner
+// name's and scope's range of idx_embedding_pending_type_scope or of
+// idx_blocks_embed_excluded, the scope's range of
+// idx_embedding_stale_scope_sens or, before 193, of
+// idx_embedding_pending_scope_sens) needs a sort, and with sorts off the planner
 // takes a path without a disabled node whenever one exists (PostgreSQL 18
 // compares the count of disabled nodes before the cost; the guard pick does
 // the same, guard.guardPickNoSort). The sort of the batch's own rows for the
@@ -313,6 +355,13 @@ func ReconcileEmbedExcluded(ctx context.Context, pool *pgxpool.Pool) (EmbedExclu
 	if err != nil {
 		return res, fmt.Errorf("store: embed-excluded queue: %w", err)
 	}
+	if len(q) == 0 {
+		return res, nil
+	}
+	var typeIndex bool
+	if err := pool.QueryRow(ctx, embedExcludedPendingIndexReadySQL).Scan(&typeIndex); err != nil {
+		return res, fmt.Errorf("store: embed-excluded pending index probe: %w", err)
+	}
 	// An entry that fails stays queued and does not hold up the entries
 	// behind it; the pass reports every failure at its end.
 	var errs []error
@@ -322,7 +371,7 @@ func ReconcileEmbedExcluded(ctx context.Context, pool *pgxpool.Pool) (EmbedExclu
 			break
 		}
 		res.Names++
-		n, done, err := reconcileEmbedExcludedEntry(ctx, pool, e.name, e.grp)
+		n, done, err := reconcileEmbedExcludedEntry(ctx, pool, e.name, e.grp, typeIndex)
 		res.Updated += n
 		if err != nil {
 			errs = append(errs, err)
@@ -349,8 +398,10 @@ func ReconcileEmbedExcluded(ctx context.Context, pool *pgxpool.Pool) (EmbedExclu
 // names. done=false: a block of the entry still needs a change after
 // embedExcludedRounds rounds, or a batch's rows were all set back by the
 // trigger (the answer moved after the batch chose them), so the entry is
-// left for the next pass.
-func reconcileEmbedExcludedEntry(ctx context.Context, pool *pgxpool.Pool, name, grp string) (updated int, done bool, err error) {
+// left for the next pass. typeIndex: idx_embedding_pending_type_scope stands
+// (embedExcludedPendingIndexReadySQL), so the mark and its left check read
+// its range.
+func reconcileEmbedExcludedEntry(ctx context.Context, pool *pgxpool.Pool, name, grp string, typeIndex bool) (updated int, done bool, err error) {
 	for round := 0; round < embedExcludedRounds; round++ {
 		scopes, err := embedExcludedEntryScopes(ctx, pool, name, grp)
 		if err != nil {
@@ -368,7 +419,7 @@ func reconcileEmbedExcludedEntry(ctx context.Context, pool *pgxpool.Pool, name, 
 				continue
 			}
 			marking = append(marking, scope)
-			n, ok, err := markEmbedExcludedScope(ctx, pool, name, scope)
+			n, ok, err := markEmbedExcludedScope(ctx, pool, name, scope, typeIndex)
 			updated += n
 			if err != nil {
 				return updated, false, err
@@ -381,14 +432,14 @@ func reconcileEmbedExcludedEntry(ctx context.Context, pool *pgxpool.Pool, name, 
 			}
 		}
 		for _, scope := range clearing {
-			n, ok, err := clearEmbedExcludedScope(ctx, pool, name, scope)
+			n, ok, err := embedExcludedIDPass(ctx, pool, clearEmbedExcludedSQL, "clear", name, scope)
 			updated += n
 			if err != nil {
 				return updated, false, err
 			}
 			settled = settled && ok
 		}
-		left, err := embedExcludedLeft(ctx, pool, name, marking, clearing)
+		left, err := embedExcludedLeft(ctx, pool, name, marking, clearing, typeIndex)
 		if err != nil {
 			return updated, false, err
 		}
@@ -497,11 +548,15 @@ func embedExcludedEntryScopes(ctx context.Context, pool *pgxpool.Pool, name, grp
 // embedExcludedLeft reports whether a block of the entry still needs a
 // change: an unmarked pending or a stale block of the name in a scope that
 // answered true, or a marked block of the name in a scope the round cleared
-// that still answers false.
-func embedExcludedLeft(ctx context.Context, pool *pgxpool.Pool, name string, marking, clearing []string) (bool, error) {
+// that still answers false. typeIndex as for reconcileEmbedExcludedEntry.
+func embedExcludedLeft(ctx context.Context, pool *pgxpool.Pool, name string, marking, clearing []string, typeIndex bool) (bool, error) {
+	markLeft := embedExcludedMarkLeftBefore193SQL
+	if typeIndex {
+		markLeft = embedExcludedMarkLeftSQL
+	}
 	for _, scope := range marking {
 		var left bool
-		if err := embedExcludedBatch(ctx, pool, embedExcludedMarkLeftSQL, []any{name, scope}, &left); err != nil {
+		if err := embedExcludedBatch(ctx, pool, markLeft, []any{name, scope}, &left); err != nil {
 			return false, fmt.Errorf("store: embed-excluded left %q %q: %w", name, scope, err)
 		}
 		if left {
@@ -522,45 +577,33 @@ func embedExcludedLeft(ctx context.Context, pool *pgxpool.Pool, name string, mar
 
 // markEmbedExcludedScope marks the name's blocks of one scope that answered
 // true: the unmarked pending ones batch by batch from the start of the
-// scope's range, then the ones without a created_at, then the stale ones.
+// range — of the name and the scope on idx_embedding_pending_type_scope
+// (typeIndex), else of the scope (the statement before 193) — then the
+// stale ones. A row the trigger set back (the answer moved) stays in the set
+// these statements read, and the cursor keeps a pass from reading it again;
+// the left check and the next round take what a pass passed. The pass
+// without a created_at of the releases before 193 is gone: created_at is NOT
+// NULL since migration 186, and that pass read no row since.
 // settled=false: a batch wrote rows and none of them kept the marker (the
 // trigger set them back, the answer moved), and the pass stopped there.
-func markEmbedExcludedScope(ctx context.Context, pool *pgxpool.Pool, name, scope string) (updated int, settled bool, err error) {
-	n, ok, err := markEmbedExcludedKeyset(ctx, pool, markEmbedExcludedSQL, name, scope)
+func markEmbedExcludedScope(ctx context.Context, pool *pgxpool.Pool, name, scope string, typeIndex bool) (updated int, settled bool, err error) {
+	var n int
+	var ok bool
+	if typeIndex {
+		n, ok, err = embedExcludedIDPass(ctx, pool, markEmbedExcludedSQL, "mark", name, scope)
+	} else {
+		n, ok, err = markEmbedExcludedKeyset(ctx, pool, markEmbedExcludedBefore193SQL, name, scope)
+	}
 	updated += n
 	if err != nil || !ok {
 		return updated, false, err
-	}
-	// The blocks without a created_at, from a cursor on id; then the stale
-	// ones on their keyset. A row the trigger set back (the answer moved)
-	// stays in the set these statements read, and the cursor keeps a pass
-	// from reading it again; the left check and the next round take what a
-	// pass passed.
-	from := embedExcludedKeyStart.id
-	for {
-		var wrote, reached int
-		var last *string
-		if err := embedExcludedBatch(ctx, pool, markEmbedExcludedNullAtSQL, []any{name, scope, EmbedExcludedReconcileBatch, from},
-			&wrote, &reached, &last); err != nil {
-			return updated, false, fmt.Errorf("store: embed-excluded mark %q %q: %w", name, scope, err)
-		}
-		updated += reached
-		if wrote > 0 && reached == 0 {
-			return updated, false, nil
-		}
-		if wrote == 0 {
-			break
-		}
-		if last != nil {
-			from = *last
-		}
 	}
 	n, ok, err = markEmbedExcludedKeyset(ctx, pool, markEmbedExcludedStaleSQL, name, scope)
 	return updated + n, ok && err == nil, err
 }
 
 // markEmbedExcludedKeyset runs a mark pass on the keyset (sensitivity,
-// created_at, id) of one scope — markEmbedExcludedSQL or
+// created_at, id) of one scope — markEmbedExcludedBefore193SQL or
 // markEmbedExcludedStaleSQL — batch by batch from the start of the scope's
 // range. settled=false as for markEmbedExcludedScope.
 func markEmbedExcludedKeyset(ctx context.Context, pool *pgxpool.Pool, sql, name, scope string) (updated int, settled bool, err error) {
@@ -599,17 +642,19 @@ func embedExcludedBatch(ctx context.Context, pool *pgxpool.Pool, sql string, arg
 	})
 }
 
-// clearEmbedExcludedScope clears the name's marked blocks of one scope that
-// answered false, batch by batch from the cursor on id. settled=false as for
-// markEmbedExcludedScope.
-func clearEmbedExcludedScope(ctx context.Context, pool *pgxpool.Pool, name, scope string) (updated int, settled bool, err error) {
+// embedExcludedIDPass runs a pass on the keyset id of one name and scope —
+// clearEmbedExcludedSQL (what "clear": the name's marked blocks of a scope
+// that answered false) or markEmbedExcludedSQL ("mark": its unmarked pending
+// blocks of a scope that answered true) — batch by batch from the start of
+// the range. settled=false as for markEmbedExcludedScope.
+func embedExcludedIDPass(ctx context.Context, pool *pgxpool.Pool, sql, what, name, scope string) (updated int, settled bool, err error) {
 	from := embedExcludedKeyStart.id
 	for {
 		var wrote, reached int
 		var last *string
-		if err := embedExcludedBatch(ctx, pool, clearEmbedExcludedSQL, []any{name, scope, from, EmbedExcludedReconcileBatch},
+		if err := embedExcludedBatch(ctx, pool, sql, []any{name, scope, from, EmbedExcludedReconcileBatch},
 			&wrote, &reached, &last); err != nil {
-			return updated, false, fmt.Errorf("store: embed-excluded clear %q %q: %w", name, scope, err)
+			return updated, false, fmt.Errorf("store: embed-excluded %s %q %q: %w", what, name, scope, err)
 		}
 		updated += reached
 		if wrote > 0 && reached == 0 {
