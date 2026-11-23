@@ -132,3 +132,23 @@ func TestRules_ACoordinatedClauseHasItsOwnTense(t *testing.T) {
 		"Wie lief der Mittwochs-Job am Montag?":                "2026-11-16/past",
 	})
 }
+
+// TestRules_AYearBeforeAParticipleAndItsNoun (issue #517 class 5): a year
+// followed by an English participle and a plural noun counts the noun where
+// the noun phrase ends — with its clause, or before a determiner or a
+// subject pronoun —, and is the window's edge before a verb, where the noun
+// phrase is the subject of what the year frames.
+func TestRules_AYearBeforeAParticipleAndItsNoun(t *testing.T) {
+	check517(t, now517, want517{
+		"After 2021 failed logins the account locks":       "nil",
+		"After 2024 failed attempts, lock the account":     "nil",
+		"How many accounts lock after 2021 failed logins?": "nil",
+		"After 2026 failed builds the pipeline pauses":     "nil",
+		// counter-cases: the year is the edge
+		"After 2025 failed logins lock the account":           "2026-01-01/from",
+		"After 2025 failed builds were retried automatically": "2026-01-01/from",
+		"Since 2023 failed deployments trigger a rollback":    "2023-01-01..2026-11-22/range",
+		"After 2022 the failed logins dropped":                "2023-01-01/from",
+		"Before 2024 merged branches were squashed":           "2023-12-31/until",
+	})
+}

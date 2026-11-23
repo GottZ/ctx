@@ -3699,10 +3699,11 @@ func (p *yearProof) clause(s, e int) clauseCount {
 // off.
 func (p *yearProof) stands(off int) bool {
 	s, e := 0, len(p.c.words)
-	if i := p.c.wordAt(off); i >= 0 {
+	i := p.c.wordAt(off)
+	if i >= 0 {
 		s, e = p.c.clauseOf(i)
 	}
-	if p.clause(s, e).word {
+	if p.clause(s, e).word || i >= 0 && p.c.countsAParticipleNoun(i+1, e) {
 		return false
 	}
 	if !p.read {
@@ -3721,6 +3722,29 @@ func (p *yearProof) stands(off int) bool {
 		}
 	}
 	return true
+}
+
+// countsAParticipleNoun reports whether the year at word y of c, in the
+// clause that ends at e, counts the noun behind it (issue #517): an English
+// participle and a plural noun follow it, an attribute and its noun ("After
+// 2021 failed logins the account locks"), and the noun phrase ends there —
+// with its clause, or before a determiner or a subject pronoun that starts
+// what the phrase leads into. Before a verb the noun phrase is the subject
+// and the year the window's edge ("After 2025 failed logins lock the
+// account", "Before 2025 released versions had no SBOM").
+func (c clauseWords) countsAParticipleNoun(y, e int) bool {
+	if y+2 >= e || !englishParticiple(c.words[y+1]) || !englishPlural(c.words[y+2]) {
+		return false
+	}
+	return y+3 == e || englishDeterminers[c.words[y+3]] || englishSubjects[c.words[y+3]]
+}
+
+// englishPlural reports whether w has the shape of an English plural noun:
+// a word of at least four letters on -s that is no English verb form of
+// "be", "have" or "do" and does not end in -ss ("logins", "attempts",
+// "builds"; not "was", "has", "does", "access").
+func englishPlural(w string) bool {
+	return utf8.RuneCountInString(w) >= 4 && strings.HasSuffix(w, "s") && !strings.HasSuffix(w, "ss") && !englishNotPassive[w] && !englishBeForms[w]
 }
 
 // hasCountWord reports whether words hold a word of countWords or one that
