@@ -110,3 +110,21 @@ func TestForgeResolveResetAllWithNothingToReset(t *testing.T) {
 		t.Errorf("the second reset changed state:\nbefore %s\nafter  %s", s0, s1)
 	}
 }
+
+// A project id with a NUL byte names no project: 404 like any id that is
+// not a project's (store.GetProjectByID, which every forge action loads the
+// project with).
+func TestForgeResolveProjectIDWithANulByte(t *testing.T) {
+	e := newFCMEnv(t)
+	for _, c := range []struct {
+		action string
+		data   map[string]any
+	}{
+		{"forge-conflict-list", map[string]any{"project_id": "a\x00b"}},
+		{"forge-stamp-reset", map[string]any{"project_id": "a\x00b", "all": true}},
+	} {
+		if code, _, raw := e.do(t, e.h, e.adminA, c.action, c.data); code != http.StatusNotFound {
+			t.Errorf("%s with a NUL byte in project_id: %d %s, want 404", c.action, code, raw)
+		}
+	}
+}

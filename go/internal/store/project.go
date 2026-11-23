@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
@@ -90,9 +91,11 @@ const projectSelect = `id, tenant_id::text, scope, identity, display_name, forge
 // visibility (scope-read for member GET, tenant-ownership for admin PATCH/
 // DELETE). An unknown OR malformed id both collapse to (nil, nil): a raw 22P02
 // on a non-UUID path parameter must not become a 500 existence side-channel
-// (the same no-oracle contract as GetTenant).
+// (the same no-oracle contract as GetTenant). An id with a NUL byte, which
+// the database refuses as text before any cast (22021), names no project
+// either.
 func GetProjectByID(ctx context.Context, pool *pgxpool.Pool, id string) (*ProjectRow, error) {
-	if id == "" {
+	if id == "" || strings.ContainsRune(id, 0) {
 		return nil, nil
 	}
 	p, err := scanProject(pool.QueryRow(ctx,
