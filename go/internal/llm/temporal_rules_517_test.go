@@ -214,3 +214,40 @@ func TestRules_TheParticipleExceptionsHoldForThePattern(t *testing.T) {
 		"Hat das Büro am Samstag geöffnet?":         "2026-11-28/future",
 	})
 }
+
+// TestRules_AWeekdayThatNamesNoDayIsNoRecurrenceAndNoDateWord (the bot
+// review's points 5 and 6 of issue #517): a weekday plural in a compound or
+// as a surname turns on no recurrence weights, and the tense of a question
+// is not that of a compound's weekday.
+func TestRules_AWeekdayThatNamesNoDayIsNoRecurrenceAndNoDateWord(t *testing.T) {
+	for q, want := range map[string]map[string]float64{
+		"Was war am Montag mit dem Mittwochs-Job?":               {"linear": 0.6, "weekday": 0.4},
+		"Frau Freitags Ticket ist offen, am Montag deployen wir": {"linear": 0.6, "weekday": 0.4},
+		"Was läuft montags am Abend?":                            {"weekday": 1.0},
+	} {
+		r := NormalizeTemporalRules(q, now517)
+		if r == nil {
+			t.Errorf("%q: no rule answers", q)
+			continue
+		}
+		if len(r.DimensionWeights) != len(want) {
+			t.Errorf("%q: weights %v, want %v", q, r.DimensionWeights, want)
+			continue
+		}
+		for k, v := range want {
+			if r.DimensionWeights[k] != v {
+				t.Errorf("%q: weights %v, want %v", q, r.DimensionWeights, want)
+			}
+		}
+	}
+	for q, want := range map[string]string{
+		"The friday-deploy-script failed, but we will ship on Monday": "future",
+		"Das Wochenende-Flag war falsch, am Montag fixen wir es":      "neutral",
+		"Was hat Herr Freitag gesagt, und wer kommt am Montag?":       "neutral",
+		"The friday deploy failed":                                    "past",
+	} {
+		if got := DetectVerbTense(q); got != want {
+			t.Errorf("DetectVerbTense(%q) = %s, want %s", q, got, want)
+		}
+	}
+}

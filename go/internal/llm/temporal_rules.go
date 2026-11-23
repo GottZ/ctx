@@ -974,6 +974,12 @@ func (c clauseWords) firstDateWord(query string) (int, bool) {
 		_, en := weekdayMapEN[w]
 		_, month := lookupMonth(w)
 		_, year := isYear(w)
+		// A weekday or the weekend that names no day (notADay: in a
+		// compound, a surname) is no date word: "The friday-deploy-script
+		// failed, but we will ship on Monday" asks for Monday (issue #517).
+		if (de || en || w == "wochenende" || w == "weekend") && c.notADay(i) {
+			continue
+		}
 		if de || en || w == "wochenende" || w == "weekend" || month && !monthWords[w] || year || dayKeywords[w] {
 			if ds := findDayDates(query); len(ds) > 0 && ds[0].start < c.offs[i] && len(query) == len(strings.ToLower(query)) {
 				return ds[0].start, true
@@ -2108,6 +2114,18 @@ func hasRecurrence(tokens []string) bool {
 		}
 		// German weekday plural: "dienstags", "montags" etc.
 		if isWeekdayPlural(tok) {
+			return true
+		}
+	}
+	return false
+}
+
+// recurrence is hasRecurrence for the words of c, without a weekday plural
+// that names no day (notADay): the "Mittwochs" of "Was war am Montag mit dem
+// Mittwochs-Job?" asks for no Wednesdays (issue #517).
+func (c clauseWords) recurrence() bool {
+	for i, tok := range c.words {
+		if recurrenceKeywords[tok] || isWeekdayPlural(tok) && !c.notADay(i) {
 			return true
 		}
 	}
@@ -4020,7 +4038,7 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 	now = truncDate(now)
 	cw := clauseTokens(query)
 	tokens := cw.words
-	recur := hasRecurrence(tokens)
+	recur := cw.recurrence()
 
 	// Priority 1: day dates, ISO and dot form (most specific) — pure linear
 	if r := matchDayDates(query, true); r != nil {
