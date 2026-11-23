@@ -61,12 +61,13 @@ type titleFloorEnv struct {
 
 func titleFloorSetup(t *testing.T) *titleFloorEnv {
 	t.Helper()
-	return titleFloorSetupWith(t, nil)
+	return titleFloorSetupWith(t, nil, 0)
 }
 
 // titleFloorSetupWith builds the corpus and a handler whose configuration mod
-// may adjust (the confidence thresholds of the synthesis tests).
-func titleFloorSetupWith(t *testing.T, mod func(*config.Config)) *titleFloorEnv {
+// may adjust (the confidence thresholds of the synthesis tests); synthCtx is
+// the synthesis backend's context window (0: 8192).
+func titleFloorSetupWith(t *testing.T, mod func(*config.Config), synthCtx int) *titleFloorEnv {
 	t.Helper()
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -154,12 +155,15 @@ func titleFloorSetupWith(t *testing.T, mod func(*config.Config)) *titleFloorEnv 
 		}
 	}))
 	t.Cleanup(srv.Close)
+	if synthCtx == 0 {
+		synthCtx = 8192
+	}
 	bpool := backends.NewPool(nil, nil)
 	bpool.SeedSnapshotForTest([]backends.Backend{
 		{ID: "e", Name: "tf507-embed", Host: srv.URL, Protocol: backends.ProtocolOllama, Model: "stub-tf507",
 			Trust: backends.TrustFull, Enabled: true, Priority: 1, Roles: []string{backends.RoleEmbed}},
 		{ID: "s", Name: "tf507-synthesis", Host: srv.URL, Protocol: backends.ProtocolOllama, Model: "stub-chat",
-			Trust: backends.TrustFull, Enabled: true, Priority: 1, NumCtx: 8192, Roles: []string{backends.RoleSynthesis}},
+			Trust: backends.TrustFull, Enabled: true, Priority: 1, NumCtx: synthCtx, Roles: []string{backends.RoleSynthesis}},
 	})
 	cfg := bw2Config()
 	q := config.Defaults().Query
@@ -249,9 +253,8 @@ func position(ids []string, id string) int {
 	return 0
 }
 
-// TestQueryTitleFloorFamily: the named block is among the ten sources for its
-// own title, at place 2 (the last place a low_confidence prompt carries), and
-// the sources around it keep the pipeline's order.
+// TestQueryTitleFloorFamily: the named block is the first of the ten sources
+// for its own title, and the sources behind it keep the pipeline's order.
 func TestQueryTitleFloorFamily(t *testing.T) {
 	e := titleFloorSetup(t)
 	const q = "Orbit nightly report 2026-08-31"
@@ -270,10 +273,10 @@ func TestQueryTitleFloorFamily(t *testing.T) {
 	if got == 0 {
 		t.Fatalf("block for its own title in a family of 45 near-duplicates: not among the 10 sources (fusion position %d)", fp)
 	}
-	if got != 2 {
-		t.Errorf("named block at source %d, want place 2 (the last a low_confidence prompt carries)", got)
+	if got != 1 {
+		t.Errorf("named block at source %d, want the first place", got)
 	}
-	// At limit 20 the floor places the block at 2 as well; without it, the
+	// At limit 20 the floor places the block first as well; without it, the
 	// order is the pipeline's.
 	tw := e.ask(t, q, 20, false)
 	var rest []string
@@ -284,23 +287,23 @@ func TestQueryTitleFloorFamily(t *testing.T) {
 			restScores = append(restScores, s.Score)
 		}
 	}
-	want := append([]string{rest[0], e.target}, rest[1:9]...)
+	want := append([]string{e.target}, rest[:9]...)
 	if strings.Join(ten, ",") != strings.Join(want, ",") {
-		t.Errorf("sources around the placed block moved:\n got %v\nwant %v", ten, want)
+		t.Errorf("sources behind the placed block moved:\n got %v\nwant %v", ten, want)
 	}
-	// The placed block carries the score of the place it took — the score of
-	// the source now behind it — so the sources stay sorted and the synthesis
-	// path's score threshold judges that place.
+	// The placed block carries the score of the place it took — the former
+	// first's — so the sources stay sorted and the synthesis path's score
+	// threshold judges that place.
 	tenResp := e.ask(t, q, 10, false)
-	if got := tenResp.Sources[1].Score; got != restScores[1] {
-		t.Errorf("placed block's score %v, want the place's %v", got, restScores[1])
+	if got := tenResp.Sources[0].Score; got != restScores[0] {
+		t.Errorf("placed block's score %v, want the former first's %v", got, restScores[0])
 	}
 
 	// A translated question: retrieval runs on the translation, the floor
 	// compares the question the caller sent.
 	tr := e.askPinned(t, q, 10, true, "nightly Orbit report for the last day of August").ids()
-	if p := position(tr, e.target); p != 2 {
-		t.Errorf("translated question: named block at source %d, want 2", p)
+	if p := position(tr, e.target); p != 1 {
+		t.Errorf("translated question: named block at source %d, want 1", p)
 	}
 }
 

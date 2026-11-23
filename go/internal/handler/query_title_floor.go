@@ -5,13 +5,11 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
-	"github.com/GottZ/ctx/internal/llm"
 	"github.com/GottZ/ctx/internal/rrf"
 )
 
 // floorTitleMatch is the query's Step 6d-title (issue #507): a question that
-// is the title of a candidate names that block, and the block comes to a place
-// every synthesis prompt carries (place, from titleFloorPlace).
+// is the title of a candidate names that block, and the block comes first.
 //
 // Why a floor behind every stage: among blocks whose titles differ in a date or
 // a version number only (one block per release, handover, daily report,
@@ -32,33 +30,37 @@ import (
 //   - any other candidate whose title contains the question (a title made of
 //     one frequent word, "Deploy" beside "Deploy runbook") leaves the order as
 //     it is; of several candidates whose titles fold to the question, the one
-//     the pipeline ranks highest is the named block, and if it already stands
-//     at the place or in front of it nothing moves;
-//   - a block behind the place moves to it; the results before the place keep
-//     their order, those from the place on move down by one, and the result at
-//     the end of the limit leaves the answer. The place is the last one a
-//     low_confidence prompt still carries (titleFloorPlace): at the last place
-//     of the limit the block stood among the sources but, under
-//     query.low_confidence_max_sources, outside the prompt the answer is
-//     written from;
-//   - the block takes the score fields of the row whose place it takes
-//     (RRFScore and RRFScoreOriginal), the way the graph and cluster stages
-//     place a block by a score relative to the list: the list stays sorted,
-//     the synthesis path's score threshold (query.score_threshold) judges the
-//     place rather than the fused score that put the block behind its
-//     siblings, and both confidence labels — the synthesis reads the scores,
-//     the retrieval-only path rrf_score_original — read the values they read
-//     for that place before. The floor therefore never lifts an answer's label;
-//     it changes only when the result that leaves at the end of the limit
-//     carried the list's highest score.
+//     the pipeline ranks highest is the named block, and if it is already
+//     first nothing moves;
+//   - the named block moves to the first place; the results before its old
+//     place move down by one, and the result at the end of the limit leaves
+//     the answer. The first place is the one every synthesis prompt keeps: a
+//     low_confidence answer is written from the first
+//     query.low_confidence_max_sources sources only (at the last place of the
+//     limit the block stood among the sources but outside the prompt), and the
+//     prompt budget evicts the latest part of the prompt first, where
+//     LostInMiddleReorder puts the second source — so the second place is the
+//     first to go when a small context window cuts;
+//   - the block takes the score fields of the row whose place it takes, the
+//     former first (RRFScore and RRFScoreOriginal), the way the graph and
+//     cluster stages place a block by a score relative to the list: the list
+//     stays sorted, the synthesis path's score threshold (query.score_threshold)
+//     judges the place rather than the fused score that put the block behind
+//     its siblings, and the list's highest score is still there for both
+//     confidence labels — the synthesis reads the scores, the retrieval-only
+//     path rrf_score_original. The floor therefore never lifts a label; a label
+//     falls only when a value that carried the list's highest score leaves the
+//     list — the result at the end of the limit, or the block's own fields when
+//     its own rrf_score_original was the highest (the gravity sorts by the
+//     boosted score, so that can happen).
 //
 // A block the candidate window (the fusion's internal limit, 200 or the
 // aggregate over-fetch) does not hold cannot be placed; the pass only reorders
 // what retrieval found. Rows of a type in skipTypes (the shadow measurement
 // types, dropped after the truncation) are never placed, so the floor cannot
 // hand a slot to a row that leaves the answer afterwards.
-func floorTitleMatch(results []rrf.SearchResult, question string, place int, skipTypes []string) []rrf.SearchResult {
-	if place <= 0 || len(results) <= place {
+func floorTitleMatch(results []rrf.SearchResult, question string, skipTypes []string) []rrf.SearchResult {
+	if len(results) <= 1 {
 		return results
 	}
 	q := foldTitle(question)
@@ -78,8 +80,7 @@ func floorTitleMatch(results []rrf.SearchResult, question string, place int, ski
 			return results
 		}
 	}
-	at := place - 1
-	if match <= at {
+	if match <= 0 {
 		return results
 	}
 	for _, st := range skipTypes {
@@ -88,25 +89,13 @@ func floorTitleMatch(results []rrf.SearchResult, question string, place int, ski
 		}
 	}
 	placed := results[match]
-	placed.RRFScore = results[at].RRFScore
-	placed.RRFScoreOriginal = results[at].RRFScoreOriginal
+	placed.RRFScore = results[0].RRFScore
+	placed.RRFScoreOriginal = results[0].RRFScoreOriginal
 	out := make([]rrf.SearchResult, 0, len(results))
-	out = append(out, results[:at]...)
 	out = append(out, placed)
-	out = append(out, results[at:match]...)
+	out = append(out, results[:match]...)
 	out = append(out, results[match+1:]...)
 	return out
-}
-
-// titleFloorPlace is the place floorTitleMatch moves a named block to: the
-// last place a synthesis prompt carries under every label — the first
-// llm.LowConfidenceCut sources of a low_confidence answer — and never past the
-// caller's limit.
-func titleFloorPlace(limit int, st llm.SynthesisSettings) int {
-	if cut := llm.LowConfidenceCut(st); cut < limit {
-		return cut
-	}
-	return limit
 }
 
 // foldTitle is the comparison form of a title and of a question, the same on

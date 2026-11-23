@@ -1446,10 +1446,10 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 6d-title (issue #507): a question that names a candidate by its
-	// title brings that block to a place every synthesis prompt carries —
-	// behind every stage that reorders, ahead of the truncation
+	// title brings that block to the first place, the one every synthesis
+	// prompt keeps — behind every stage that reorders, ahead of the truncation
 	// (floorTitleMatch).
-	results = floorTitleMatch(results, originalQuery, titleFloorPlace(limit, cfg.SynthesisSettings()), req.ShadowTypes)
+	results = floorTitleMatch(results, originalQuery, req.ShadowTypes)
 
 	// Step 6e: Truncate to user-facing limit after reranking and filtering.
 	if len(results) > limit {
