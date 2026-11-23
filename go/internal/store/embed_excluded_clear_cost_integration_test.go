@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -34,10 +36,12 @@ var indexNames = regexp.MustCompile(`"Index Name": "[^"]+"`)
 // blocks of fc-x, and writes its own row of the name: `excluded` (A's scopes
 // answer true, the reconcile marks A's blocks), then `full-pass` (they answer
 // false, the reconcile clears them). The buffers of every statement of A's
-// entry, read again on their custom plans, stay flat in both directions and
-// within embedExcludedEntryBound: A's entry reads the ranges of A's marked
-// and pending blocks of the name and none of B's blocks. B's rows are not
-// rewritten.
+// entry, read again on their custom and on their generic plans, each under
+// random_page_cost 1.1 and 4 (testdb.RandomPageCosts; at 4, a deployment's
+// value, the batches walked the primary key and the whole scope before issue
+// #513), stay flat in both directions and within embedExcludedEntryBound:
+// A's entry reads the ranges of A's marked and pending blocks of the name and
+// none of B's blocks. B's rows are not rewritten.
 func TestEmbedExcludedTenantEntryCostBothDirections(t *testing.T) {
 	pool, dsn := testdb.SetupTestDBWithDSN(t)
 	traced, tracer := r3Traced(t, dsn)
@@ -54,7 +58,13 @@ func TestEmbedExcludedTenantEntryCostBothDirections(t *testing.T) {
 		t.Fatal(err)
 	}
 	reconcile(t, pool)
-	entryCost := func(label string) int64 {
+	planners := map[string]*pgxpool.Pool{}
+	for _, rpc := range testdb.RandomPageCosts {
+		planners[rpc] = testdb.WithRandomPageCost(t, pool, rpc)
+	}
+	// entryCost returns the entry's buffers per plan (random_page_cost and
+	// plan form).
+	entryCost := func(label string) map[string]int64 {
 		t.Helper()
 		var grp string
 		if err := pool.QueryRow(ctx, `SELECT string_agg(grp, ',') FROM context_embed_excluded_queue WHERE name = 'fc-x'`).Scan(&grp); err != nil {
@@ -76,24 +86,35 @@ func TestEmbedExcludedTenantEntryCostBothDirections(t *testing.T) {
 		if _, err := store.ReconcileEmbedExcluded(ctx, traced); err != nil {
 			t.Fatalf("%s: reconcile: %v", label, err)
 		}
-		var sum int64
+		sums := map[string]int64{}
 		for _, st := range tracer.take() {
 			if !strings.Contains(st.sql, "context_blocks") {
 				continue
 			}
-			c := testdb.ExplainCustom(t, pool, st.sql, st.args...)
-			sum += c.Buffers
 			head := strings.Join(strings.Fields(st.sql), " ")
 			if len(head) > 60 {
 				head = head[:60]
 			}
-			t.Logf("   %-60s %5d buffers on %v", head, c.Buffers, indexNames.FindAllString(c.Plan, -1))
+			for _, rpc := range testdb.RandomPageCosts {
+				plans := map[string]testdb.PlanCost{"custom": testdb.ExplainCustom(t, planners[rpc], st.sql, st.args...)}
+				// The pass without a created_at is constant false since
+				// migration 186 (NOT NULL): its plan names no parameter, so it
+				// has no generic plan to read.
+				if !strings.Contains(st.sql, "created_at IS NULL") {
+					plans["generic"] = testdb.ExplainGeneric(t, planners[rpc], st.sql, st.args...)
+				}
+				for form, c := range plans {
+					plan := form + " random_page_cost=" + rpc
+					sums[plan] += c.Buffers
+					t.Logf("   %-60s %-26s %5d buffers on %v", head, plan, c.Buffers, indexNames.FindAllString(c.Plan, -1))
+				}
+			}
 		}
-		t.Logf("%s: %d buffers over the entry's statements", label, sum)
-		return sum
+		t.Logf("%s: buffers over the entry's statements %v", label, sums)
+		return sums
 	}
 	var row *store.BlockTypeRow
-	var marks, clears []int64
+	var marks, clears []map[string]int64
 	from := 0
 	for _, n := range []int{10_000, 100_000} {
 		if _, err := pool.Exec(ctx,
@@ -132,16 +153,19 @@ func TestEmbedExcludedTenantEntryCostBothDirections(t *testing.T) {
 	}
 	for _, d := range []struct {
 		dir  string
-		sums []int64
+		sums []map[string]int64
 	}{{"mark", marks}, {"clear", clears}} {
-		if d.sums[1] > d.sums[0]+d.sums[0]/2+50 {
-			t.Errorf("%s: A's entry reads %d buffers with 10 000 marked blocks of B and %d with 100 000: it walks B's rows",
-				d.dir, d.sums[0], d.sums[1])
-		}
-		for _, sum := range d.sums {
-			if sum > embedExcludedEntryBound {
-				t.Errorf("%s: A's entry reads %d buffers, above %d: it does not read its scope's range of the name",
-					d.dir, sum, embedExcludedEntryBound)
+		for plan := range d.sums[0] {
+			small, large := d.sums[0][plan], d.sums[1][plan]
+			if large > small+small/2+50 {
+				t.Errorf("%s (%s): A's entry reads %d buffers with 10 000 marked blocks of B and %d with 100 000: it walks B's rows",
+					d.dir, plan, small, large)
+			}
+			for _, sum := range []int64{small, large} {
+				if sum > embedExcludedEntryBound {
+					t.Errorf("%s (%s): A's entry reads %d buffers, above %d: it does not read its scope's range of the name",
+						d.dir, plan, sum, embedExcludedEntryBound)
+				}
 			}
 		}
 	}

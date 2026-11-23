@@ -7,7 +7,10 @@ package store_test
 // 2 000 vs 20 000 blocks in the scope: the buffer count stays within a small
 // slack (btree depth), where a count over context_blocks grows tenfold. Both
 // the custom plan and the generic plan are pinned — pgx switches a prepared
-// statement to the generic plan from its sixth execution on a connection.
+// statement to the generic plan from its sixth execution on a connection —
+// and each under random_page_cost 1.1 and 4 (testdb.RandomPageCosts): the CI
+// image prices pages at 1.1, a deployment at 4, and at 4 the oldest/newest
+// entry walked idx_context_created before issue #512.
 
 import (
 	"context"
@@ -107,16 +110,23 @@ func TestBlockCounts_StatsCostIndependentOfCorpus(t *testing.T) {
 		{"list-categories", store.ListCategoriesSQLForTest},
 	}
 	windows := [][]string{{"cost-x"}, {"cost-x", "cost-y", "cost-z"}}
+	planners := map[string]*pgxpool.Pool{}
+	for _, rpc := range testdb.RandomPageCosts {
+		planners[rpc] = testdb.WithRandomPageCost(t, pool, rpc)
+	}
 	type key struct {
 		stmt    string
 		window  int
 		generic bool
+		rpc     string
 	}
 	before := map[key]int64{}
 	for _, st := range statements {
 		for wi, w := range windows {
 			for _, g := range []bool{false, true} {
-				before[key{st.name, wi, g}] = statementBuffers(t, pool, st.sql, w, g)
+				for _, rpc := range testdb.RandomPageCosts {
+					before[key{st.name, wi, g, rpc}] = statementBuffers(t, planners[rpc], st.sql, w, g)
+				}
 			}
 		}
 	}
@@ -124,13 +134,15 @@ func TestBlockCounts_StatsCostIndependentOfCorpus(t *testing.T) {
 	for _, st := range statements {
 		for wi, w := range windows {
 			for _, g := range []bool{false, true} {
-				k := key{st.name, wi, g}
-				after := statementBuffers(t, pool, st.sql, w, g)
-				t.Logf("%-15s scopes=%d generic=%-5v buffers %d blocks: %d, %d blocks: %d",
-					st.name, len(w), g, small, before[k], large, after)
-				if after > before[k]+costSlackBuffers {
-					t.Errorf("%s (scopes %v, generic=%v): %d buffers at %d blocks vs %d at %d — the statement grows with the corpus",
-						st.name, w, g, after, large, before[k], small)
+				for _, rpc := range testdb.RandomPageCosts {
+					k := key{st.name, wi, g, rpc}
+					after := statementBuffers(t, planners[rpc], st.sql, w, g)
+					t.Logf("%-15s scopes=%d generic=%-5v random_page_cost=%-3s buffers %d blocks: %d, %d blocks: %d",
+						st.name, len(w), g, rpc, small, before[k], large, after)
+					if after > before[k]+costSlackBuffers {
+						t.Errorf("%s (scopes %v, generic=%v, random_page_cost %s): %d buffers at %d blocks vs %d at %d — the statement grows with the corpus",
+							st.name, w, g, rpc, after, large, before[k], small)
+					}
 				}
 			}
 		}
