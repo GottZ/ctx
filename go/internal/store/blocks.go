@@ -2779,7 +2779,7 @@ const activeCategoriesSQL = `SELECT category FROM ` + blockCountRowsSQL + ` k
 // the scope row by row: at random_page_cost 4 — PostgreSQL's default, which a
 // deployment keeps unless its operator lowers it — the planner took that walk
 // and read every newer block of the other read scopes up to the probed
-// scope's newest (96 845 buffers at 1 000 000 blocks, 21 this way). The two
+// scope's newest (96 849 buffers at 1 000 000 blocks, 21 this way). The two
 // comparisons admit exactly the rows of the scope (scope is NOT NULL, and a
 // database's collation is deterministic) and are the start and stop key of
 // the index scan; no other index delivers (scope, created_at) without sorting

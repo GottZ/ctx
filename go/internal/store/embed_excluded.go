@@ -80,8 +80,8 @@ const EmbedExcludedReconcileBatch = 1000
 // the whole scope through idx_context_scope or every pending block of the
 // table through idx_embedding_pending and sorted them (the planner estimates
 // the name and the scope as independent, so a name that is common in another
-// tenant made the batch's rows look plentiful: 96 421 buffers per clear
-// statement with 1 000 000 blocks in each of the two tenants, 7 on the
+// tenant made the batch's rows look plentiful: about 98 000 buffers per clear
+// statement with 1 000 000 blocks in each of the two tenants, 43-61 on the
 // range). The comparisons admit exactly the rows of the scope and the name
 // (both NOT NULL, a database's collation deterministic) and are the start
 // and stop key of the index scan; only the index whose leading keys they are
@@ -215,8 +215,8 @@ var (
 	// tenant moved the statistics, and read the whole scope (976 buffers over
 	// 20 000 blocks of the scope at 100 000 marked blocks elsewhere), and with
 	// equalities and ORDER BY id it walked context_blocks_pkey at
-	// random_page_cost 4 (96 420 buffers with 1 000 000 blocks in each of two
-	// tenants).
+	// random_page_cost 4 (1 946 -> 6 042 buffers at 10 000 -> 100 000 marked
+	// blocks of another tenant on the cost pin).
 	embedExcludedClearLeftSQL = `SELECT EXISTS (SELECT 1 FROM (
 		              SELECT id FROM context_blocks
 		               WHERE embed_excluded AND NOT is_archived
