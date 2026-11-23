@@ -524,7 +524,7 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 	}
 	firstETag := page.ETag
 	hold := readHold(project.SyncCursor, "comments")
-	orphans := orphanHolds{prev: readOrphans(project.SyncCursor), maxIssue: -1, issuesDone: issuesDone}
+	orphans := orphanHolds{until: decodeCursor(project.SyncCursor).OrphansUntil, maxIssue: -1, issuesDone: issuesDone}
 	var maxSeen, relist time.Time
 	seen := map[string]bool{}
 	for n := 1; ; n++ {
@@ -543,7 +543,7 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 		relist = relistAt(relistAt(relist, res.Relist), at)
 		if !maxSeen.IsZero() {
 			etag, at := legCursor(firstETag, n, page.NextURL, maxSeen, relist)
-			m.commitFetchCursor(ctx, project.ID, "comments", etag, at, hold, page.NextURL == "", orphans.extra())
+			m.commitFetchCursor(ctx, project.ID, "comments", etag, at, hold, page.NextURL == "", orphansUntil(maxSeen))
 		}
 		if page.NextURL == "" {
 			return nil
@@ -664,24 +664,26 @@ func (m *SyncManager) commitFetchCursor(ctx context.Context, projectID, leg, eta
 }
 
 // orphanHolds is the comment leg's account of comments whose parent issue
-// has no mapping (issue #509): prev, the ones the previous run held already
-// (sync_cursor.orphans, beside the legs); held, the ones this run holds; maxIssue,
-// the highest issue number the project maps (-1 until read); issuesDone,
-// whether this run's issue leg read its listing to the end.
+// has no mapping (issue #509): until, the newest comment stamp the previous
+// run's comment leg listed (sync_cursor.orphans_until, beside the legs);
+// maxIssue, the highest issue number the project maps (-1 until read);
+// issuesDone, whether this run's issue leg read its listing to the end.
 type orphanHolds struct {
-	prev       map[int64]bool
-	held       []int64
+	until      time.Time
 	maxIssue   int64
 	issuesDone bool
 }
 
-// extra is the cursor key, beside the legs, that carries the held orphans.
-func (o *orphanHolds) extra() json.RawMessage {
-	held := o.held
-	if held == nil {
-		held = []int64{}
-	}
-	b, _ := json.Marshal(map[string]any{"orphans": held})
+// orphansUntil is the cursor key, beside the legs, that records the newest
+// comment stamp the leg listed so far in this run (maxSeen): a comment at or
+// before it was listed by this run, so a later run knows it held it already
+// if it was an orphan (holdOrphans). One timestamp, written with each page's
+// cursor (issue #474): the list of held comment ids it replaces was written
+// again after every comment page and carried in every later cursor commit —
+// in a bounded catch-up of 1000 pages of 100 orphans 0.9 MB of JSON, about
+// 240 MB of WAL and 20–28 s of database time per run.
+func orphansUntil(maxSeen time.Time) json.RawMessage {
+	b, _ := json.Marshal(map[string]time.Time{"orphans_until": maxSeen.UTC()})
 	return b
 }
 
@@ -693,27 +695,31 @@ func (o *orphanHolds) extra() json.RawMessage {
 //     may be any issue the leg has not reached yet;
 //   - after an issue leg that read its listing to the end, an orphan whose
 //     parent number lies above every issue number the project maps and that
-//     the previous run did not hold: an issue the forge created after this
-//     run's issue leg listed, whose comment the comment leg lists already.
-//     The next run's issue leg lists that issue (it was created after the
-//     listing) and its comment leg lists the comment again.
+//     the previous run did not list (its stamp lies after the newest one
+//     that run's comment leg listed, orphansUntil): an issue the forge
+//     created after this run's issue leg listed, whose comment the comment
+//     leg lists already. The next run's issue leg lists that issue (it was
+//     created after the listing) and its comment leg lists the comment
+//     again.
 //
-// An orphan the previous run held, or one on an issue or pull request at
-// or below the newest mapped issue, is not held after a complete issue leg:
-// the forge listed every issue updated since the leg's cursor and none of
-// them is its parent — a pull request (the issue listing drops those, so
-// its parent is never mapped) or an issue the listing does not carry. A
-// comment on a pull request so holds the cursor once after a complete issue
-// leg, and on every run of a catch-up whose issue leg stops at the bound —
-// never beyond it. Before, the comment cursor moved past an orphan on an
-// issue the bounded leg had not reached when the parent's number was below
-// the newest mapped one, or when the previous run had held it, and the
-// comment was not listed again until it was edited (issue #509).
+// An orphan the previous run listed — and held, if it was an orphan then —
+// or one on an issue or pull request at or below the newest mapped issue,
+// is not held after a complete issue leg: the forge listed every issue
+// updated since the leg's cursor and none of them is its parent — a pull
+// request (the issue listing drops those, so its parent is never mapped)
+// or an issue the listing does not carry. A comment on a pull request so
+// holds the cursor once after a complete issue leg (once more after an
+// edit, which moves its stamp), and on every run of a catch-up whose issue
+// leg stops at the bound — never beyond it. Before, the comment cursor
+// moved past an orphan on an issue the bounded leg had not reached when
+// the parent's number was below the newest mapped one, or when the
+// previous run had held it, and the comment was not listed again until it
+// was edited (issue #509).
 func (m *SyncManager) holdOrphans(ctx context.Context, projectID string, o *orphanHolds, page []orphanComment) (time.Time, error) {
 	var at time.Time
 	for _, c := range page {
 		if o.issuesDone {
-			if o.prev[c.id] {
+			if !c.at.After(o.until) {
 				continue
 			}
 			if o.maxIssue < 0 {
@@ -727,7 +733,6 @@ func (m *SyncManager) holdOrphans(ctx context.Context, projectID string, o *orph
 				continue
 			}
 		}
-		o.held = append(o.held, c.id)
 		at = relistAt(at, c.at)
 	}
 	return at, nil
@@ -978,10 +983,10 @@ type cursor struct {
 	Issues   legCursorJSON `json:"issues"`
 	Comments legCursorJSON `json:"comments"`
 	BackoffN int           `json:"backoff_n"`
-	// Holds and Orphans sit beside the legs (issue #509): a cursor commit
-	// replaces a leg's object, theirs survives it.
-	Holds   map[string]*holdJSON `json:"holds,omitempty"`
-	Orphans []int64              `json:"orphans,omitempty"`
+	// Holds and OrphansUntil sit beside the legs (issue #509): a cursor
+	// commit replaces a leg's object, theirs survives it.
+	Holds        map[string]*holdJSON `json:"holds,omitempty"`
+	OrphansUntil time.Time            `json:"orphans_until,omitzero"`
 }
 
 // legCursorJSON is one leg's cursor: the ETag and since the next run asks
@@ -1020,16 +1025,6 @@ func (l legCursorJSON) start(h *holdJSON) (string, time.Time) {
 		return "", h.At
 	}
 	return "", l.Since
-}
-
-// readOrphans is the set of comment ids the previous run held as orphans.
-func readOrphans(raw json.RawMessage) map[int64]bool {
-	c := decodeCursor(raw)
-	out := make(map[int64]bool, len(c.Orphans))
-	for _, id := range c.Orphans {
-		out[id] = true
-	}
-	return out
 }
 
 // readHold is the nonce of leg's hold in raw, "" for none.

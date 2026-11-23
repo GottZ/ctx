@@ -351,7 +351,7 @@ func utcJSON(expr string) string {
 // there, and a run lists from hold.at, so a leg that stops at its page bound
 // goes on from where it stopped instead of reading the same pages again.
 // Every other hold stays (HoldFetchCursor). top (a JSON object, nil for none) is merged into
-// sync_cursor beside the legs — the comment leg's held orphans. The other
+// sync_cursor beside the legs — the comment leg's orphan record. The other
 // keys of the cursor survive.
 func CommitFetchCursor(ctx context.Context, pool *pgxpool.Pool, projectID, leg, etag string, since time.Time, readHold string, last bool, top json.RawMessage) error {
 	if len(top) == 0 {
