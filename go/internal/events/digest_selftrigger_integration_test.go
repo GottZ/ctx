@@ -290,41 +290,47 @@ func TestBackgroundDigestIsNotStartedByItsOwnMap(t *testing.T) {
 // scheduler while the run is still under way, keeps the digest pending, and
 // the next run lists it. RED before the fix: the run's end cleared the digest
 // after any success, and the block stayed out of the map until the next write.
-// The run's own map notification arrives in the same window, before the run
-// knows the map's id (the map's first write).
+// Two rounds: in the first the run's own map notification arrives in the same
+// window before the run knows the map's id (the map's first write); in the
+// second the map is known, and the block's notification is the only one the
+// run has to decide at its end.
 func TestBackgroundDigestKeepsAWriteThatArrivesDuringTheRun(t *testing.T) {
 	f := newSelfFixture(t)
 	ctx := context.Background()
 
 	f.write(t, f.scope, "a source block")
 	f.flush(t)
-	f.s.runDigestFn = func(ctx context.Context, pool *pgxpool.Pool, reg *blocktype.Registry,
-		mode, language, tenantScope, homeScope string, window []string) (digest.Result, error) {
-		res, err := digest.RunDigest(ctx, pool, reg, mode, language, tenantScope, homeScope, window)
-		f.write(t, f.scope, "written while the digest ran")
-		f.flush(t) // the map's and the block's notifications, before the run ends
-		return res, err
-	}
-	f.debouncePassed()
-	f.s.digestTick(ctx)
-	f.s.runDigestFn = nil
-	if strings.Contains(f.mapText(t, f.scope), "written while the digest ran") {
-		t.Fatal("fixture: the block written after the scan is in the run's map")
-	}
-	if !digestPending(f.s) {
-		t.Fatal("a block written while the digest ran left the digest not pending — the map lacks it until the next write")
+	for round, title := range []string{"written while the first map was written", "written while the map was rewritten"} {
+		f.s.runDigestFn = func(ctx context.Context, pool *pgxpool.Pool, reg *blocktype.Registry,
+			mode, language, tenantScope, homeScope string, window []string) (digest.Result, error) {
+			res, err := digest.RunDigest(ctx, pool, reg, mode, language, tenantScope, homeScope, window)
+			f.write(t, f.scope, title)
+			f.flush(t) // the map's and the block's notifications, before the run ends
+			return res, err
+		}
+		f.debouncePassed()
+		f.s.digestTick(ctx)
+		f.s.runDigestFn = nil
+		if strings.Contains(f.mapText(t, f.scope), title) {
+			t.Fatalf("round %d, fixture: the block written after the scan is in the run's map", round+1)
+		}
+		if !digestPending(f.s) {
+			t.Fatalf("round %d: a block written while the digest ran left the digest not pending — the map lacks it until the next write", round+1)
+		}
 	}
 
 	f.debouncePassed()
 	f.s.digestTick(ctx)
 	f.flush(t)
-	if !strings.Contains(f.mapText(t, f.scope), "written while the digest ran") {
-		t.Fatalf("the run after the write does not list the block:\n%s", f.mapText(t, f.scope))
+	for _, title := range []string{"written while the first map was written", "written while the map was rewritten"} {
+		if !strings.Contains(f.mapText(t, f.scope), title) {
+			t.Fatalf("the run after the writes does not list %q:\n%s", title, f.mapText(t, f.scope))
+		}
 	}
 	f.debouncePassed()
 	f.s.digestTick(ctx)
-	if got := f.runs(); got != 2 {
-		t.Errorf("%d runs, want 2: one for the first write, one for the write during it, none for the maps", got)
+	if got := f.runs(); got != 3 {
+		t.Errorf("%d runs, want 3: one for the first write, one for each write during a run, none for the maps", got)
 	}
 }
 
