@@ -2301,6 +2301,50 @@ func leftToWindow(query string, matches []dayDate) bool {
 	return !yearless
 }
 
+// reEdgeBefore matches an edge word of matchOpenEdge (with "dem" or "the")
+// right before a day date; its group is the word.
+var reEdgeBefore = regexp.MustCompile(`(?i)\b(ab|vor|nach|before|after)(?:\s+(?:dem|the))?\s+$`)
+
+// opposingEdges reports whether query has two day dates, each right behind
+// an edge word of matchOpenEdge, one opening a window towards the future
+// ("ab", "nach", "after") and one towards the past ("vor", "before"), that
+// leave a day between them: the window between them, which matchOpenEdge
+// reads as it reads two years ("What happened after 2026-03-15 and before
+// 2026-03-20?" is 16 to 19 March, issue #517). Edges that leave no day
+// between them ("vor dem 15.03.2026 und nach dem 20.03.2026" asks for the
+// time outside) stay the two days. Each date reads only the words right
+// before it (wordBefore, and the one before an article).
+func opposingEdges(query string, matches []dayDate) bool {
+	if len(matches) != 2 {
+		return false
+	}
+	lower := strings.ToLower(query)
+	var start, end time.Time
+	from, until := 0, 0
+	for _, m := range matches {
+		before := wordBefore(lower, m.start)
+		if w := strings.TrimRight(before, asciiSpace); w == "dem" || w == "the" {
+			before = wordBefore(lower, m.start-len(before)) + before
+		}
+		g := reEdgeBefore.FindStringSubmatch(before)
+		if g == nil {
+			return false
+		}
+		switch g[1] {
+		case "vor", "before":
+			until++
+			end = m.day.AddDate(0, 0, -1)
+		case "ab":
+			from++
+			start = m.day
+		default:
+			from++
+			start = m.day.AddDate(0, 0, 1)
+		}
+	}
+	return from == 1 && until == 1 && !end.Before(start)
+}
+
 // dayDateLeftToWindow returns the day date of query left to the window
 // rules (leftToWindow), formatted, or "".
 func dayDateLeftToWindow(query string) string {
@@ -2338,7 +2382,7 @@ func matchDayDates(query string, deferToSeitBis bool) *TemporalResult {
 			return rangeResult(sref+" – "+query[matches[0].dateStart:matches[0].dateEnd], fmtDate(start), fmtDate(matches[0].day), "range")
 		}
 	}
-	if deferToSeitBis && leftToWindow(query, matches) {
+	if deferToSeitBis && (leftToWindow(query, matches) || opposingEdges(query, matches)) {
 		return nil
 	}
 	ref := func(m dayDate) string { return query[m.dateStart:m.dateEnd] }

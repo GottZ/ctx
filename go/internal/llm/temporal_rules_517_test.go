@@ -179,3 +179,22 @@ func TestRules_OneFiniteVerbAndTheImperativeOfLassen(t *testing.T) {
 		t.Errorf("Ab 2024 galten neue Limits: tense %s, want past", got)
 	}
 }
+
+// TestRules_TwoOpposingDayEdgesAreTheWindowBetween (the bot review's point
+// 1 of issue #517): two day dates behind an edge word each, one towards the
+// future and one towards the past, are the window between them, as two
+// years are; edges that leave no day between them stay the two days.
+func TestRules_TwoOpposingDayEdgesAreTheWindowBetween(t *testing.T) {
+	check517(t, now517, want517{
+		"What happened after 2026-03-15 and before 2026-03-20?":    "2026-03-16..2026-03-19/range",
+		"Was lief nach dem 15.03.2026 und vor dem 20.03.2026?":     "2026-03-16..2026-03-19/range",
+		"Was passierte ab 2026-03-15 und vor 2026-03-20?":          "2026-03-15..2026-03-19/range",
+		"Was war vor dem 01.04.2026 und nach dem 15.03.2026?":      "2026-03-16..2026-03-31/range",
+		"Gibt es nach dem 2026-03-10 vor dem 2026-03-20 Einträge?": "2026-03-11..2026-03-19/range",
+		"vor dem 15.03.2026 und nach dem 20.03.2026":               "2026-03-15/past 2026-03-20/past",
+		"after 2026-03-15 and before 2026-03-16":                   "2026-03-15/past 2026-03-16/past",
+		"Was war am 2026-03-15 und am 2026-03-20?":                 "2026-03-15/past 2026-03-20/past",
+		"zwischen dem 15.03.2026 und dem 20.03.2026":               "2026-03-15..2026-03-20/range",
+		"What happened after 2026-03-15?":                          "2026-03-16/from",
+	})
+}

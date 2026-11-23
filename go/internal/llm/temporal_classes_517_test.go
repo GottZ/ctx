@@ -137,7 +137,7 @@ var classCorpusFloor = map[string]int{
 	"k4-ellipse":       26,
 	"k5-jahr-partizip": 44,
 	"k6-ten-imperativ": 51,
-	"k7-bot":           22,
+	"k7-bot":           31,
 }
 
 // classCase is a question of a class corpus of issue #517 with its
