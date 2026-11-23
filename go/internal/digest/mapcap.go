@@ -104,8 +104,8 @@ func (h *categoryHeap) Pop() any {
 // mapBuilder builds the topic map from rows that arrive grouped by category
 // (the source query orders by category), holding memory bounded by the cap
 // rather than by the corpus: before issue #518 the run kept every row of the
-// read window in memory, about 500 MB at 1 M blocks in a container whose
-// GOMEMLIMIT is 768 MiB.
+// read window in memory: a peak heap of 0.9 to 1.3 GB at 1 M blocks
+// (measured), past the 768 MiB GOMEMLIMIT of the image; about 50 MB now.
 //
 // While the full map can still fit, every row is kept, and if it fits in the
 // end the map is rendered exactly as before (renderFull). Once it cannot, the
@@ -165,7 +165,7 @@ func cappedCategoryHeader(name string, n, listed int) string {
 
 func truncationNote(listed, blocks, budget int) string {
 	return fmt.Sprintf("Truncated: %d of %d blocks listed, this map is capped at %d bytes. "+
-		"A category lists its first titles in title order; `ctx search <category>` finds all of its blocks.\n",
+		"A category lists its first titles in title order; `ctx search <category> query:<words>` finds the others.\n",
 		listed, blocks, budget)
 }
 
