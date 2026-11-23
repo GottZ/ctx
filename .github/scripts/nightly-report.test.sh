@@ -255,8 +255,8 @@ NOT_ON_SCHEDULE=(docker docker-attest dependency-graph)
 needs_cover_the_schedule() { # ci.yml
   local all needs want
   all=$(awk '/^jobs:$/ { j = 1; next } j && /^[^ #]/ { j = 0 }
-    j && /^  [a-z0-9-]+:$/ { sub(/^  /, ""); sub(/:$/, ""); print }' "$1" | sort)
-  needs=$(awk '/^  nightly-report:$/ { r = 1; next } r && /^  [a-z0-9-]+:$/ { r = 0 }
+    j && /^  [A-Za-z_][A-Za-z0-9_-]*:$/ { sub(/^  /, ""); sub(/:$/, ""); print }' "$1" | sort)
+  needs=$(awk '/^  nightly-report:$/ { r = 1; next } r && /^  [A-Za-z_][A-Za-z0-9_-]*:$/ { r = 0 }
     r && /^    needs:$/ { n = 1; next } n && /^      - / { sub(/^      - /, ""); print; next } { n = 0 }' "$1" | sort)
   want=$(grep -vxF -e nightly-report "${NOT_ON_SCHEDULE[@]/#/-e}" <<<"$all")
   [ -n "$needs" ] && [ "$needs" = "$want" ] && return 0
@@ -270,6 +270,10 @@ check "nightly-report waits for every job a schedule runs" case20
 sed 's/^  nightly-report:$/  a-new-job:\n    runs-on: ubuntu-latest\n\n  nightly-report:/' "$CI_YML" >"$WORK/ci-new-job.yml"
 case21() { ! needs_cover_the_schedule "$WORK/ci-new-job.yml" 2>/dev/null; }
 check "a job added to ci.yml but not to the needs fails the check" case21
+# A job id may carry underscores and capitals.
+sed 's/^  nightly-report:$/  A_new_job:\n    runs-on: ubuntu-latest\n\n  nightly-report:/' "$CI_YML" >"$WORK/ci-new-job-id.yml"
+case21b() { ! needs_cover_the_schedule "$WORK/ci-new-job-id.yml" 2>/dev/null; }
+check "a job whose id has an underscore and a capital fails it as well" case21b
 awk '!(/^      - build$/ && !d++)' "$CI_YML" >"$WORK/ci-dropped.yml"
 case22() { ! cmp -s "$CI_YML" "$WORK/ci-dropped.yml" && ! needs_cover_the_schedule "$WORK/ci-dropped.yml" 2>/dev/null; }
 check "a job dropped from the needs fails the check" case22
