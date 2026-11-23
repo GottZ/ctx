@@ -96,8 +96,16 @@ func TestASyncRunEndsAtItsDeadlineAndTheNextRunGoesOn(t *testing.T) {
 		st, err := e.i509RunOn(m)
 		done <- ran{st, err}
 	}()
-	for e.gh.pagesServed.Load() < 3 {
-		time.Sleep(5 * time.Millisecond)
+	// Wait for page 3, bounded, and stop if the run ended before it.
+	for until := time.Now().Add(i452Wait); e.gh.pagesServed.Load() < 3; time.Sleep(5 * time.Millisecond) {
+		select {
+		case r := <-done:
+			t.Fatalf("the run ended before the forge held page 3: %+v %v", r.st, r.err)
+		default:
+		}
+		if time.Now().After(until) {
+			t.Fatalf("the forge served %d pages in %s, want 3", e.gh.pagesServed.Load(), i452Wait)
+		}
 	}
 	// What another project sees while the forge holds page 3.
 	if _, err := m.StartSync(ctx, other, false); !errors.Is(err, ErrSyncSaturated) {
