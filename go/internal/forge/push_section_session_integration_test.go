@@ -110,6 +110,7 @@ func (failingPatch) UpdateIssue(context.Context, RepoRef, int64, IssuePatch) (*t
 }
 
 func TestPushSectionGivesItsLockBackOnEveryWayOut(t *testing.T) {
+	var checkPushed func(t *testing.T, e i491Env, obs *pgx.Conn, want int)
 	// otherInstance pushes from a pool of its own: a connection of the first
 	// pool that kept the lock would let only that pool's sessions in (a
 	// session-level advisory lock is re-entrant for its own session).
@@ -124,11 +125,15 @@ func TestPushSectionGivesItsLockBackOnEveryWayOut(t *testing.T) {
 	}
 	check := func(t *testing.T, e i491Env, obs *pgx.Conn) {
 		t.Helper()
+		checkPushed(t, e, obs, 1)
+	}
+	checkPushed = func(t *testing.T, e i491Env, obs *pgx.Conn, want int) {
+		t.Helper()
 		if n := i491PushLocks(t, obs); n != 0 {
 			t.Errorf("%d advisory lock(s) held after the section ended", n)
 		}
-		if r := otherInstance(t, e); r.Pushed != 1 || r.Conflicts != 0 {
-			t.Errorf("another instance's push after the section ended: %+v, want the entity pushed", r)
+		if r := otherInstance(t, e); r.Pushed != want || r.Conflicts != 0 {
+			t.Errorf("another instance's push after the section ended: %+v, want %d pushed", r, want)
 		}
 		if base, conflict := e.mapping(t); conflict || base != e.forgeH(t) {
 			t.Errorf("mapping flagged %v, base is the forge's %v", conflict, base == e.forgeH(t))
@@ -146,6 +151,11 @@ func TestPushSectionGivesItsLockBackOnEveryWayOut(t *testing.T) {
 		check(t, e, obs)
 	})
 
+	// A cancellation of the run while the PATCH is on the wire does not cut
+	// the PATCH (issue #474: the run's deadline reaches a section up to its
+	// lock): the PATCH lands and is recorded, the lock goes back, and the
+	// pass ends at its next step with the cancellation — another instance
+	// finds nothing left to push.
 	t.Run("the run is canceled during the PATCH", func(t *testing.T) {
 		e := i491Setup(t, "i491lockcancel", "", fakeIssue{Title: "Crane", Body: "forge body"})
 		e.edit(t, store.IssueUpdate{Title: str("Crane, A")})
@@ -156,7 +166,7 @@ func TestPushSectionGivesItsLockBackOnEveryWayOut(t *testing.T) {
 		if _, err := NewPusher(e.pool, e.reg.SnapshotForTenant).PushProject(ctx, e.proj, e.gh.client(), e.gh.repo(), alwaysAllow); !errors.Is(err, context.Canceled) {
 			t.Fatalf("push: %v, want the cancellation", err)
 		}
-		check(t, e, obs)
+		checkPushed(t, e, obs, 0)
 	})
 
 	t.Run("the bucket runs dry inside the section", func(t *testing.T) {
