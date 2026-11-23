@@ -61,6 +61,12 @@ type clauseWords struct {
 	// lang is the language of the whole question (questionLanguage), read
 	// once by clauseTokens.
 	lang int
+	// clauseS and clauseE hold, per word, the start and the end of its
+	// clause (clauseOf), filled by clauseTokens once the clauses are final
+	// (issue #517): walked per call, the bounds cost time quadratic in a long
+	// clause that a check asks once per candidate (the year proof per year,
+	// the German Perfekt per auxiliary for its closing clause).
+	clauseS, clauseE []int
 }
 
 // clauseTokens tokenizes query into clauseWords.
@@ -134,7 +140,28 @@ func clauseTokens(query string) clauseWords {
 	// ("gab's" counts as "gab").
 	c.lang = c.languageOf(0, len(c.words))
 	c.coordinate()
+	c.indexClauses()
 	return c
+}
+
+// indexClauses fills clauseS and clauseE from starts.
+func (c *clauseWords) indexClauses() {
+	n := len(c.words)
+	c.clauseS, c.clauseE = make([]int, n), make([]int, n)
+	for i := 0; i < n; i++ {
+		if i > 0 && !c.starts[i] {
+			c.clauseS[i] = c.clauseS[i-1]
+		} else {
+			c.clauseS[i] = i
+		}
+	}
+	for i := n - 1; i >= 0; i-- {
+		if i+1 < n && !c.starts[i+1] {
+			c.clauseE[i] = c.clauseE[i+1]
+		} else {
+			c.clauseE[i] = i + 1
+		}
+	}
 }
 
 // clauseConjunctions join words, phrases and clauses. Between two clauses
@@ -524,8 +551,14 @@ func abbreviation(w string) bool {
 	return len(w) <= 2 && strings.Trim(w, "0123456789") == ""
 }
 
-// clauseOf returns the words [s, e) of the clause that holds word i.
+// clauseOf returns the words [s, e) of the clause that holds word i: from
+// the table of indexClauses, or — for words whose clauses are not final yet
+// — walked, which counts as the words it reads (ruleScanHook).
 func (c clauseWords) clauseOf(i int) (s, e int) {
+	if c.clauseS != nil {
+		scanned(1)
+		return c.clauseS[i], c.clauseE[i]
+	}
 	s = i
 	for s > 0 && !c.starts[s] {
 		s--
@@ -534,6 +567,7 @@ func (c clauseWords) clauseOf(i int) (s, e int) {
 	for e < len(c.words) && !c.starts[e] {
 		e++
 	}
+	scanned(e - s)
 	return s, e
 }
 
