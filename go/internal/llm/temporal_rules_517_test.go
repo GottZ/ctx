@@ -106,3 +106,29 @@ func TestRules_AWeekdayWithAPartOfTheDay(t *testing.T) {
 		"Was läuft nachts?":                                          "2026-11-22/today@23",
 	})
 }
+
+// TestRules_ACoordinatedClauseHasItsOwnTense (issue #517 class 3 and the bot
+// review's points 2 and 3): "und", "and", "oder" and "or" between two clauses
+// with a finite verb each start a clause, so each date counts by the tense
+// of its own; every weekday of a question that names a day is a date, with
+// or without a conjunction; and a participle coordinated with another shares
+// its auxiliary. Between words and phrases the conjunction joins them.
+func TestRules_ACoordinatedClauseHasItsOwnTense(t *testing.T) {
+	check517(t, now517, want517{
+		"Was wurde am Dienstag gemerged und was wird am Donnerstag deployed?":             "2026-11-17/past 2026-11-26/future",
+		"We deployed on Monday and we will deploy on Monday":                              "2026-11-16/past 2026-11-23/future",
+		"Am Mittwoch hatten wir 3 Incidents, am Freitag werden wir das Postmortem halten": "2026-11-18/past 2026-11-27/future",
+		"Am Freitag hat Damien gesagt, dass wir am Dienstag releasen":                     "2026-11-20/past 2026-11-24/future",
+		"Am Dienstag ging der Alarm los, am Freitag kommt der Techniker":                  "2026-11-17/past 2026-11-27/future",
+		"Will it be fixed and deployed on Monday?":                                        "2026-11-23/future",
+		"Am Freitag wurde gemerged und am Montag wird deployed":                           "2026-11-20/past 2026-11-23/future",
+		// counter-cases: the conjunction joins words or phrases
+		"Haben wir am Montag und am Dienstag deployed?":        "2026-11-16/past 2026-11-17/past",
+		"Wer hat am Montag gemerged und am Dienstag deployed?": "2026-11-16/past 2026-11-17/past",
+		"Was lief am Montag und was am Dienstag?":              "2026-11-16/past 2026-11-17/past",
+		"Did we deploy on Monday and test it on Tuesday?":      "2026-11-16/past 2026-11-17/past",
+		"Has it been built and deployed on Monday?":            "2026-11-16/past",
+		"Montag und Dienstag sind Feiertage":                   "2026-11-23/future 2026-11-24/future",
+		"Wie lief der Mittwochs-Job am Montag?":                "2026-11-16/past",
+	})
+}

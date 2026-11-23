@@ -133,8 +133,8 @@ func TestRules_ClassCorporaOfIssue517(t *testing.T) {
 var classCorpusFloor = map[string]int{
 	"k1-nachname":      58,
 	"k2-tageszeit":     71,
-	"k3-klauseln":      34,
-	"k4-ellipse":       4,
+	"k3-klauseln":      69,
+	"k4-ellipse":       26,
 	"k5-jahr-partizip": 36,
 	"k6-ten-imperativ": 37,
 	"k7-bot":           22,

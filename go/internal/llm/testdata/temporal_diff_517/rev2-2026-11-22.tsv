@@ -286,7 +286,7 @@ Seit Montag, was ist passiert?	["seit montag, was ist|2026-11-16..2026-11-22|ran
 Am Montag, was ist da passiert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
 Sie sagten, wir treffen uns am Montag	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
 Ich will wissen, was am Montag passiert ist	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
-We deployed on Friday, what broke on Monday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+We deployed on Friday, what broke on Monday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40	fixed	["Friday|2026-11-20..|past","Monday|2026-11-16..|past"] linear=0.60,weekday=0.40	the Monday of the second clause is a date of its own, by that clause's past (issue #517); before, only the first weekday counted
 What did we ship on Monday, and what is planned for Friday?	["Monday|2026-11-16..|past","Friday|2026-11-27..|future"] linear=0.60,weekday=0.40
 Wer hat gestern gesagt, dass wir am Montag deployen?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
 Damien hat gesagt, dass wir am Montag deployen.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40

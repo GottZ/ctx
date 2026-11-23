@@ -133,7 +133,140 @@ func clauseTokens(query string) clauseWords {
 	// The spoken forms colloquial maps are words of the language as well
 	// ("gab's" counts as "gab").
 	c.lang = c.languageOf(0, len(c.words))
+	c.coordinate()
 	return c
+}
+
+// clauseConjunctions join words, phrases and clauses. Between two clauses
+// that each have a finite verb of their own the conjunction starts a clause
+// (coordinate, issue #517): "Was wurde am Dienstag gemerged und was wird am
+// Donnerstag deployed?" asks for a Tuesday that has been and a Thursday to
+// come; between words and phrases it joins them ("am Montag und Dienstag",
+// "Wer hat am Montag gemerged und am Dienstag deployed?").
+var clauseConjunctions = toWordSet("und", "and", "oder", "or")
+
+// englishFiniteWords are the English auxiliaries, modals and forms of "to
+// be", and the forms of the simple past that are no participle: a clause
+// with one has a finite verb (finiteClause). The other forms on -ed are the
+// participle as often ("Will it be fixed and deployed on Monday?").
+var englishFiniteWords = toWordSet("will", "would", "shall", "should", "can", "could", "may", "might", "must",
+	"is", "are", "am", "was", "were", "has", "have", "had", "do", "does", "did",
+	"won't", "wouldn't", "can't", "cannot", "couldn't", "shouldn't", "isn't", "aren't", "wasn't", "weren't",
+	"hasn't", "haven't", "hadn't", "don't", "doesn't", "didn't",
+	"broke", "ran", "went", "saw", "wrote", "came", "took", "began", "fell")
+
+// germanSubjects are the German pronouns that are the subject wherever they
+// stand in a clause ("und am Dienstag testen wir"); "es" and "sie" are the
+// object as often and count only where they open it.
+var germanSubjects = toWordSet("ich", "du", "er", "wir", "ihr", "man")
+
+// bothLanguageWords are words of finiteWord's sets that are another word in
+// the other language: the German "was" and "am" are the English "was" and
+// "am", the English "war", "bin", "man" and "er" the German ones.
+var bothLanguageWords = toWordSet("was", "am", "war", "bin", "man", "er")
+
+// finiteWord reports whether w, in a sentence of the language lang, is a
+// finite verb a clause has of its own, or a German subject pronoun, which a
+// finite verb comes with (coordinate): a German sentence reads the German
+// sets, an English one the English, one of both languages either without
+// the words both languages have (bothLanguageWords).
+func finiteWord(w string, lang int) bool {
+	if futureVerbSet[w] {
+		return true
+	}
+	switch lang {
+	case langGerman:
+		return germanFiniteVerb(w) || germanSubjects[w]
+	case langEnglish:
+		return englishFiniteWords[w]
+	}
+	return !bothLanguageWords[w] && (germanFiniteVerb(w) || germanSubjects[w] || englishFiniteWords[w])
+}
+
+// finiteOpening reports whether the words [s, e) of c open with a subject or
+// an interrogative before its verb: an English subject pronoun ("and we will
+// ship", "and it broke"), "es" or "sie" ("und es läuft"), or an
+// interrogative before a word that is no preposition and no date ("und wer
+// reviewt am Donnerstag?", not "und was am Dienstag?").
+func (c clauseWords) finiteOpening(s, e, lang int) bool {
+	if s >= e {
+		return false
+	}
+	w := c.words[s]
+	if lang != langGerman && englishSubjects[w] && w != "who" || lang != langEnglish && (w == "es" || w == "sie") {
+		return true
+	}
+	if (germanInterrogatives[w] || englishEmbedOpeners[w]) && s+1 < e {
+		next := c.words[s+1]
+		return !firstPrepositions[next] && !englishNPJoiners[next] && !dateWord(next)
+	}
+	return false
+}
+
+// coordinate starts a clause at each conjunction of clauseConjunctions that
+// stands between two clauses with a finite verb each (finiteWord or
+// finiteOpening, in the language of the sentence), issue #517, and takes the
+// conjunction out of the words: like a comma it is no word of either clause.
+// The conjuncts are the words from the last such start (or the clause's) to
+// the conjunction and from the conjunction to the next one (or the clause's
+// end); each word is read once.
+func (c *clauseWords) coordinate() {
+	var drop []int
+	lang, se := langMixed, 0
+	for s := 0; s < len(c.words); {
+		e := s + 1
+		for e < len(c.words) && !c.starts[e] {
+			e++
+		}
+		if s >= se {
+			var ss int
+			ss, se = c.sentenceOf(s)
+			lang = c.sentenceLanguage(ss, se)
+		}
+		ls, leftFinite := s, c.finiteOpening(s, e, lang)
+		for j := s; j < e; {
+			if j == ls || !clauseConjunctions[c.words[j]] {
+				leftFinite = leftFinite || finiteWord(c.words[j], lang)
+				j++
+				continue
+			}
+			re := j + 1
+			for re < e && !clauseConjunctions[c.words[re]] {
+				re++
+			}
+			scanned(re - j)
+			rightFinite := c.finiteOpening(j+1, re, lang)
+			for k := j + 1; k < re && !rightFinite; k++ {
+				rightFinite = finiteWord(c.words[k], lang)
+			}
+			if leftFinite && rightFinite && j+1 < re {
+				drop = append(drop, j)
+				c.starts[j+1] = true
+				ls, leftFinite = j+1, true
+			} else {
+				leftFinite = leftFinite || rightFinite
+			}
+			j = re
+		}
+		s = e
+	}
+	if len(drop) == 0 {
+		return
+	}
+	keep := func(i int) bool {
+		k := sort.SearchInts(drop, i)
+		return k == len(drop) || drop[k] != i
+	}
+	n := 0
+	for i := range c.words {
+		if keep(i) {
+			c.words[n], c.starts[n], c.caps[n], c.offs[n] = c.words[i], c.starts[i], c.caps[i], c.offs[i]
+			c.sentence[n], c.upper[n], c.joinedNext[n] = c.sentence[i], c.upper[i], c.joinedNext[i]
+			n++
+		}
+	}
+	c.words, c.starts, c.caps, c.offs = c.words[:n], c.starts[:n], c.caps[:n], c.offs[:n]
+	c.sentence, c.upper, c.joinedNext = c.sentence[:n], c.upper[:n], c.joinedNext[:n]
 }
 
 // colloquialForms are spoken forms of German auxiliaries and verbs a
@@ -1237,6 +1370,9 @@ func englishPassiveAt(words []string, i int) bool {
 		case englishBeForms[w]:
 			scanned(i - j)
 			return true
+		case (pastVerbSet[w] || englishParticiple(w)) && j+2 == i && (words[j+1] == "and" || words[j+1] == "or"):
+			// A participle coordinated with this one shares its auxiliary:
+			// "Will it be fixed and deployed on Monday?" (issue #517).
 		case englishNotPassive[w] || pastVerbSet[w] || englishParticiple(w) || englishClauseOpeners[w],
 			englishSubjects[w] && w != "who" && (j == 0 || !englishBeForms[words[j-1]]),
 			englishDeterminers[w] && j > 0 && !englishBeForms[words[j-1]] && !englishNPJoiners[words[j-1]]:
@@ -1418,7 +1554,7 @@ func (c clauseWords) hasOwnVerb(s, e int) bool {
 	}
 	for i := s; i < e; i++ {
 		w := c.words[i]
-		if subjectWords[w] || copulaWords[w] || pastVerbSet[w] || futureVerbSet[w] || perfektAux[w] ||
+		if subjectWords[w] || copulaWords[w] || pastVerbSet[w] || futureVerbSet[w] || perfektAux[w] || germanFiniteWords[w] ||
 			w == "zu" && i+1 < e {
 			return true
 		}
@@ -3092,16 +3228,11 @@ func findAllWeekdays(tokens []string) []struct {
 func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
 
-	hasConjunction := strings.Contains(lower, " und ") || strings.Contains(lower, " and ")
-	hasDisjunction := strings.Contains(lower, " oder ") || strings.Contains(lower, " or ")
-
-	if !hasConjunction && !hasDisjunction {
-		return nil
-	}
-
-	// First: check for weekday disjunction/conjunction ("Montag oder Dienstag", "Monday or Tuesday"),
-	// not counting a weekday that names no day (notADay: a compound, a
-	// surname).
+	// First: every weekday of the question that names a day (notADay: no
+	// compound, no surname) — a disjunction or conjunction ("Montag oder
+	// Dienstag", "Monday or Tuesday") and two clauses with a weekday each,
+	// with or without a conjunction ("Am Mittwoch hatten wir 3 Incidents, am
+	// Freitag werden wir das Postmortem halten", issue #517).
 	c := clauseTokens(query)
 	weekdays := c.dayWeekdays()
 	if len(weekdays) >= 2 {
@@ -3131,6 +3262,12 @@ func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 		if len(dates) >= 2 {
 			return multiResult(dates)
 		}
+	}
+
+	hasConjunction := strings.Contains(lower, " und ") || strings.Contains(lower, " and ")
+	hasDisjunction := strings.Contains(lower, " oder ") || strings.Contains(lower, " or ")
+	if !hasConjunction && !hasDisjunction {
+		return nil
 	}
 
 	// Then: simple keyword conjunction/disjunction (heute und morgen, etc.)
