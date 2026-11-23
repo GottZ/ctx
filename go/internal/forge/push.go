@@ -155,7 +155,9 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	}
 	cont, err := p.wireSection(ctx, c.Block.ID, c.BaseHash, allow, res, func() error {
 		var err error
-		rec.stamp, err = client.UpdateIssue(ctx, repo, c.ForgeID, patch)
+		if rec.stamp, err = client.UpdateIssue(ctx, repo, c.ForgeID, patch); err == nil {
+			noteNoStamp(c.Block.ID, "issue update", rec.stamp)
+		}
 		return err
 	}, rec.advance(ctx, true))
 	rec.count(res, err)
@@ -271,6 +273,12 @@ func (p *Pusher) wireSection(ctx context.Context, blockID, listedBase string, al
 		return nil
 	}, record)
 	noteSkip(res, blockID, skip)
+	// The forge was written once send returned: the write counts whether
+	// or not the record committed after it (issue #509) — before, a record
+	// whose COMMIT failed after the PATCH landed counted no push.
+	if sent {
+		res.Pushed++
+	}
 	switch {
 	case errors.Is(err, errThrottled):
 		res.Throttled = true
@@ -278,10 +286,20 @@ func (p *Pusher) wireSection(ctx context.Context, blockID, listedBase string, al
 	case err != nil:
 		return false, err
 	}
-	if sent {
-		res.Pushed++
-	}
 	return true, nil
+}
+
+// noteNoStamp names a push write whose answer carried no readable
+// updated_at (issue #509): the write landed, but the mapping keeps the forge
+// stamp it had, so a later fetch of the version before this write is not
+// recognised as older and the matrix decides about it as before the push
+// recorded stamps. GitHub always answers with updated_at; a forge that does
+// not is worth a line.
+func noteNoStamp(blockID, write string, stamp *time.Time) {
+	if stamp == nil {
+		slog.Warn("forge: the forge's answer to a push write carried no readable updated_at — the mapping keeps its forge stamp",
+			"block", blockID, "write", write)
+	}
 }
 
 // createIssue POSTs a new forge issue from a local draft, then finalises the
@@ -322,6 +340,7 @@ func (p *Pusher) createIssue(ctx context.Context, project store.ProjectRow, clie
 			stamp = closed // the version the close left is the one finalised
 		}
 	}
+	noteNoStamp(c.Block.ID, "issue create", stamp)
 	if err := store.FinalizePushCreateIssue(ctx, p.pool, c.Block.ID, number, ctxH, ctxFields, stamp); err != nil {
 		return false, err
 	}
@@ -361,6 +380,7 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 		if err != nil {
 			return false, err
 		}
+		noteNoStamp(c.BlockID, "comment create", created)
 		if err := store.FinalizePushCreateComment(ctx, p.pool, c.BlockID, id, ctxH, ctxFields, created); err != nil {
 			return false, err
 		}
@@ -380,7 +400,9 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 	}
 	cont, err := p.wireSection(ctx, c.BlockID, c.BaseHash, allow, res, func() error {
 		var err error
-		rec.stamp, err = client.UpdateComment(ctx, repo, c.ForgeID, body)
+		if rec.stamp, err = client.UpdateComment(ctx, repo, c.ForgeID, body); err == nil {
+			noteNoStamp(c.BlockID, "comment update", rec.stamp)
+		}
 		return err
 	}, rec.advance(ctx, true))
 	rec.count(res, err)

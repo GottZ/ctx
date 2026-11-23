@@ -522,7 +522,7 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 				return nil
 			}
 			res.Conflicts = 1
-			return store.FlagSyncMapConflict(ctx, tx, m.BlockID, a.clock())
+			return store.FlagSyncMapConflict(ctx, tx, m.BlockID, a.clock(), p.seen())
 		}
 		ctxH := p.project(cur, locked.BaseFields)
 		d := decide(locked.BaseHash, ctxH, p.forgeH)
@@ -538,7 +538,7 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 			res.Applied = 1
 			return store.UpdateSyncMapBase(ctx, tx, m.BlockID, p.forgeH, p.forgeFields, p.fUpdated, &b.UpdatedAt)
 		case decNoop, decConverge:
-			if d == decNoop && !locked.Conflict {
+			if d == decNoop && !locked.Conflict && !locked.PullGate {
 				return nil // in sync and unflagged: nothing to record
 			}
 			var heldAt *time.Time
@@ -551,19 +551,61 @@ func (a *Applier) applyLocked(ctx context.Context, writable []string, m store.Sy
 			// The forge state the pull read, as a pull-update writes it
 			// (issue #491); a comment's snapshot carries none.
 			return store.StampForgeState(ctx, tx, m.BlockID, p.forgeFields)
-		case decConflict:
-			if locked.Conflict {
-				return nil
-			}
-			res.Conflicts = 1
-			res.Relist = stampOf(p.fUpdated) // flagged anew: listed again next run (issue #509)
-			return store.FlagSyncMapConflict(ctx, tx, m.BlockID, a.clock())
 		}
-		return nil // ctx-ahead on the locked rows
+		return a.flagOrObserve(ctx, tx, m.BlockID, locked, d, p, &res)
 	}); err != nil {
 		return ApplyResult{}, err
 	}
 	return res, nil
+}
+
+// flagOrObserve carries out the two cells of the locked decision that write
+// no block: a conflict and ctx-ahead (applyLocked). A conflict on an
+// unflagged row flags it anew with the fetched version and reports the
+// fetch's stamp (Relist). A conflict on a flagged row whose fetch is newer
+// than the row's observation records it (issue #509), so an older fetch
+// another instance decides on later is skipped instead of clearing the flag
+// over this one. ctx-ahead with such a fetch (a remote revert to the base,
+// or a change outside the projection) records its stamp and reports it
+// (issue #509): a push whose PATCH is on the wire records the sent version
+// as the base after this, and a revert to the old base that landed after
+// the PATCH would otherwise never be listed again.
+func (a *Applier) flagOrObserve(ctx context.Context, tx pgx.Tx, blockID string, locked store.SyncMap, d decision, p pulled, res *ApplyResult) error {
+	newer := orderFetch(locked, p.fUpdated) == fetchNewer
+	switch {
+	case d == decConflict && !locked.Conflict:
+		res.Conflicts = 1
+		res.Relist = stampOf(p.fUpdated) // flagged anew: listed again next run (issue #509)
+		return store.FlagSyncMapConflict(ctx, tx, blockID, a.clock(), p.seen())
+	case d == decConflict && newer:
+		return store.RecordForgeObservation(ctx, tx, blockID, p.fUpdated, p.seen())
+	case d == decCtxAhead && (newer || locked.PullGate):
+		if locked.PullGate {
+			// The forge holds the base a remote resolution wrote: the
+			// block's edit since is the only change, and the push may
+			// send it (issue #509).
+			if err := store.OpenPullGate(ctx, tx, blockID); err != nil {
+				return err
+			}
+		}
+		if !newer {
+			return nil
+		}
+		res.Relist = stampOf(p.fUpdated)
+		var seen *store.ForgeSeen
+		if locked.Conflict {
+			seen = p.seen()
+		}
+		return store.RecordForgeObservation(ctx, tx, blockID, p.fUpdated, seen)
+	}
+	return nil
+}
+
+// seen is the fetched version as a flag keeps it (store.ForgeSeen, issue
+// #509): the forge side the resolve surface lists and a resolution that
+// keeps the local version diffs against.
+func (p pulled) seen() *store.ForgeSeen {
+	return &store.ForgeSeen{Fields: p.forgeFields, Hash: p.forgeH, At: p.fUpdated}
 }
 
 // stampOf is a fetch's forge stamp, zero for none.
@@ -578,7 +620,14 @@ func stampOf(fetched *time.Time) time.Time {
 // transaction (done), and what it counts: ctx-ahead (the push's), a noop
 // on an unflagged mapping, and a conflict the mapping carries already
 // (idempotent, 0 new conflicts). A noop on a flagged mapping goes on to the
-// locked rows, which clear the flag (issue #509).
+// locked rows, which clear the flag (issue #509). So do a ctx-ahead and a
+// conflict on a flagged mapping whose fetch is newer than the row's
+// observation (issue #509): the locked rows record it — the flagged row
+// its stamp and the forge version, so a convergence another instance read
+// before that version can no longer clear the flag over it; the ctx-ahead
+// row its stamp, and the leg lists the entity again (a remote revert to
+// the base inside a push's window). Before, both ended here and held no
+// cursor, and each of the two orders lost a remote edit without a flag.
 //
 // A fetch older than the observation the flagged row records is reported
 // (reportStale: pull_skipped and the WARN) before the conflict ends here —
@@ -586,14 +635,25 @@ func stampOf(fetched *time.Time) time.Time {
 // fetch differs from the base, so such a skip always carries other content.
 func endsOnRead(ctx context.Context, read decision, m store.SyncMap, p pulled) (ApplyResult, bool) {
 	var res ApplyResult
+	if m.PullGate && orderFetch(m, p.fUpdated) != fetchOlder {
+		// A remote resolution keeps the push away until a pull decides
+		// over the entity (issue #509): this fetch does, on the locked
+		// rows — a noop or ctx-ahead there ends the gate.
+		return res, false
+	}
 	switch {
-	case read == decCtxAhead, read == decNoop && !m.Conflict:
+	case read == decNoop && !m.Conflict:
 		return res, true
+	case read == decCtxAhead:
+		return res, orderFetch(m, p.fUpdated) != fetchNewer
 	case read == decConflict && m.Conflict:
-		if orderFetch(m, p.fUpdated) == fetchOlder {
+		switch orderFetch(m, p.fUpdated) {
+		case fetchOlder:
 			reportStale(ctx, &res, m.BlockID, p.fUpdated, m.ForgeUpdatedAt)
+			return res, true
+		case fetchSameStamp:
+			return res, true
 		}
-		return res, true
 	}
 	return res, false
 }
@@ -663,7 +723,10 @@ func (a *Applier) ApplyComments(ctx context.Context, project store.ProjectRow, c
 		}
 		parent, hasParent := imaps[c.IssueNumber]
 		if !hasParent {
-			continue // parent issue not pulled yet — added on a later run
+			// Parent issue not pulled (yet): the comment leg decides whether
+			// a later run lists it again (holdOrphans, issue #509).
+			res.orphans = append(res.orphans, orphanComment{id: c.ID, parent: c.IssueNumber, at: c.UpdatedAt})
+			continue
 		}
 		m, exists := cmaps[c.ID]
 		r, err := a.applyComment(ctx, project, writable, c, parent.BlockID, m, exists)

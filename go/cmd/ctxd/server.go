@@ -227,6 +227,10 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	forgePusher := forge.NewPusher(pool, blocktypeReg.SnapshotForTenant)
 	forgeSync.SetPush(forgePusher.PushProject)
 	manageH.SetForgeController(forgeSync)
+	// #509: the way out of a conflict flag and of a forge stamp that went
+	// back (forge-conflict-list/-resolve, forge-stamp-reset), with the same
+	// per-scope registry snapshot the pull and the push project blocks with.
+	manageH.SetForgeResolver(forge.NewResolver(pool, blocktypeReg.SnapshotForTenant))
 	// W13: the webhook inbox arm fires a debounced forge sync per project the same
 	// SyncManager drives (one run engine — REST trigger, manage trigger, webhook
 	// trigger). Wired here (post-Run, main.go) via the mu-guarded setter; the

@@ -1,5 +1,5 @@
 // Dispatch table of POST /api/manage — the SINGLE source of routing and admin
-// tier for all 106 manage actions (T03-11, design/03 §4.11). It replaces a
+// tier for all 110 manage actions (T03-11, design/03 §4.11). It replaces a
 // three-level construct: an 18-arm switch in HandleManage, fifteen
 // dispatch*Action fan-out methods, and a 211-line parallel tier classifier.
 // In that construct every action existed two to four times (routing arm,
@@ -101,6 +101,19 @@ func forgeGated(fn func(*ManageHandler, http.ResponseWriter, *http.Request, mana
 	}
 }
 
+// forgeResolverGated adapts a forge-conflict-*/forge-stamp-reset handler
+// (issue #509) and keeps the forge family's vestibule: without a wired
+// resolve surface the action answers 503 with forgeGated's text.
+func forgeResolverGated(fn manageActionFunc) manageActionFunc {
+	return func(h *ManageHandler, w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
+		if h.forgeResolver == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"success": false, "error": "Sync engine not enabled"})
+			return
+		}
+		fn(h, w, r, ar, req)
+	}
+}
+
 // withTransition adapts the one handler that takes DERIVED parameters. The
 // removed dispatchEmbedMigrationAction mapped an action name to a status
 // transition (embed-migration-pause ⇒ running → paused); the mapping now lives
@@ -135,7 +148,7 @@ func gamingModeTier(req manageRequest) adminTier {
 	return tierOpen
 }
 
-// manageActions is the dispatch table: 106 actions (89 pre-table + the four model alias actions of W02-04 + the eight model consumer actions of W01-5 + the three gateway limits actions of W06-15 + model-alias-preview of W05-04 + purge of #202), alphabetical, one row each.
+// manageActions is the dispatch table: 110 actions (89 pre-table + the four model alias actions of W02-04 + the eight model consumer actions of W01-5 + the three gateway limits actions of W06-15 + model-alias-preview of W05-04 + purge of #202 + stats-reconcile of #266 + the three forge conflict actions of #509), alphabetical, one row each.
 //
 // The tiers are the pre-table behaviour, action for action — this wave routes
 // differently, it does not re-cut permissions.
@@ -213,6 +226,9 @@ var manageActions = map[string]manageAction{
 	"embed-migration-resume":   {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleEmbedMigrationResume)},
 	"embed-migration-rollback": {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleEmbedMigrationRollback)},
 	"embed-migration-status":   {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleEmbedMigrationStatus)},
+	"forge-conflict-list":      {tier: tierTenantAdmin, handle: forgeResolverGated((*ManageHandler).handleForgeConflictList)},
+	"forge-conflict-resolve":   {tier: tierTenantAdmin, handle: forgeResolverGated((*ManageHandler).handleForgeConflictResolve)},
+	"forge-stamp-reset":        {tier: tierTenantAdmin, handle: forgeResolverGated((*ManageHandler).handleForgeStampReset)},
 	"forge-sync-start":         {tier: tierTenantAdmin, handle: forgeGated((*ManageHandler).handleForgeSyncStart)},
 	"forge-sync-status":        {tier: tierTenantAdmin, handle: forgeGated((*ManageHandler).handleForgeSyncStatus)},
 	"forge-token-set":          {tier: tierTenantAdmin, handle: forgeGated((*ManageHandler).handleForgeTokenSet)},

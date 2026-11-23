@@ -83,6 +83,11 @@ var manageActionFixture = []manageActionFixtureRow{
 	{"embed-migration-resume", "", tierServerAdmin, "handleEmbedMigrationResume"},
 	{"embed-migration-rollback", "", tierServerAdmin, "handleEmbedMigrationRollback"},
 	{"embed-migration-status", "", tierServerAdmin, "handleEmbedMigrationStatus"},
+	// #509: the way out of a conflict flag and of a forge stamp that went
+	// back — NEW surface, tenant-admin like the sync family.
+	{"forge-conflict-list", "", tierTenantAdmin, "handleForgeConflictList"},
+	{"forge-conflict-resolve", "", tierTenantAdmin, "handleForgeConflictResolve"},
+	{"forge-stamp-reset", "", tierTenantAdmin, "handleForgeStampReset"},
 	{"forge-sync-start", "", tierTenantAdmin, "handleForgeSyncStart"},
 	{"forge-sync-status", "", tierTenantAdmin, "handleForgeSyncStatus"},
 	{"forge-token-set", "", tierTenantAdmin, "handleForgeTokenSet"},
@@ -164,11 +169,12 @@ var manageActionFixture = []manageActionFixtureRow{
 	{"update", "", tierOpen, "handleUpdate"},
 }
 
-// fixtureActionNames is the deduplicated enumeration (107 names: the 89 of the
+// fixtureActionNames is the deduplicated enumeration (110 names: the 89 of the
 // pre-table tree plus the four model alias actions of W02-04, the eight model
 // consumer actions of W01-5, the three gateway limits actions of W06-15,
-// model-alias-preview of W05-04, purge of #202 and stats-reconcile of #266; three
-// actions carry two rows for their two data shapes).
+// model-alias-preview of W05-04, purge of #202, stats-reconcile of #266 and the
+// three forge conflict actions of #509; three actions carry two rows for their
+// two data shapes).
 func fixtureActionNames() map[string]struct{} {
 	names := make(map[string]struct{}, len(manageActionFixture))
 	for _, row := range manageActionFixture {
@@ -177,14 +183,14 @@ func fixtureActionNames() map[string]struct{} {
 	return names
 }
 
-// TestManageActionFixture_Shape guards the fixture itself: 107 distinct actions
-// in 110 rows, alphabetically ordered so a merge conflict is a real conflict.
+// TestManageActionFixture_Shape guards the fixture itself: 110 distinct actions
+// in 113 rows, alphabetically ordered so a merge conflict is a real conflict.
 func TestManageActionFixture_Shape(t *testing.T) {
-	if got := len(manageActionFixture); got != 110 {
-		t.Fatalf("fixture rows = %d, want 110 (107 actions, three of them twice)", got)
+	if got := len(manageActionFixture); got != 113 {
+		t.Fatalf("fixture rows = %d, want 113 (110 actions, three of them twice)", got)
 	}
-	if got := len(fixtureActionNames()); got != 107 {
-		t.Fatalf("fixture actions = %d, want 107", got)
+	if got := len(fixtureActionNames()); got != 110 {
+		t.Fatalf("fixture actions = %d, want 110", got)
 	}
 	for i := 1; i < len(manageActionFixture); i++ {
 		if manageActionFixture[i-1].action > manageActionFixture[i].action {

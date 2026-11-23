@@ -336,6 +336,27 @@ type PushProjection func(b *Block) string
 // left the remote edit behind a 304 or a since past it, and a later local
 // edit was pushed over it without a flag.
 //
+// A row it writes loses its forge snapshot (metadata.forge_seen, issue
+// #509): a pull that flagged the row while the PATCH was on the wire saw a
+// forge version from before or after the PATCH landed, and which one the
+// forge holds now is not known — a resolution then keeps the local version
+// against an unknown base (a full push) instead of a stale one.
+//
+// A remote edit that brought the forge back to the listed base after the
+// PATCH landed, seen by a pull before this advance, is flagged here (issue
+// #509): the row still holds the listed base, and its forge_updated_at — the
+// pull recorded that observation (a ctx-ahead read with a newer fetch) — is
+// later than the PATCH's answer, so the forge held the base's content after
+// this write. The base becomes the sent version as always, the flag goes on,
+// and the flag's forge snapshot is that observation (the listed base's
+// fields, hash and stamp), so the resolve surface lists both sides and
+// keeping the local version pushes it again. The pull that saw it held its
+// leg's cursor and its next run pulls the revert and clears the flag; when
+// another run of that instance read the entity again before this advance
+// (the same stamp, no hold) and saved its cursor past it, the flag keeps the
+// revert visible instead of the sent version standing over it unseen. moved
+// reports this case too (the push counts a conflict).
+//
 // sent says that a wire write carried ctxHash (false: the advance alone, the
 // listed block projecting to its base already, or only a never-pushed field
 // diverging). An advance without a wire write writes only while the row still holds
@@ -363,17 +384,39 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 	// UPDATE, so every expression tests the stored base: the listed one ($6)
 	// or the version the PATCH sent ($2), on which another instance's pull
 	// may have converged in the meantime.
+	// reverted (R below): a pull saw the forge after this PATCH landed — its
+	// observation is later than the PATCH's answer — holding the listed
+	// base's content, while the row still holds that base (issue #509).
+	// Only an observation of the base's content counts: a flag the pull set
+	// in the window raises the stamp too, over other content, and keeps it
+	// in forge_seen — that is a divergence, not a revert. A row without a
+	// forge stamp (a stamp reset, a mapping from before stamps were kept)
+	// holds no observation: the comparison is false, not NULL — a NULL here
+	// made conflict NULL and the advance failed (23502) after the PATCH.
+	// The SET expressions read the row as it was; RETURNING reads the row
+	// as written unless a column is old-qualified, and there base_hash is
+	// the sent version already — so the RETURNING copy reads old.
+	revertedOf := func(row string) string {
+		return `($9 AND ` + row + `base_hash = $6 AND ` + row + `base_hash <> $2 AND COALESCE(` + row + `forge_updated_at > $8::timestamptz, false)
+		AND COALESCE(` + row + `metadata->'forge_seen'->>'hash', ` + row + `base_hash) = ` + row + `base_hash)`
+	}
+	reverted := revertedOf("")
+	var revert bool
 	err = tx.QueryRow(ctx, `
 		UPDATE context_project_sync_map
 		   SET base_hash = CASE WHEN base_hash IN ($6, $2) THEN $2 ELSE $7 END,
 		       synced_at = CASE WHEN $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
-		       metadata = CASE WHEN base_hash IN ($6, $2) THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END,
+		       metadata = CASE WHEN `+reverted+`
+		                       THEN (metadata || $3::jsonb) || jsonb_build_object('forge_seen', jsonb_build_object(
+		                              'fields', metadata->'base_fields', 'hash', base_hash, 'at', `+utcJSON(`forge_updated_at`)+`))
+		                       WHEN base_hash IN ($6, $2) THEN (metadata || $3::jsonb) - 'forge_seen'
+		                       ELSE (metadata - 'base_fields') - 'forge_seen' END,
 		       forge_updated_at = CASE WHEN base_hash IN ($6, $2) THEN GREATEST(forge_updated_at, $8::timestamptz) ELSE forge_updated_at END,
-		       conflict = conflict OR base_hash NOT IN ($6, $2),
-		       conflict_at = CASE WHEN base_hash IN ($6, $2) THEN conflict_at ELSE COALESCE(conflict_at, now()) END
+		       conflict = conflict OR base_hash NOT IN ($6, $2) OR `+reverted+`,
+		       conflict_at = CASE WHEN base_hash IN ($6, $2) AND NOT `+reverted+` THEN conflict_at ELSE COALESCE(conflict_at, now()) END
 		 WHERE block_id = $1::uuid AND ($9 OR base_hash = $6)
-		RETURNING old.base_hash NOT IN ($6, $2)`,
-		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash, forgeUpdatedAt, sent).Scan(&moved)
+		RETURNING old.base_hash NOT IN ($6, $2), `+revertedOf("old."),
+		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash, forgeUpdatedAt, sent).Scan(&moved, &revert)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		// The mapping is gone, or an advance without a wire write found the
@@ -385,7 +428,7 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 	if moved {
 		return true, nil
 	}
-	return false, StampForgeState(ctx, tx, blockID, ctxFields)
+	return revert, StampForgeState(ctx, tx, blockID, ctxFields)
 }
 
 // PushSkip names why a push section leaves an entity to the next run; ""
@@ -404,14 +447,21 @@ const (
 	PushSkipFlagged PushSkip = "flagged"
 	// PushSkipGone: the mapping row is gone.
 	PushSkipGone PushSkip = "gone"
+	// PushSkipGated: a remote resolution since the listing keeps the push
+	// away until a pull decided over the entity (issue #509) — the base the
+	// resolution wrote can equal the listed one, so the base check alone
+	// lets a pass that listed the entity before it send its listing.
+	PushSkipGated PushSkip = "gated"
 )
 
 // pushLockSQL and pushUnlockSQL take and give back the advisory lock of one
 // entity's push section: the two-key form, class key first, keyed on the
-// block id.
+// block id in its canonical spelling (::uuid::text), so an id sent in upper
+// case names the lock the push holds (issue #509) — the key of a lower-case
+// id is the one the release before took.
 const (
-	pushLockSQL   = `SELECT pg_try_advisory_lock(hashtext('ctx:forge-push'), hashtext($1::text))`
-	pushUnlockSQL = `SELECT pg_advisory_unlock(hashtext('ctx:forge-push'), hashtext($1::text))`
+	pushLockSQL   = `SELECT pg_try_advisory_lock(hashtext('ctx:forge-push'), hashtext($1::uuid::text))`
+	pushUnlockSQL = `SELECT pg_advisory_unlock(hashtext('ctx:forge-push'), hashtext($1::uuid::text))`
 )
 
 // TryLockPushEntity opens the push's section of one entity on conn, a
@@ -454,9 +504,9 @@ func TryLockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID, listedB
 		return false, PushSkipInFlight, nil
 	}
 	var base string
-	var conflict bool
+	var conflict, gated bool
 	err = conn.QueryRow(ctx,
-		`SELECT base_hash, conflict FROM context_project_sync_map WHERE block_id = $1::uuid`, blockID).Scan(&base, &conflict)
+		`SELECT base_hash, conflict, synced_at = 'infinity'::timestamptz FROM context_project_sync_map WHERE block_id = $1::uuid`, blockID).Scan(&base, &conflict, &gated)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return true, PushSkipGone, nil
@@ -466,8 +516,24 @@ func TryLockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID, listedB
 		return true, PushSkipOvertaken, nil
 	case conflict:
 		return true, PushSkipFlagged, nil
+	case gated:
+		return true, PushSkipGated, nil
 	}
 	return true, "", nil
+}
+
+// TryPushLock takes the entity's push lock on conn without waiting — the
+// lock a push section holds from before its wire write until its advance
+// committed (TryLockPushEntity) — and answers whether this session holds it
+// now. The resolve surface takes it before it writes the mapping (issue
+// #509), so no resolution lands while a PATCH of the entity is on the wire.
+// err means the outcome is unknown; the caller closes the connection.
+func TryPushLock(ctx context.Context, conn *pgxpool.Conn, blockID string) (bool, error) {
+	var locked bool
+	if err := conn.QueryRow(ctx, pushLockSQL, blockID).Scan(&locked); err != nil {
+		return false, fmt.Errorf("store: push lock: %w", err)
+	}
+	return locked, nil
 }
 
 // UnlockPushEntity gives back the push lock TryLockPushEntity took on conn
@@ -486,6 +552,6 @@ func UnlockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID string) (
 // surface (forge-sync-status/CLI/UI) is identical to a pull-side conflict.
 func FlagPushConflict(ctx context.Context, pool *pgxpool.Pool, blockID string, at time.Time) error {
 	return pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
-		return FlagSyncMapConflict(ctx, tx, blockID, at)
+		return FlagSyncMapConflict(ctx, tx, blockID, at, nil)
 	})
 }

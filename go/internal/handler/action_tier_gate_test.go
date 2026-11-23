@@ -143,6 +143,11 @@ func TestActionTier_Classification(t *testing.T) {
 		{"forge-token-set", "", tierTenantAdmin},
 		{"forge-sync-start", "", tierTenantAdmin},
 		{"forge-sync-status", "", tierTenantAdmin},
+		// #509: conflict list/resolve and the stamp reset — tenant-admin like
+		// the sync family, ownership re-checked per project.
+		{"forge-conflict-list", "", tierTenantAdmin},
+		{"forge-conflict-resolve", "", tierTenantAdmin},
+		{"forge-stamp-reset", "", tierTenantAdmin},
 		// ungated read/CRUD paths (auth + scope only)
 		{"get", "", tierOpen},
 		{"stats", "", tierOpen},
@@ -210,7 +215,8 @@ func TestActionTier_IssueFamilyExplicitlyTiered(t *testing.T) {
 // to new families, so I-F adds its own enumeration here (documented drift from
 // the "erweitert sich automatisch" assumption).
 func TestActionTier_ForgeFamilyExplicitlyTiered(t *testing.T) {
-	for _, a := range []string{"forge-token-set", "forge-sync-start", "forge-sync-status"} {
+	for _, a := range []string{"forge-token-set", "forge-sync-start", "forge-sync-status",
+		"forge-conflict-list", "forge-conflict-resolve", "forge-stamp-reset"} {
 		tier, explicit := actionTierExplicit(manageRequest{Action: a})
 		if !explicit {
 			t.Errorf("action %q is dispatched but NOT explicitly tiered (fail-open tierOpen default, S9)", a)

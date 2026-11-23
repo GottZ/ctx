@@ -199,8 +199,10 @@ func ConflictCount(ctx context.Context, pool *pgxpool.Pool, projectID string) (i
 // structurally inseparable from a real block — the ownership boundary in the 080
 // header. base_hash is the sha256 canonical projection at last successful sync
 // (§3.6, W16 — never a timestamp); forge_updated_at is never a direction input
-// either: it is the forge's updated_at of the version a pull last applied, or
-// of the write a push last recorded (its answer's, issue #509), and the pull
+// either: it is the forge's updated_at of the version a pull last applied, of
+// the write a push last recorded (its answer's, issue #509), or of a newer
+// version a pull saw and did not apply — the one it flagged the mapping over,
+// or one with the base's content (RecordForgeObservation, issue #509) — and the pull
 // uses it only to order its fetch against that observation (an older fetch
 // writes nothing, the same stamp after a moved base is flagged —
 // forge.olderOrUnordered, issue #491). Every write is Tx-bound (the apply
@@ -222,6 +224,10 @@ type SyncMap struct {
 	BaseFields     json.RawMessage
 	Conflict       bool
 	ForgeUpdatedAt *time.Time
+	// PullGate: a remote resolution keeps the mapping out of the push until
+	// a pull decided over the entity (synced_at 'infinity', issue #509;
+	// ResolveSyncMapConflict, OpenPullGate).
+	PullGate bool
 }
 
 // GetSyncMapsByForge batch-loads the mapping rows for a page of forge ids of one
@@ -236,7 +242,7 @@ func GetSyncMapsByForge(ctx context.Context, pool *pgxpool.Pool, projectID, kind
 	}
 	rows, err := pool.Query(ctx,
 		`SELECT entity_kind, forge_id, block_id::text, base_hash, conflict, forge_updated_at,
-		        metadata->'base_fields'
+		        metadata->'base_fields', synced_at = 'infinity'::timestamptz
 		   FROM context_project_sync_map
 		  WHERE project_id = $1::uuid AND entity_kind = $2 AND forge_id = ANY($3::bigint[])`,
 		projectID, kind, forgeIDs)
@@ -246,7 +252,7 @@ func GetSyncMapsByForge(ctx context.Context, pool *pgxpool.Pool, projectID, kind
 	defer rows.Close()
 	for rows.Next() {
 		m := SyncMap{ProjectID: projectID}
-		if err := rows.Scan(&m.EntityKind, &m.ForgeID, &m.BlockID, &m.BaseHash, &m.Conflict, &m.ForgeUpdatedAt, &m.BaseFields); err != nil {
+		if err := rows.Scan(&m.EntityKind, &m.ForgeID, &m.BlockID, &m.BaseHash, &m.Conflict, &m.ForgeUpdatedAt, &m.BaseFields, &m.PullGate); err != nil {
 			return nil, fmt.Errorf("store: scan sync map: %w", err)
 		}
 		out[m.ForgeID] = m
@@ -301,11 +307,11 @@ func LockSyncMap(ctx context.Context, tx pgx.Tx, blockID string) (SyncMap, bool,
 	var m SyncMap
 	err := tx.QueryRow(ctx,
 		`SELECT project_id::text, entity_kind, forge_id, block_id::text, base_hash, conflict, forge_updated_at,
-		        metadata->'base_fields'
+		        metadata->'base_fields', synced_at = 'infinity'::timestamptz
 		   FROM context_project_sync_map
 		  WHERE block_id = $1::uuid
 		    FOR NO KEY UPDATE`, blockID).Scan(&m.ProjectID, &m.EntityKind, &m.ForgeID, &m.BlockID, &m.BaseHash,
-		&m.Conflict, &m.ForgeUpdatedAt, &m.BaseFields)
+		&m.Conflict, &m.ForgeUpdatedAt, &m.BaseFields, &m.PullGate)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SyncMap{}, false, nil
 	}
@@ -317,7 +323,8 @@ func LockSyncMap(ctx context.Context, tx pgx.Tx, blockID string) (SyncMap, bool,
 
 // UpdateSyncMapBase rewrites base_hash after a pull-apply (base := forgeH) or a
 // convergence (base := the version block and forge agreed on). It CLEARS any
-// conflict flag — a resolved direction ends the conflict. Keyed on block_id
+// conflict flag — a resolved direction ends the conflict — and the forge
+// snapshot the flag kept (metadata.forge_seen, issue #509). Keyed on block_id
 // (the per-block unique index). Tx-bound so it commits with the block update
 // (or, for convergence, alone: no block write, only the base advance, §4.5.2).
 //
@@ -349,7 +356,7 @@ func UpdateSyncMapBase(ctx context.Context, tx pgx.Tx, blockID, baseHash string,
 		    SET base_hash = $2, forge_updated_at = $3,
 		        synced_at = COALESCE($5::timestamptz, '-infinity'::timestamptz),
 		        conflict = false, conflict_at = NULL,
-		        metadata = metadata || $4::jsonb
+		        metadata = (metadata || $4::jsonb) - 'forge_seen'
 		  WHERE block_id = $1::uuid`,
 		blockID, baseHash, forgeUpdatedAt, baseFieldsMeta(baseFields), syncedAt)
 	if err != nil {
@@ -362,12 +369,30 @@ func UpdateSyncMapBase(ctx context.Context, tx pgx.Tx, blockID, baseHash string,
 // + conflict_at, and ZERO writes to the block in either direction. conflict_at is
 // preserved on a re-flag (COALESCE) so the divergence timestamp is the FIRST
 // detection, not the latest run. Keyed on block_id.
-func FlagSyncMapConflict(ctx context.Context, tx pgx.Tx, blockID string, at time.Time) error {
-	_, err := tx.Exec(ctx,
+//
+// seen is the forge version the flagging pull fetched (nil from the push,
+// which flags without a fetch): it is kept as metadata.forge_seen — what the
+// resolve surface lists as the forge side and what a resolution that keeps
+// the local version diffs against — and its stamp becomes the row's
+// forge_updated_at when it is the later one (issue #509), so a fetch older
+// than the version the flag was set over is skipped rather than decided on.
+func FlagSyncMapConflict(ctx context.Context, tx pgx.Tx, blockID string, at time.Time, seen *ForgeSeen) error {
+	var stamp *time.Time
+	if seen != nil {
+		stamp = seen.At
+	}
+	seenJSON, err := forgeSeenJSON(seen)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
 		`UPDATE context_project_sync_map
-		    SET conflict = true, conflict_at = COALESCE(conflict_at, $2), synced_at = now()
+		    SET conflict = true, conflict_at = COALESCE(conflict_at, $2), synced_at = now(),
+		        forge_updated_at = GREATEST(forge_updated_at, $3::timestamptz),
+		        metadata = CASE WHEN $4::jsonb IS NULL THEN metadata
+		                        ELSE metadata || jsonb_build_object('forge_seen', $4::jsonb) END
 		  WHERE block_id = $1::uuid`,
-		blockID, at)
+		blockID, at, stamp, seenJSON)
 	if err != nil {
 		return fmt.Errorf("store: flag sync map conflict: %w", err)
 	}

@@ -10,6 +10,9 @@
 //	ctx project issues create  <title> | --title t        # body via --body OR stdin
 //	ctx project issues comment <block-id>                 # body via --body OR stdin
 //	ctx project issues status  <block-id> <new-status>    # verb is `status` (K15)
+//	ctx project issues conflicts [--after cur] [--limit n] # conflict-flagged forge mappings (#509)
+//	ctx project issues resolve <block-id> --keep local|remote [--expect flag]
+//	ctx project issues stamp-reset [<block-id>] [--all]
 //
 // The verb for a state change is `status` (masterplan K15), NOT `state`/`move`.
 //
@@ -36,6 +39,7 @@ import (
 	"regexp"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -93,6 +97,9 @@ func issuesCmd(getClient func() (*Client, error)) *cobra.Command {
 	cmd.AddCommand(issuesCommentCmd(getClient, &project))
 	cmd.AddCommand(issuesStatusCmd(getClient, &project))
 	cmd.AddCommand(issuesSyncCmd(getClient, &project))
+	cmd.AddCommand(issuesConflictsCmd(getClient, &project))
+	cmd.AddCommand(issuesResolveCmd(getClient, &project))
+	cmd.AddCommand(issuesStampResetCmd(getClient, &project))
 	return cmd
 }
 
@@ -321,6 +328,268 @@ func printSyncStatus(resp []byte) {
 	if payload.LastError != nil && *payload.LastError != "" {
 		fmt.Printf("last error: %s\n", sanitizeTerminal(*payload.LastError))
 	}
+}
+
+// ── forge conflicts and stamps (issue #509) ───────────────────────────────────.
+
+func issuesConflictsCmd(getClient func() (*Client, error), project *string) *cobra.Command {
+	var after string
+	var limit int
+	cmd := &cobra.Command{
+		Use:   "conflicts",
+		Short: "List the project's conflict-flagged forge mappings with both sides",
+		Long: "List the issues and comments whose forge mapping carries a conflict flag: a sync\n" +
+			"found the block and the forge both moved away from the last synced version and\n" +
+			"wrote neither side, and the push leaves the mapping alone until it is resolved.\n" +
+			"Each row names the block, the forge number, the cell (diverged, forge_ahead,\n" +
+			"ctx_ahead, converged, level; forge_unknown when the forge version the flag\n" +
+			"recorded is no longer current), when the flag was set, the newest forge stamp\n" +
+			"the database records, and the flag token for `resolve --expect`. The list sends\n" +
+			"no request to the forge, so whether the forge changed after the last pull saw it\n" +
+			"is not known. Piped, the JSON carries both sides' fields. Needs a tenant-admin key.",
+		Example: `  ctx project issues conflicts
+  ctx project issues conflicts --limit 20 --after <cursor>`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runIssuesConflicts(getClient, *project, after, limit)
+		},
+	}
+	cmd.Flags().StringVar(&after, "after", "", "cursor from a previous page (a block id; fetch the next page)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "page size (server default when 0)")
+	return cmd
+}
+
+func issuesResolveCmd(getClient func() (*Client, error), project *string) *cobra.Command {
+	var keep, expect string
+	cmd := &cobra.Command{
+		Use:   "resolve <block-id> --keep local|remote",
+		Short: "Resolve the conflict flag of one issue or comment: keep the local or the forge version",
+		Long: "Clear the conflict flag of one forge mapping and decide which side wins:\n" +
+			"  --keep local   the next push sends the block's version over the forge's\n" +
+			"  --keep remote  the next pull writes the forge's version over the block\n" +
+			"Pass the flag token `conflicts` printed as --expect, and the resolution is refused\n" +
+			"(exit 1) if the flag changed since it was listed. A mapping that is no longer\n" +
+			"flagged is left unchanged. Needs a tenant-admin key; each resolution is audited.",
+		Example: `  ctx project issues resolve <block-id> --keep remote
+  ctx project issues resolve <block-id> --keep local --expect <flag>`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if keep != "local" && keep != "remote" {
+				return fmt.Errorf("--keep must be local or remote")
+			}
+			return runIssuesResolve(getClient, *project, args[0], keep, expect)
+		},
+	}
+	cmd.Flags().StringVar(&keep, "keep", "", "the side that wins: local (the block) or remote (the forge) — required")
+	cmd.Flags().StringVar(&expect, "expect", "", "the flag token from `conflicts`; refuse if the flag changed since")
+	_ = cmd.MarkFlagRequired("keep")
+	return cmd
+}
+
+func issuesStampResetCmd(getClient func() (*Client, error), project *string) *cobra.Command {
+	var all bool
+	cmd := &cobra.Command{
+		Use:   "stamp-reset [<block-id>] [--all]",
+		Short: "Clear the recorded forge stamp of one mapping, or of every mapping of the project",
+		Long: "The way out when the forge's updated_at went back behind the stamp a mapping\n" +
+			"records (a clock set back, a forge restored from a backup) and every pull skips\n" +
+			"the entity as older: the stamp is cleared, so the next pull decides on content\n" +
+			"again, and the fetch leg is held to a full listing, so the next run lists the\n" +
+			"entity although its stamp lies behind the saved cursor. Name one block id, or\n" +
+			"--all for every mapping of the project — exactly one of the two. Needs a\n" +
+			"tenant-admin key; each reset is audited.",
+		Example: `  ctx project issues stamp-reset <block-id>
+  ctx project issues stamp-reset --all`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			blockID := ""
+			if len(args) == 1 {
+				blockID = args[0]
+			}
+			if (blockID != "") == all {
+				return fmt.Errorf("name one block id or --all, exactly one of the two")
+			}
+			return runIssuesStampReset(getClient, *project, blockID)
+		},
+	}
+	cmd.Flags().BoolVar(&all, "all", false, "reset every mapping of the project")
+	return cmd
+}
+
+// issuesManage sends one forge manage action for the resolved project and
+// checks the envelope (success:false ⇒ stderr + exit 1 with the reason).
+func issuesManage(getClient func() (*Client, error), project, action string, data map[string]any) ([]byte, error) {
+	c, err := getClient()
+	if err != nil {
+		return nil, err
+	}
+	pid, err := resolveProjectID(c, project)
+	if err != nil {
+		return nil, err
+	}
+	data["project_id"] = pid
+	resp, _, err := c.Do(http.MethodPost, "/api/manage", map[string]any{"action": action, "data": data})
+	if err != nil {
+		return nil, err
+	}
+	if err := checkEnvelope(resp, envelopeRequired); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func runIssuesConflicts(getClient func() (*Client, error), project, after string, limit int) error {
+	data := map[string]any{}
+	if after != "" {
+		data["after"] = after
+	}
+	if limit > 0 {
+		data["limit"] = limit
+	}
+	resp, err := issuesManage(getClient, project, "forge-conflict-list", data)
+	if err != nil {
+		return err
+	}
+	return renderOrJSON(resp, printConflicts)
+}
+
+func runIssuesResolve(getClient func() (*Client, error), project, blockID, keep, expect string) error {
+	data := map[string]any{"block_id": blockID, "direction": keep}
+	if expect != "" {
+		data["expect"] = expect
+	}
+	resp, err := issuesManage(getClient, project, "forge-conflict-resolve", data)
+	if err != nil {
+		return err
+	}
+	return renderOrJSON(resp, printResolved)
+}
+
+func runIssuesStampReset(getClient func() (*Client, error), project, blockID string) error {
+	data := map[string]any{}
+	if blockID != "" {
+		data["block_id"] = blockID
+	} else {
+		data["all"] = true
+	}
+	resp, err := issuesManage(getClient, project, "forge-stamp-reset", data)
+	if err != nil {
+		return err
+	}
+	return renderOrJSON(resp, printStampReset)
+}
+
+// conflictRow mirrors the fields of forge.Conflict the table renders.
+type conflictRow struct {
+	BlockID    string  `json:"block_id"`
+	EntityKind string  `json:"entity_kind"`
+	ForgeID    int64   `json:"forge_id"`
+	Title      string  `json:"title"`
+	Flag       string  `json:"flag"`
+	ConflictAt *string `json:"conflict_at"`
+	Cell       string  `json:"cell"`
+	Forge      struct {
+		UpdatedAt *string `json:"updated_at"`
+	} `json:"forge"`
+}
+
+// printConflicts renders the conflict list. The title is the issue's or the
+// comment author's text ⇒ sanitizeTerminal; so is every other server string.
+func printConflicts(resp []byte) error {
+	var payload struct {
+		Conflicts  []conflictRow `json:"conflicts"`
+		NextCursor *string       `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(resp, &payload); err != nil {
+		PrintJSON(resp)
+		return err
+	}
+	if len(payload.Conflicts) == 0 {
+		fmt.Println("No conflicts.")
+	} else {
+		w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+		// The full block id: resolve and stamp-reset take it as their argument.
+		_, _ = fmt.Fprintln(w, "BLOCK\tKIND\tNR\tCELL\tFLAGGED\tFORGE_UPDATED\tTITLE\tFLAG")
+		for _, c := range payload.Conflicts {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+				sanitizeTerminal(c.BlockID), sanitizeTerminal(c.EntityKind), c.ForgeID, sanitizeTerminal(c.Cell),
+				stampCell(c.ConflictAt), stampCell(c.Forge.UpdatedAt), sanitizeTerminal(oneLine(c.Title)), sanitizeTerminal(c.Flag))
+		}
+		_ = w.Flush()
+	}
+	if payload.NextCursor != nil && *payload.NextCursor != "" {
+		fmt.Printf("\nnext page: --after %s\n", sanitizeTerminal(*payload.NextCursor))
+	}
+	return nil
+}
+
+// stampCell renders a timestamp cell to the second in UTC; "-" for none.
+func stampCell(ts *string) string {
+	if ts == nil || *ts == "" {
+		return "-"
+	}
+	t, err := time.Parse(time.RFC3339Nano, *ts)
+	if err != nil {
+		return sanitizeTerminal(*ts)
+	}
+	return t.UTC().Format("2006-01-02 15:04:05")
+}
+
+// printResolved renders a resolution: which side won and what the next sync
+// run does with it.
+func printResolved(resp []byte) error {
+	var payload struct {
+		Result struct {
+			BlockID   string  `json:"block_id"`
+			Direction string  `json:"direction"`
+			Changed   bool    `json:"changed"`
+			Basis     string  `json:"basis"`
+			Leg       string  `json:"leg"`
+			HeldSince *string `json:"held_since"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &payload); err != nil {
+		PrintJSON(resp)
+		return err
+	}
+	r := payload.Result
+	id := shortID(r.BlockID)
+	switch {
+	case !r.Changed:
+		fmt.Printf("%s: not flagged — nothing changed\n", id)
+	case r.Direction == "local" && r.Basis == "unknown":
+		fmt.Printf("%s resolved, keep local: the forge side is not known, the next push sends every pushed field\n", id)
+	case r.Direction == "local" && r.Basis == "base":
+		fmt.Printf("%s resolved, keep local: the next push sends the block's changes against the last synced version\n", id)
+	case r.Direction == "local":
+		fmt.Printf("%s resolved, keep local: the next push sends the block over the forge version the flag recorded\n", id)
+	default:
+		fmt.Printf("%s resolved, keep remote: the next pull writes the forge version over the block (%s listed again from %s)\n",
+			id, sanitizeTerminal(r.Leg), stampCell(r.HeldSince))
+	}
+	return nil
+}
+
+// printStampReset renders a stamp reset.
+func printStampReset(resp []byte) error {
+	var payload struct {
+		Reset int      `json:"reset"`
+		Legs  []string `json:"legs"`
+	}
+	if err := json.Unmarshal(resp, &payload); err != nil {
+		PrintJSON(resp)
+		return err
+	}
+	legs := make([]string, len(payload.Legs))
+	for i, l := range payload.Legs {
+		legs[i] = sanitizeTerminal(l)
+	}
+	if len(legs) == 0 {
+		fmt.Printf("forge stamp cleared on %d mapping(s)\n", payload.Reset)
+		return nil
+	}
+	fmt.Printf("forge stamp cleared on %d mapping(s); the next run lists in full: %s\n", payload.Reset, strings.Join(legs, ", "))
+	return nil
 }
 
 // ── project resolution ──────────────────────────────────────────────────────.

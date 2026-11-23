@@ -105,23 +105,32 @@ func newFakeGitHub(t *testing.T, pageSize int, link func(next string) []string, 
 	f := &fakeGitHub{pageSize: pageSize, link: link, issues: issues}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
-	own := f.srv.Listener.Addr().String()
+	f.http = dialGuardedClient(t, f.srv, &f.foreignDials)
+	return f
+}
+
+// dialGuardedClient is an HTTP client that dials srv only: a dial to any
+// other address is refused and counted in foreign, and the test fails at
+// its end when one happened. srv.Client() dials wherever a URL points — a
+// next link to another host would leave the test machine (issue #509).
+func dialGuardedClient(t *testing.T, srv *httptest.Server, foreign *atomic.Int64) *http.Client {
+	t.Helper()
+	own := srv.Listener.Addr().String()
 	tr := &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if addr != own {
-			f.foreignDials.Add(1)
+			foreign.Add(1)
 			return nil, fmt.Errorf("fake forge: refused a dial to %s, a host other than the fake", addr)
 		}
 		var d net.Dialer
 		return d.DialContext(ctx, network, addr)
 	}}
-	f.http = &http.Client{Transport: tr}
 	t.Cleanup(func() {
 		tr.CloseIdleConnections()
-		if n := f.foreignDials.Load(); n > 0 {
+		if n := foreign.Load(); n > 0 {
 			t.Errorf("%d request(s) of the test went to a host other than the fake forge", n)
 		}
 	})
-	return f
+	return &http.Client{Transport: tr}
 }
 
 // quotedNext is GitHub's own spelling.

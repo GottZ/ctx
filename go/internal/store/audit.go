@@ -33,6 +33,9 @@ type auditEntity struct {
 // trigger (tenant_id through the grant's consumer);
 // scope_purge by the scope purge (#202, scope_purge.go: one row per run,
 // metadata.tenant_id = the purged scope's owner);
+// forge_sync by the forge resolve surface (#509, WriteForgeSyncAudit: one
+// row per conflict resolution or stamp reset that wrote, metadata.tenant_id =
+// the project's tenant, so a tenant-admin reads its own projects' rows);
 // gateway_limits (M-06-5) and consumer_usage (the gateway's Go writer) read
 // as empty lists until their writers land. setting, secret and
 // backend stay on their own surfaces (GET /api/settings/{key} and the
@@ -48,6 +51,7 @@ var auditEntities = map[string]auditEntity{
 	"model_grant":    {},
 	"consumer_usage": {},
 	"scope_purge":    {},
+	"forge_sync":     {},
 	"instance":       {serverAdminOnly: true},
 }
 
