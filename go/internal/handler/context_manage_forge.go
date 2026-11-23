@@ -137,7 +137,8 @@ func (h *ManageHandler) handleForgeSyncStart(w http.ResponseWriter, r *http.Requ
 }
 
 // handleForgeSyncStatus merges the in-memory run state with the DB history (last
-// run + open conflict count). token_set exposes ONLY whether a token exists.
+// run + open conflict count + the mappings behind a remote resolution's push
+// gate, issue #509). token_set exposes ONLY whether a token exists.
 func (h *ManageHandler) handleForgeSyncStatus(w http.ResponseWriter, r *http.Request, req manageRequest) {
 	d, ok := decodeForgeData(w, req)
 	if !ok {
@@ -157,6 +158,11 @@ func (h *ManageHandler) handleForgeSyncStatus(w http.ResponseWriter, r *http.Req
 		internalError(w, r.Context(), "forge: conflict count error", err)
 		return
 	}
+	gated, err := store.GatedCount(r.Context(), h.pool, row.ID, row.Scope)
+	if err != nil {
+		internalError(w, r.Context(), "forge: gated count error", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":       true,
 		"project_id":    row.ID,
@@ -168,6 +174,7 @@ func (h *ManageHandler) handleForgeSyncStatus(w http.ResponseWriter, r *http.Req
 		"backoff_until": row.BackoffUntil,
 		"last_error":    row.LastError,
 		"conflicts":     conflicts,
+		"gated":         gated,
 		"run":           h.forge.Status(row.ID),
 		"last_run":      last,
 	})

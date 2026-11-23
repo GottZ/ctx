@@ -166,6 +166,11 @@ func (h *ProjectSyncHandler) HandleStatus(w http.ResponseWriter, r *http.Request
 		internalError(w, ctx, "project-sync: conflict count", err)
 		return
 	}
+	gated, err := store.GatedCount(ctx, h.pool, row.ID, row.Scope)
+	if err != nil {
+		internalError(w, ctx, "project-sync: gated count", err)
+		return
+	}
 	var run forge.SyncStatus
 	if h.forge != nil {
 		run = h.forge.Status(row.ID)
@@ -181,6 +186,7 @@ func (h *ProjectSyncHandler) HandleStatus(w http.ResponseWriter, r *http.Request
 		"backoff_until": row.BackoffUntil,
 		"last_error":    row.LastError,
 		"conflicts":     conflicts,
+		"gated":         gated,
 		"run":           run,
 		"last_run":      last,
 		"recent_runs":   recent,

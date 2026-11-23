@@ -584,7 +584,7 @@ func (a *Applier) flagOrObserve(ctx context.Context, tx pgx.Tx, blockID string, 
 			// The forge holds the base a remote resolution wrote: the
 			// block's edit since is the only change, and the push may
 			// send it (issue #509).
-			if err := store.OpenPullGate(ctx, tx, blockID); err != nil {
+			if _, err := store.OpenPullGate(ctx, tx, blockID); err != nil {
 				return err
 			}
 		}

@@ -2,7 +2,7 @@
 // of a conflict flag and of a forge stamp that went back, on top of
 // forge.Resolver:
 //
-//	forge-conflict-list     the project's flagged mappings with both sides, keyset by block id
+//	forge-conflict-list     the project's flagged mappings with both sides, keyset by block id; gated:true lists the rows behind a remote resolution's push gate
 //	forge-conflict-resolve  resolve one flag: keep the block's version (local) or take the forge's (remote)
 //	forge-stamp-reset       forge stamp NULL + fetch leg held to a full listing, for one mapping or all of the project
 //
@@ -51,6 +51,7 @@ const forgeBlockIDError = "block_id must be the block id (UUID) of a mapped issu
 // (ForgeController pattern). *forge.Resolver implements it.
 type ForgeResolver interface {
 	ListConflicts(ctx context.Context, project store.ProjectRow, after string, limit int) ([]forge.Conflict, string, error)
+	ListGated(ctx context.Context, project store.ProjectRow, after string, limit int) ([]forge.Conflict, string, error)
 	ResolveConflict(ctx context.Context, project store.ProjectRow, blockID, direction, expect string, stamp store.AuditStamp) (forge.ResolveResult, error)
 	ResetStamps(ctx context.Context, project store.ProjectRow, blockID string, stamp store.AuditStamp) (forge.ResetResult, error)
 }
@@ -68,13 +69,20 @@ type forgeConflictListData struct {
 	ProjectID string `json:"project_id"`
 	After     string `json:"after"`
 	Limit     int    `json:"limit"`
+	Gated     bool   `json:"gated"`
 }
 
 // handleForgeConflictList answers a page of the project's flagged mappings:
 // block and base with their projection, what the database knows of the forge
 // side, the matrix cell and the flag token a resolution may pass as expect.
 // after is the next_cursor of the previous page (a block id); limit 0 is the
-// resolver's default, above its maximum the maximum.
+// resolver's default, above its maximum the maximum. gated lists, in the same
+// shape and with gated:true on each row, the mappings behind the push gate of
+// a remote resolution instead (issue #509): not flagged, left alone by the
+// push until a pull decides over the entity — which an entity the forge no
+// longer lists never gets; a local resolution opens the gate. A separate
+// listing rather than rows mixed into the conflicts: a client that pages
+// the conflicts and resolves each sees what it saw before.
 func (h *ManageHandler) handleForgeConflictList(w http.ResponseWriter, r *http.Request, _ *auth.AuthResult, req manageRequest) {
 	var d forgeConflictListData
 	if msg := decodeStrict(req.Data, &d); msg != "" {
@@ -97,7 +105,11 @@ func (h *ManageHandler) handleForgeConflictList(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	conflicts, next, err := h.forgeResolver.ListConflicts(r.Context(), *row, d.After, d.Limit)
+	list := h.forgeResolver.ListConflicts
+	if d.Gated {
+		list = h.forgeResolver.ListGated
+	}
+	conflicts, next, err := list(r.Context(), *row, d.After, d.Limit)
 	if err != nil {
 		logRequestError(r.Context(), "forge: conflict list failed", "project", row.ID, "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeInternal(w)

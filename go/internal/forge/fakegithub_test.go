@@ -65,6 +65,7 @@ type fakeGitHub struct {
 	pageHolds   map[int]chan struct{} // issue-listing pages held until closed (holdPage)
 	pagesServed atomic.Int64          // issue-listing requests served
 	auths       []string              // the Authorization header of every request, in order
+	moved       map[int64]string      // removed issues a PATCH is redirected for (301), by number
 }
 
 // fakeStampAnswer is what a write's answer carries as updated_at.
@@ -218,6 +219,29 @@ func (f *fakeGitHub) holdPage(n int, release chan struct{}) {
 		f.pageHolds = map[int]chan struct{}{}
 	}
 	f.pageHolds[n] = release
+}
+
+// remove takes issue n off the forge, as a delete or a transfer to another
+// repository does: the listing no longer carries it, and a PATCH of it is
+// answered 404 — or, with movedTo (a transfer), 301 to that path, as GitHub
+// redirects a transferred issue (issue #509).
+func (f *fakeGitHub) remove(t *testing.T, n int64, movedTo string) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.issues {
+		if f.issues[i].Number == n {
+			f.issues = append(f.issues[:i], f.issues[i+1:]...)
+			if movedTo != "" {
+				if f.moved == nil {
+					f.moved = map[int64]string{}
+				}
+				f.moved[n] = movedTo
+			}
+			return
+		}
+	}
+	t.Fatalf("the fake forge holds no issue #%d", n)
 }
 
 // issue returns a copy of what the forge holds for issue n.
@@ -547,7 +571,12 @@ func (f *fakeGitHub) servePatch(w http.ResponseWriter, r *http.Request) {
 		f.patches = append(f.patches, fakePatch{Number: n, Fields: fields})
 		landed = *it
 	}
+	movedTo := f.moved[n]
 	f.mu.Unlock()
+	if !found && movedTo != "" {
+		http.Redirect(w, r, movedTo, http.StatusMovedPermanently)
+		return
+	}
 	if !found {
 		http.NotFound(w, r)
 		return
