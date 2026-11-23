@@ -156,7 +156,8 @@ cmd_record() {
   echo "recording container events to $log (pid $!)"
 }
 
-# The probe starts the image with what internal/testdb passes (the flag and
+# The probe starts the image with what internal/testdb passes (runPostgres:
+# the two flags, random_page_cost being testdb.DeploymentRandomPageCost, and
 # the timescaledb-tune sizing, which only an image that runs timescaledb-tune
 # reads) and reads what a test session sees. --pull never: it probes the image
 # this job built, never a namesake from a registry.
@@ -168,7 +169,7 @@ cmd_probe() {
   cid=$(docker run -d --pull never \
     -e POSTGRES_USER=probe -e POSTGRES_PASSWORD=probe -e POSTGRES_DB=probe \
     -e TS_TUNE_MEMORY=2GB -e TS_TUNE_NUM_CPUS=2 \
-    "$CTX_TEST_PG_IMAGE" -c timescaledb.max_background_workers=0)
+    "$CTX_TEST_PG_IMAGE" -c timescaledb.max_background_workers=0 -c random_page_cost=4)
   # shellcheck disable=SC2064 # the id is fixed now
   trap "docker rm -f $cid >/dev/null 2>&1 || true" EXIT
   # TCP readiness: the entrypoint's first server (initdb) listens on no TCP

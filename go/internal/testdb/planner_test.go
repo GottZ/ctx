@@ -5,7 +5,35 @@ package testdb
 import (
 	"context"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// TestContainerStartsAtTheDeploymentRandomPageCost: the server's own
+// random_page_cost — what a session gets that sets none, read on a pool
+// without the test binary's PGOPTIONS — is DeploymentRandomPageCost, and it
+// comes from the command line runPostgres passes, on whatever image the run
+// uses (the CI image's postgresql.conf says 1.1; the production image's
+// default is 4 without any setting, which source tells apart).
+func TestContainerStartsAtTheDeploymentRandomPageCost(t *testing.T) {
+	pool := SetupTestDB(t)
+	ctx := context.Background()
+	cfg := pool.Config()
+	delete(cfg.ConnConfig.RuntimeParams, "options") // PGOPTIONS
+	p, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+	var setting, source string
+	if err := p.QueryRow(ctx,
+		"SELECT setting, source FROM pg_settings WHERE name = 'random_page_cost'").Scan(&setting, &source); err != nil {
+		t.Fatal(err)
+	}
+	if setting != DeploymentRandomPageCost || source != "command line" {
+		t.Errorf("the test container plans with random_page_cost %s (source %q), want %s from the command line", setting, source, DeploymentRandomPageCost)
+	}
+}
 
 // TestWithRandomPageCostHoldsOnEveryConnection: every connection of the pool
 // plans with the value, a RESET ALL keeps it (it is the session default), and

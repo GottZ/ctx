@@ -824,6 +824,10 @@ jobs:
             pkg_timeout: 15m
             job_timeout: 25
 
+    # The planner input of the tests is a deployment's: internal/testdb starts
+    # the container with random_page_cost 4 (DeploymentRandomPageCost) over
+    # the 1.1 timescaledb-tune writes into this image (issue #514); pins whose
+    # plan depends on the value check 1.1 as well.
     env:
       TESTCONTAINERS_RYUK_DISABLED: "false"
       TESTCONTAINERS_PULL_POLICY: "default"
@@ -969,9 +973,10 @@ jobs:
   # integration-tests runs every suite on the CI image,
   # timescale/timescaledb-ha:pg18; a deployment runs pgvector-timescaledb:pg18,
   # built from db-image/. What the tests see differs (docs/development.md,
-  # "Integration tests against the production image"): random_page_cost 1.1
-  # against 4, no JIT against JIT, collation C.UTF-8 against en_US.utf8, and
-  # the versions. This job builds the production image and runs on it every
+  # "Integration tests against the production image"): no JIT against JIT,
+  # the memory-sized planner inputs, collation C.UTF-8 against en_US.utf8, and
+  # the versions; random_page_cost no longer does, internal/testdb starts both
+  # at a deployment's 4. This job builds the production image and runs on it every
   # package whose integration tests start a database container; the three JIT
   # tests of internal/store run here and nowhere else. Schedule and dispatch
   # only: a nightly job is never a required check.
@@ -1007,9 +1012,10 @@ jobs:
   # runner: store about 13 min, rest about 15, every other shard 11 or less;
   # each package budget is at least twice that, each job cap above it. All 35
   # packages ran once on the production image that way: red only in store
-  # (the two cost pins of #512/#513) and rrf (TestVW4TrigramInnerTiebreak,
-  # whose index plan random_page_cost 4 does not choose), plus one oai timing
-  # test once under host load (green 5 of 5 on its own, on either image).
+  # (the two cost pins of #512/#513, fixed since) and rrf
+  # (TestVW4TrigramInnerTiebreak, whose index plan random_page_cost 4 did not
+  # choose; it forces the plan since), plus one oai timing test once under
+  # host load (green 5 of 5 on its own, on either image).
   #
   # The shard list, the `rest` complement (every other package that starts a
   # database, computed at run time) and the timeouts live in the script; the
