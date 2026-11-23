@@ -2256,6 +2256,19 @@ Each map node gained two **optional** fields. `topic` is the stable identity acr
 
 One visible consequence of the scope-bound identity: a cluster whose members live in two scopes now renders as **two** nodes with disjoint `scope_mix` and disjoint `top_categories`, instead of one node with merged counts. Live that case is zero and `/api/status` counts it under `cluster_map.cross_scope_clusters`. Meta-edges keep working across the split because the identity path aggregates them per (cluster pair, **scope pair**) and resolves each endpoint to the half it actually touches — a cluster-pair-only aggregate could not say which half an edge belongs to, and the edge would have to be dropped. The scope pair is stored **oriented like the cluster pair**: `cluster_a`/`cluster_b` are normalised so the smaller UUID comes first, and `scope_s`/`scope_t` are swapped along with them. Reading the two positionally is the whole point of keeping them.
 
+### The linear topic map is capped at 256 KiB
+
+The linear topic map (`topic-map-<scope>`, `digest.mode=full`) has one line per block. Since issue #518 its text is capped at 262,144 bytes. Below the cap the map is byte for byte what it was; a map that would pass it — from about 4,000 to 5,500 blocks in the read window, at the 48 to 66 bytes a line measured — says what it leaves out:
+
+- its second line: `Truncated: <listed> of <blocks> blocks listed, this map is capped at 262144 bytes. A category lists its first titles in title order; `ctx search <category>` finds all of its blocks.`;
+- a category listed in part: `<category> (<blocks>, <listed> listed)`. The categories share the cap: each lists the same number of its first titles in title order (all of them, when it has fewer), the largest number that fits, and what is left goes one line each to the first categories in order;
+- when not even every category's header fits: the categories that fit, without lines, and a last line `<n> more categories with <m> blocks not listed`;
+- the block's metadata: `truncated: true` and `listed_blocks`; the answer of `POST /api/digest`: `truncated` and `listedBlocks` ([API](api.md)).
+
+Why: the map's row carries the full-text vectors `ts_de` and `ts_en` of its text, and PostgreSQL refuses a vector of more than 1 MB of lexemes and positions (`54000 string is too long for tsvector`). Without the cap the map passed that limit at about 60,000 to 70,000 blocks of realistic titles, and from there every `POST /api/digest` answered `500`. How many vector bytes a byte of map costs depends on the titles: about 0.6 for realistic ones, up to 2.3 for the costliest patterns measured (hyphenated compounds of distinct alphanumeric parts, URLs); the largest map of those that still fits is about 570 KB, so the cap keeps a margin of more than two. The cap is a constant, not a setting: the limit is PostgreSQL's, and a smaller map is what the root map (`root_map.*`, `digest.mode=stub`) is for. The digest no longer holds the read window in memory either (about 500 MB at 1 M blocks before, against the image's `GOMEMLIMIT` of 768 MiB): it streams the rows and keeps what a capped map can list, bounded by the cap.
+
+**Behaviour change.** A store whose map lies between the cap and the old limit — roughly 4,000 to 60,000 blocks — gets the capped map instead of the whole one; below the cap nothing changes.
+
 ### Retiring the two dead linear topic maps (ops step, not a migration)
 
 `topic-map-work` and `topic-map-hth` have not been rebuilt since 2026-03 and still show up in every `ctx search index` result; the second one additionally advertises a **wrong** bootstrap path (its title says `hth`, its scope says `work` — a pre-scope-clamp leftover). `scripts/archive-legacy-topic-maps.sh` retires them.

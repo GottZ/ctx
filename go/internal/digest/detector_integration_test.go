@@ -47,7 +47,7 @@ func TestRunDigest_CredentialsDetectorRaisesTopicMap(t *testing.T) {
 	// rule "aws-key". 20 runes, well inside the 70-rune title truncation.
 	seedDigestBlock(t, pool, homeScope, "leaked key AKIA"+strings.Repeat("Z", 16)+" in a title")
 
-	if err := digest.RunDigest(ctx, pool, reg, digest.ModeFull, "", homeScope, homeScope, readScopes); err != nil {
+	if _, err := digest.RunDigest(ctx, pool, reg, digest.ModeFull, "", homeScope, homeScope, readScopes); err != nil {
 		t.Fatalf("RunDigest: %v", err)
 	}
 
@@ -104,7 +104,7 @@ func TestRunDigest_CleanCorpusUnchanged(t *testing.T) {
 
 	seedDigestBlock(t, pool, homeScope, "an ordinary decision title")
 
-	if err := digest.RunDigest(ctx, pool, reg, digest.ModeFull, "", homeScope, homeScope, []string{homeScope}); err != nil {
+	if _, err := digest.RunDigest(ctx, pool, reg, digest.ModeFull, "", homeScope, homeScope, []string{homeScope}); err != nil {
 		t.Fatalf("RunDigest: %v", err)
 	}
 

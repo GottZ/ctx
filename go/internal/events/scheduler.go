@@ -2143,7 +2143,7 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 		homeScope := effectiveHomeScope(cfg.Scheduler.HomeScope, bt.owned)
 		window := store.IntersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
 		slog.Info("scheduler: running digest", "scope", homeScope)
-		if err := digest.RunDigest(ctx, s.pool, s.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, bt.scope, homeScope, window); err != nil {
+		if _, err := digest.RunDigest(ctx, s.pool, s.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, bt.scope, homeScope, window); err != nil {
 			slog.Error("scheduler: digest error", "error", err)
 			ok = false // one tenant's failure must not skip the others
 		}
