@@ -393,8 +393,14 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 	// forge stamp (a stamp reset, a mapping from before stamps were kept)
 	// holds no observation: the comparison is false, not NULL — a NULL here
 	// made conflict NULL and the advance failed (23502) after the PATCH.
-	const reverted = `($9 AND base_hash = $6 AND base_hash <> $2 AND COALESCE(forge_updated_at > $8::timestamptz, false)
-		AND COALESCE(metadata->'forge_seen'->>'hash', base_hash) = base_hash)`
+	// The SET expressions read the row as it was; RETURNING reads the row
+	// as written unless a column is old-qualified, and there base_hash is
+	// the sent version already — so the RETURNING copy reads old.
+	revertedOf := func(row string) string {
+		return `($9 AND ` + row + `base_hash = $6 AND ` + row + `base_hash <> $2 AND COALESCE(` + row + `forge_updated_at > $8::timestamptz, false)
+		AND COALESCE(` + row + `metadata->'forge_seen'->>'hash', ` + row + `base_hash) = ` + row + `base_hash)`
+	}
+	reverted := revertedOf("")
 	var revert bool
 	err = tx.QueryRow(ctx, `
 		UPDATE context_project_sync_map
@@ -409,7 +415,7 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 		       conflict = conflict OR base_hash NOT IN ($6, $2) OR `+reverted+`,
 		       conflict_at = CASE WHEN base_hash IN ($6, $2) AND NOT `+reverted+` THEN conflict_at ELSE COALESCE(conflict_at, now()) END
 		 WHERE block_id = $1::uuid AND ($9 OR base_hash = $6)
-		RETURNING old.base_hash NOT IN ($6, $2), `+reverted,
+		RETURNING old.base_hash NOT IN ($6, $2), `+revertedOf("old."),
 		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash, forgeUpdatedAt, sent).Scan(&moved, &revert)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
