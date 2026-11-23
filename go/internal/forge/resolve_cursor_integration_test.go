@@ -168,6 +168,23 @@ func (e i491Env) i509Leg(t *testing.T, leg string) legCursorJSON {
 	return l
 }
 
+// i509HoldOf decodes leg's hold strictly (nil for none).
+func (e i491Env) i509HoldOf(t *testing.T, leg string) *holdJSON {
+	t.Helper()
+	var raw *string
+	if err := e.pool.QueryRow(context.Background(), `SELECT (sync_cursor->'holds'->$2)::text FROM context_projects WHERE id = $1::uuid`, e.proj.ID, leg).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw == nil {
+		return nil
+	}
+	var h holdJSON
+	if err := json.Unmarshal([]byte(*raw), &h); err != nil {
+		t.Fatalf("hold %s %s does not decode: %v", leg, *raw, err)
+	}
+	return &h
+}
+
 // A second hold keeps the earlier time and takes a new nonce: the run that
 // read the first hold commits as one that did not read the second (no
 // further than the earlier time, no ETag, the hold kept), and only a run
@@ -181,20 +198,20 @@ func TestASecondHoldKeepsTheEarlierTime(t *testing.T) {
 		n1 := e.i509Hold(t, "issues")
 		e.i509HoldAt(t, "issues", order[1])
 		n2 := e.i509Hold(t, "issues")
-		if l := e.i509Leg(t, "issues"); n1 == n2 || l.Hold == nil || !l.Hold.At.Equal(early) || !l.Since.Equal(early) {
-			t.Fatalf("after holds at %v then %v: %+v (nonces %q %q) — want the earlier time, a new nonce", order[0], order[1], l, n1, n2)
+		if l, h := e.i509Leg(t, "issues"), e.i509HoldOf(t, "issues"); n1 == n2 || h == nil || !h.At.Equal(early) || !l.Since.Equal(early) {
+			t.Fatalf("after holds at %v then %v: %+v %+v (nonces %q %q) — want the earlier time, a new nonce", order[0], order[1], l, h, n1, n2)
 		}
 		if err := store.CommitFetchCursor(ctx, e.pool, e.proj.ID, "issues", `"E1"`, early.Add(48*time.Hour), n1, true, nil); err != nil {
 			t.Fatal(err)
 		}
-		if l := e.i509Leg(t, "issues"); l.Hold == nil || l.Hold.N != n2 || !l.Since.Equal(early) || l.ETag != "" {
-			t.Fatalf("the run that read the first hold: %+v — want since at the earlier time, no ETag, the second hold kept", l)
+		if l, h := e.i509Leg(t, "issues"), e.i509HoldOf(t, "issues"); h == nil || h.N != n2 || !l.Since.Equal(early) || l.ETag != "" {
+			t.Fatalf("the run that read the first hold: %+v %+v — want since at the earlier time, no ETag, the second hold kept", l, h)
 		}
 		if err := store.CommitFetchCursor(ctx, e.pool, e.proj.ID, "issues", `"E3"`, early.Add(25*time.Hour), n2, true, nil); err != nil {
 			t.Fatal(err)
 		}
-		if l := e.i509Leg(t, "issues"); l.Hold != nil || l.ETag != `"E3"` || !l.Since.Equal(early.Add(25*time.Hour)) {
-			t.Fatalf("the run that read the second hold, last page: %+v — want the hold dropped, its own cursor saved", l)
+		if l, h := e.i509Leg(t, "issues"), e.i509HoldOf(t, "issues"); h != nil || l.ETag != `"E3"` || !l.Since.Equal(early.Add(25*time.Hour)) {
+			t.Fatalf("the run that read the second hold, last page: %+v %+v — want the hold dropped, its own cursor saved", l, h)
 		}
 	}
 }

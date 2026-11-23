@@ -280,24 +280,30 @@ func LockProjectForCursor(ctx context.Context, tx pgx.Tx, projectID string) (boo
 }
 
 // HoldFetchCursor makes the next run of a project's fetch leg (leg =
-// "issues" | "comments") list every entity updated at or after at: since
-// becomes no later than at, the ETag goes, and a hold {at, n} stays in the
-// leg's cursor until a run that read it finishes the leg (CommitFetchCursor).
-// A run that started before the hold commits its cursor no further than
-// hold.at and without an ETag, so it cannot move since past the entity the
-// hold is for. A second hold keeps the earlier at and takes a new nonce.
-// A zero at lists the whole leg. The caller holds the project row
+// "issues" | "comments") list every entity updated at or after at: a hold
+// {at, n} goes into sync_cursor.holds.<leg> and stays until a run that read
+// it finishes the leg (CommitFetchCursor); since becomes no later than at
+// and the ETag goes, for a run that does not know holds. A run lists from
+// hold.at without an ETag whatever since and ETag its leg carries
+// (forge.legStart), so the hold also outlives a cursor commit that replaces
+// the leg object — the release before holds existed merges {leg: {etag,
+// since}} into sync_cursor (issue #509, rolling deploy). A run that started
+// before the hold commits its cursor no further than hold.at and without
+// an ETag. A second hold keeps the earlier at and takes a new nonce. A zero
+// at lists the whole leg. The caller holds the project row
 // (LockProjectForCursor).
 func HoldFetchCursor(ctx context.Context, tx pgx.Tx, projectID, leg string, at time.Time) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE context_projects p
-		   SET sync_cursor = COALESCE(p.sync_cursor, '{}'::jsonb) || jsonb_build_object($2::text,
-		         COALESCE(p.sync_cursor->$2, '{}'::jsonb) || jsonb_build_object(
-		           'etag', '',
-		           'since', `+utcJSON(`LEAST(COALESCE((p.sync_cursor->$2->>'since')::timestamptz, '0001-01-01T00:00:00Z'::timestamptz), $3::timestamptz)`)+`,
-		           'hold', jsonb_build_object(
-		             'at', `+utcJSON(`LEAST(COALESCE((p.sync_cursor->$2->'hold'->>'at')::timestamptz, $3::timestamptz), $3::timestamptz)`)+`,
-		             'n', gen_random_uuid()::text)))
+		   SET sync_cursor = COALESCE(p.sync_cursor, '{}'::jsonb)
+		         || jsonb_build_object($2::text,
+		              COALESCE(p.sync_cursor->$2, '{}'::jsonb) || jsonb_build_object(
+		                'etag', '',
+		                'since', `+utcJSON(`LEAST(COALESCE((p.sync_cursor->$2->>'since')::timestamptz, '0001-01-01T00:00:00Z'::timestamptz), $3::timestamptz)`)+`))
+		         || jsonb_build_object('holds',
+		              COALESCE(p.sync_cursor->'holds', '{}'::jsonb) || jsonb_build_object($2::text, jsonb_build_object(
+		                'at', `+utcJSON(`LEAST(COALESCE((p.sync_cursor->'holds'->$2->>'at')::timestamptz, $3::timestamptz), $3::timestamptz)`)+`,
+		                'n', gen_random_uuid()::text)))
 		 WHERE p.id = $1::uuid`, projectID, leg, at.UTC()); err != nil {
 		return fmt.Errorf("store: hold fetch cursor: %w", err)
 	}
@@ -315,33 +321,32 @@ func utcJSON(expr string) string {
 
 // CommitFetchCursor saves a fetch leg's cursor after a page it applied (leg
 // = "issues" | "comments"): etag and since as the leg computed them, unless
-// the leg's cursor carries a hold this run did not read (readHold, the
-// hold's nonce in the cursor the run started from; "" for none) — then since
-// goes no further than hold.at, no ETag is saved and the hold stays
-// (HoldFetchCursor). A run that read the hold saves its own cursor (it
-// listed from at or before hold.at) and, with last (its leg read the last
-// page), drops the hold. extra (a JSON object, nil for none) is merged into
-// the leg's cursor — the comment leg's held orphans. The other keys of the
-// cursor survive.
-func CommitFetchCursor(ctx context.Context, pool *pgxpool.Pool, projectID, leg, etag string, since time.Time, readHold string, last bool, extra json.RawMessage) error {
-	if len(extra) == 0 {
-		extra = json.RawMessage(`{}`)
+// sync_cursor.holds.<leg> carries a hold this run did not read (readHold,
+// the hold's nonce in the cursor the run started from; "" for none) — then
+// since goes no further than hold.at and no ETag is saved. A run that read
+// the hold saves its own cursor (it listed from hold.at or before) and, with
+// last (its leg read the last page), drops the hold; every other hold stays
+// (HoldFetchCursor). top (a JSON object, nil for none) is merged into
+// sync_cursor beside the legs — the comment leg's held orphans. The other
+// keys of the cursor survive.
+func CommitFetchCursor(ctx context.Context, pool *pgxpool.Pool, projectID, leg, etag string, since time.Time, readHold string, last bool, top json.RawMessage) error {
+	if len(top) == 0 {
+		top = json.RawMessage(`{}`)
 	}
 	if _, err := pool.Exec(ctx, `
 		UPDATE context_projects p
-		   SET sync_cursor = COALESCE(p.sync_cursor, '{}'::jsonb) || jsonb_build_object($2::text,
-		         CASE
-		           WHEN p.sync_cursor->$2->'hold' IS NULL
-		             THEN jsonb_build_object('etag', $3::text, 'since', `+utcJSON(`$4::timestamptz`)+`)
-		           WHEN p.sync_cursor->$2->'hold'->>'n' = $5::text AND $6
-		             THEN jsonb_build_object('etag', $3::text, 'since', `+utcJSON(`$4::timestamptz`)+`)
-		           WHEN p.sync_cursor->$2->'hold'->>'n' = $5::text
-		             THEN jsonb_build_object('etag', $3::text, 'since', `+utcJSON(`$4::timestamptz`)+`, 'hold', p.sync_cursor->$2->'hold')
-		           ELSE jsonb_build_object('etag', '',
-		                  'since', `+utcJSON(`LEAST($4::timestamptz, (p.sync_cursor->$2->'hold'->>'at')::timestamptz)`)+`,
-		                  'hold', p.sync_cursor->$2->'hold')
-		         END || $7::jsonb)
-		 WHERE p.id = $1::uuid`, projectID, leg, etag, since.UTC(), readHold, last, string(extra)); err != nil {
+		   SET sync_cursor = COALESCE(p.sync_cursor, '{}'::jsonb)
+		         || jsonb_build_object($2::text, CASE
+		              WHEN p.sync_cursor->'holds'->$2 IS NULL OR p.sync_cursor->'holds'->$2->>'n' = $5::text
+		                THEN jsonb_build_object('etag', $3::text, 'since', `+utcJSON(`$4::timestamptz`)+`)
+		              ELSE jsonb_build_object('etag', '',
+		                     'since', `+utcJSON(`LEAST($4::timestamptz, (p.sync_cursor->'holds'->$2->>'at')::timestamptz)`)+`)
+		            END)
+		         || CASE WHEN p.sync_cursor->'holds'->$2->>'n' = $5::text AND $6
+		              THEN jsonb_build_object('holds', (p.sync_cursor->'holds') - $2::text)
+		              ELSE '{}'::jsonb END
+		         || $7::jsonb
+		 WHERE p.id = $1::uuid`, projectID, leg, etag, since.UTC(), readHold, last, string(top)); err != nil {
 		return fmt.Errorf("store: commit fetch cursor: %w", err)
 	}
 	return nil

@@ -601,7 +601,7 @@ func (m *SyncManager) commitFetchCursor(ctx context.Context, projectID, leg, eta
 
 // orphanHolds is the comment leg's account of comments whose parent issue
 // has no mapping (issue #509): prev, the ones the previous run held already
-// (sync_cursor.comments.orphans); held, the ones this run holds; maxIssue,
+// (sync_cursor.orphans, beside the legs); held, the ones this run holds; maxIssue,
 // the highest issue number the project maps (-1 until read).
 type orphanHolds struct {
 	prev     map[int64]bool
@@ -609,7 +609,7 @@ type orphanHolds struct {
 	maxIssue int64
 }
 
-// extra is the comment leg's cursor key that carries the held orphans.
+// extra is the cursor key, beside the legs, that carries the held orphans.
 func (o *orphanHolds) extra() json.RawMessage {
 	held := o.held
 	if held == nil {
@@ -884,29 +884,55 @@ type cursor struct {
 	Issues   legCursorJSON `json:"issues"`
 	Comments legCursorJSON `json:"comments"`
 	BackoffN int           `json:"backoff_n"`
+	// Holds and Orphans sit beside the legs (issue #509): a cursor commit
+	// replaces a leg's object, theirs survives it.
+	Holds   map[string]*holdJSON `json:"holds,omitempty"`
+	Orphans []int64              `json:"orphans,omitempty"`
 }
 
 // legCursorJSON is one leg's cursor: the ETag and since the next run asks
-// with, and a hold a resolution or a stamp reset set (issue #509,
-// store.HoldFetchCursor): its time and its nonce.
+// with.
 type legCursorJSON struct {
 	ETag  string    `json:"etag"`
 	Since time.Time `json:"since"`
-	Hold  *struct {
-		At time.Time `json:"at"`
-		N  string    `json:"n"`
-	} `json:"hold,omitempty"`
-	Orphans []int64 `json:"orphans,omitempty"`
 }
 
-// readOrphans is the set of comment ids the previous run held as orphans.
-func readOrphans(raw json.RawMessage) map[int64]bool {
+// holdJSON is a leg's hold (sync_cursor.holds.<leg>, store.HoldFetchCursor,
+// issue #509): its time and its nonce. It lives beside the legs, so a cursor
+// commit of a release that replaces the leg object keeps it.
+type holdJSON struct {
+	At time.Time `json:"at"`
+	N  string    `json:"n"`
+}
+
+// decodeCursor reads sync_cursor; a value that does not decode reads as
+// the zero cursor (a full listing), as before.
+func decodeCursor(raw json.RawMessage) cursor {
 	var c cursor
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &c)
 	}
-	out := make(map[int64]bool, len(c.Comments.Orphans))
-	for _, id := range c.Comments.Orphans {
+	return c
+}
+
+// start is where a run lists the leg from: its since with its ETag, or,
+// under a hold, no later than the hold's time and without an ETag — whatever
+// since and ETag a cursor commit that did not know the hold saved over it.
+func (l legCursorJSON) start(h *holdJSON) (string, time.Time) {
+	if h == nil {
+		return l.ETag, l.Since
+	}
+	if h.At.Before(l.Since) {
+		return "", h.At
+	}
+	return "", l.Since
+}
+
+// readOrphans is the set of comment ids the previous run held as orphans.
+func readOrphans(raw json.RawMessage) map[int64]bool {
+	c := decodeCursor(raw)
+	out := make(map[int64]bool, len(c.Orphans))
+	for _, id := range c.Orphans {
 		out[id] = true
 	}
 	return out
@@ -914,32 +940,19 @@ func readOrphans(raw json.RawMessage) map[int64]bool {
 
 // readHold is the nonce of leg's hold in raw, "" for none.
 func readHold(raw json.RawMessage, leg string) string {
-	var c cursor
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &c)
+	if h := decodeCursor(raw).Holds[leg]; h != nil {
+		return h.N
 	}
-	l := c.Issues
-	if leg == "comments" {
-		l = c.Comments
-	}
-	if l.Hold == nil {
-		return ""
-	}
-	return l.Hold.N
+	return ""
 }
 
 func readCursor(raw json.RawMessage) (etag string, since time.Time, backoffN int) {
-	var c cursor
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &c)
-	}
-	return c.Issues.ETag, c.Issues.Since, c.BackoffN
+	c := decodeCursor(raw)
+	etag, since = c.Issues.start(c.Holds["issues"])
+	return etag, since, c.BackoffN
 }
 
 func readCommentCursor(raw json.RawMessage) (etag string, since time.Time) {
-	var c cursor
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &c)
-	}
-	return c.Comments.ETag, c.Comments.Since
+	c := decodeCursor(raw)
+	return c.Comments.start(c.Holds["comments"])
 }
