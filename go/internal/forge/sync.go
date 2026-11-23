@@ -36,6 +36,11 @@ const (
 	// (project.sync.max_concurrent, §4.4). NewSyncManager seeds this; SetMaxConcurrent
 	// overrides it from config at boot.
 	defaultMaxConcurrent = 3
+	// defaultRunTimeout is the deadline of one sync run when SetRunTimeout was
+	// not called (project.sync.run_timeout, issue #474; config.go carries the
+	// same default). Four hours give each of the two pull legs' 1000 pages
+	// (maxPagesPerLeg) 7.2 s for its request and its apply.
+	defaultRunTimeout = 4 * time.Hour
 )
 
 // Sentinel errors surfaced to the manage handler (mapped to 409/422/…).
@@ -161,6 +166,10 @@ type SyncManager struct {
 
 	// pageBound overrides maxPagesPerLeg (0 = the constant); tests only.
 	pageBound int
+
+	// runTimeout is the deadline of one sync run (SetRunTimeout; 0 =
+	// defaultRunTimeout).
+	runTimeout time.Duration
 }
 
 // NewSyncManager builds the manager with the production GitHub client factory and
@@ -189,6 +198,24 @@ func (m *SyncManager) SetMaxConcurrent(n int) {
 		n = defaultMaxConcurrent
 	}
 	m.sem = make(chan struct{}, n)
+}
+
+// SetRunTimeout sets the deadline of one sync run from config
+// (project.sync.run_timeout, issue #474); d <= 0 falls back to the default.
+// Call once at boot, before serving, like SetMaxConcurrent.
+func (m *SyncManager) SetRunTimeout(d time.Duration) {
+	if d <= 0 {
+		d = defaultRunTimeout
+	}
+	m.runTimeout = d
+}
+
+// runDeadline is the deadline of one sync run.
+func (m *SyncManager) runDeadline() time.Duration {
+	if m.runTimeout > 0 {
+		return m.runTimeout
+	}
+	return defaultRunTimeout
 }
 
 // SetApplyIssues wires the I-G Pull-APPLY hook (idempotent; call once at boot).
@@ -315,13 +342,37 @@ func (m *SyncManager) StartSync(ctx context.Context, project store.ProjectRow, d
 // runSync is the background fetch loop. It never panics the process (§4.5.5
 // recover), records the run row on exit, and treats every wire/rate-limit error
 // as backoff — never a conflict.
-func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dryRun bool, runID string) {
+//
+// The run's work — the forge's reads, the applies, the push's listing and the
+// start of each push section — runs under a deadline (project.sync.run_timeout,
+// issue #474); the run's own bookkeeping does not: base carries no deadline,
+// and the fetch cursor commits, the error and backoff stamp, the success
+// stamp and the run row are written on it, so a run that meets its deadline
+// leaves the cursor of its last applied page, a last_error that names the
+// deadline, and a released slot, and the next run goes on from that cursor.
+// A push write on the wire when the deadline passes is not cut: it runs to
+// its answer (the forge client's own timeout bounds it) and its advance
+// commits (Pusher.section, issue #474) — a cut PATCH may still land after
+// the push lock went back, the class of a session that ends during the
+// PATCH (issue #509). Before, a run had no deadline: a forge that answered
+// each page just under the client's 30 s timeout held a sync slot for up to
+// 1000 pages × 30 s per leg.
+func (m *SyncManager) runSync(base context.Context, project store.ProjectRow, dryRun bool, runID string) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("forge: sync run panicked", "project", project.ID, "panic", r, "stack", string(debug.Stack()))
 			m.finish(project.ID, runID, "panic during sync", true, false)
 		}
 	}()
+	ctx, cancel := context.WithTimeout(base, m.runDeadline())
+	defer cancel()
+	// failed ends the run on err, named as the deadline when the run met it.
+	failed := func(backoffN int, err error) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = errRunDeadline(m.runDeadline())
+		}
+		m.handleWireError(base, project.ID, runID, backoffN, err)
+	}
 
 	token, err := m.resolveToken(ctx, project)
 	if err != nil {
@@ -356,7 +407,7 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 		case errors.Is(err, errPageBound):
 			bounded = err
 		default:
-			m.handleWireError(ctx, project.ID, runID, backoffN, err)
+			failed(backoffN, err)
 			return
 		}
 	}
@@ -366,14 +417,14 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 		cEtag, cSince := readCommentCursor(project.SyncCursor)
 		if err := m.pullComments(ctx, project, client, repo, cEtag, cSince, bounded == nil); err != nil && !errors.Is(err, ErrNotModified) {
 			if !errors.Is(err, errPageBound) {
-				m.handleWireError(ctx, project.ID, runID, backoffN, err)
+				failed(backoffN, err)
 				return
 			}
 			bounded = err
 		}
 	}
 	if bounded != nil {
-		m.handleWireError(ctx, project.ID, runID, backoffN, bounded)
+		m.handleWireError(base, project.ID, runID, backoffN, bounded)
 		return
 	}
 
@@ -396,7 +447,7 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 		}
 		m.mu.Unlock()
 		if err != nil {
-			m.handleWireError(ctx, project.ID, runID, backoffN, err)
+			failed(backoffN, err)
 			return
 		}
 	}
@@ -404,10 +455,10 @@ func (m *SyncManager) runSync(ctx context.Context, project store.ProjectRow, dry
 	// SUCCESS. Backoff/error are cleared and last_sync_at stamped; backoff_n reset.
 	// The etag/since fetch cursors were advanced per page inside the legs above (I-F
 	// with applyIssues==nil advances nothing — no apply happened).
-	_ = store.SetProjectSyncState(ctx, m.pool, project.ID, store.SyncStatePatch{
+	_ = store.SetProjectSyncState(base, m.pool, project.ID, store.SyncStatePatch{
 		SyncStatus: strptr("idle"), ClearError: true, ClearBackoff: true, SetLastSync: true,
 	})
-	_ = store.MergeProjectSyncCursor(ctx, m.pool, project.ID, json.RawMessage(`{"backoff_n":0}`))
+	_ = store.MergeProjectSyncCursor(base, m.pool, project.ID, json.RawMessage(`{"backoff_n":0}`))
 	m.finish(project.ID, runID, "", false, false)
 }
 
@@ -512,14 +563,20 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 // pages. Each page applied commits the since cursor, so the next run starts
 // where the bound stopped this one; 1000 requests are a fifth of a token's
 // hourly 5000 at GitHub. A forge that names a new page forever is stopped
-// after them instead of holding a sync slot for good — the run has no
-// deadline of its own.
+// after them instead of holding a sync slot for good; the run's deadline
+// (project.sync.run_timeout) bounds a forge that answers each page slowly.
 const maxPagesPerLeg = 1000
 
 var (
 	errPageBound = &configError{fmt.Sprintf("forge: a sync leg read %d pages in one run and stopped; the next sync continues where it stopped", maxPagesPerLeg)}
 	errNextCycle = &configError{"forge: the forge's next-page links run in a cycle; the pull stopped there"}
 )
+
+// errRunDeadline is the end of a run that met its deadline d (runSync, issue
+// #474): fixed text and a duration, so sanitizeErr hands it to last_error.
+func errRunDeadline(d time.Duration) error {
+	return &configError{fmt.Sprintf("forge: the sync run reached its deadline of %s (project.sync.run_timeout) and stopped; the next sync continues where it stopped", d)}
+}
 
 // legBound is the page bound of one leg: maxPagesPerLeg unless a test set
 // pageBound.
@@ -598,9 +655,11 @@ func legCursor(first string, n int, next string, maxSeen, relist time.Time) (str
 // page: a hold a resolution or a stamp reset set (store.HoldFetchCursor,
 // issue #509) keeps a run that did not read it from saving a since past
 // hold.at or an ETag, and goes once a run that read it read the leg to its
-// end (store.CommitFetchCursor).
+// end (store.CommitFetchCursor). The commit is the run's bookkeeping and runs
+// outside the run's deadline (runSync, issue #474): a page applied just
+// before the deadline keeps its cursor.
 func (m *SyncManager) commitFetchCursor(ctx context.Context, projectID, leg, etag string, since time.Time, hold string, last bool, extra json.RawMessage) {
-	_ = store.CommitFetchCursor(ctx, m.pool, projectID, leg, etag, since, hold, last, extra)
+	_ = store.CommitFetchCursor(context.WithoutCancel(ctx), m.pool, projectID, leg, etag, since, hold, last, extra)
 }
 
 // orphanHolds is the comment leg's account of comments whose parent issue

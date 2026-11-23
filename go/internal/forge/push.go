@@ -125,7 +125,7 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 		// candidates through the bound advance (issue #452) — otherwise it
 		// stays listed for good and, past pushBatchLimit, keeps later
 		// candidates out of the listing.
-		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, rec.advance(ctx, false))
+		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, rec.advance(false))
 		noteSkip(res, c.Block.ID, skip)
 		rec.count(res, err)
 		return true, err
@@ -148,18 +148,18 @@ func (p *Pusher) pushIssue(ctx context.Context, project store.ProjectRow, client
 	}
 	if patch.empty() {
 		// Only a never-pushed field (milestone) diverged: advance base, 0 wire.
-		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, rec.advance(ctx, false))
+		skip, err := p.section(ctx, c.Block.ID, c.BaseHash, nil, rec.advance(false))
 		noteSkip(res, c.Block.ID, skip)
 		rec.count(res, err)
 		return true, err
 	}
-	cont, err := p.wireSection(ctx, c.Block.ID, c.BaseHash, allow, res, func() error {
+	cont, err := p.wireSection(ctx, c.Block.ID, c.BaseHash, allow, res, func(ctx context.Context) error {
 		var err error
 		if rec.stamp, err = client.UpdateIssue(ctx, repo, c.ForgeID, patch); err == nil {
 			noteNoStamp(c.Block.ID, "issue update", rec.stamp)
 		}
 		return err
-	}, rec.advance(ctx, true))
+	}, rec.advance(true))
 	rec.count(res, err)
 	return cont, err
 }
@@ -193,7 +193,15 @@ const pushUnlockGrace = 5 * time.Second
 // (the lock statement failed with an unknown outcome, the unlock failed or
 // found no lock) is closed, and the server releases a closed session's
 // advisory locks — a pooled connection never keeps an entity locked.
-func (p *Pusher) section(ctx context.Context, blockID, listedBase string, wire func() error, record func(tx pgx.Tx) error) (store.PushSkip, error) {
+//
+// The run's deadline (SyncManager.runSync, issue #474) reaches the section
+// up to its lock: wire and record run on a context without it. A PATCH on
+// the wire when the deadline passes runs to its answer (the forge client's
+// timeout bounds it), and the advance after a landed PATCH commits — cut,
+// the PATCH could land after the lock went back and another instance's
+// push recorded a newer version, and the advance would be lost for a write
+// the forge holds.
+func (p *Pusher) section(ctx context.Context, blockID, listedBase string, wire func(context.Context) error, record func(context.Context, pgx.Tx) error) (store.PushSkip, error) {
 	conn, err := p.pool.Acquire(ctx)
 	if err != nil {
 		return "", fmt.Errorf("forge: push section: acquire a connection: %w", err)
@@ -212,12 +220,15 @@ func (p *Pusher) section(ctx context.Context, blockID, listedBase string, wire f
 	if err != nil || skip != "" {
 		return skip, err
 	}
+	wctx := context.WithoutCancel(ctx)
 	if wire != nil {
-		if err := wire(); err != nil {
+		if err := wire(wctx); err != nil {
 			return "", err
 		}
 	}
-	return "", pgxdb.Write(ctx, conn.Conn(), pgxdb.Stages{Begin: "forge: push record begin", Commit: "forge: push record commit"}, record)
+	return "", pgxdb.Write(wctx, conn.Conn(), pgxdb.Stages{Begin: "forge: push record begin", Commit: "forge: push record commit"}, func(tx pgx.Tx) error {
+		return record(wctx, tx)
+	})
 }
 
 // noteSkip counts an entity a section left to the next run, in the
@@ -259,14 +270,14 @@ func closePushConn(ctx context.Context, conn *pgxpool.Conn) {
 // writes the forge and record advances the base. It answers cont=false when
 // the bucket ran dry (the caller stops the pass).
 func (p *Pusher) wireSection(ctx context.Context, blockID, listedBase string, allow func() bool, res *PushResult,
-	send func() error, record func(tx pgx.Tx) error) (bool, error) {
+	send func(context.Context) error, record func(context.Context, pgx.Tx) error) (bool, error) {
 
 	sent := false
-	skip, err := p.section(ctx, blockID, listedBase, func() error {
+	skip, err := p.section(ctx, blockID, listedBase, func(ctx context.Context) error {
 		if !allow() {
 			return errThrottled
 		}
-		if err := send(); err != nil {
+		if err := send(ctx); err != nil {
 			return err
 		}
 		sent = true
@@ -312,6 +323,11 @@ func (p *Pusher) createIssue(ctx context.Context, project store.ProjectRow, clie
 		res.Throttled = true
 		return false, nil
 	}
+	// The POST, the close and the finalize run outside the run's deadline
+	// (issue #474): a POST cut on the wire may still create the issue, and a
+	// finalize the deadline failed after it leaves the forge issue without
+	// its local number — the next run would create it again.
+	ctx = context.WithoutCancel(ctx)
 	number, stamp, err := client.CreateIssue(ctx, repo, IssueCreate{
 		Title: ctxProj.Title, Body: ctxProj.Body, Labels: ctxProj.Labels, Assignees: ctxProj.Assignees,
 	})
@@ -361,7 +377,7 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 	rec := pushRecord{blockID: c.BlockID, listed: c.BaseHash, ctxH: ctxH, ctxFields: ctxFields, projected: projected}
 	if ctxH == c.BaseHash {
 		// In sync — 0 wire; the row leaves the candidates as in pushIssue.
-		skip, err := p.section(ctx, c.BlockID, c.BaseHash, nil, rec.advance(ctx, false))
+		skip, err := p.section(ctx, c.BlockID, c.BaseHash, nil, rec.advance(false))
 		noteSkip(res, c.BlockID, skip)
 		rec.count(res, err)
 		return true, err
@@ -376,6 +392,7 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 			res.Throttled = true
 			return false, nil
 		}
+		ctx := context.WithoutCancel(ctx) // as in createIssue (issue #474)
 		id, created, err := client.CreateComment(ctx, repo, c.ParentForgeID, body)
 		if err != nil {
 			return false, err
@@ -398,13 +415,13 @@ func (p *Pusher) pushComment(ctx context.Context, client Forge, repo RepoRef,
 		res.Conflicts++
 		return true, nil
 	}
-	cont, err := p.wireSection(ctx, c.BlockID, c.BaseHash, allow, res, func() error {
+	cont, err := p.wireSection(ctx, c.BlockID, c.BaseHash, allow, res, func(ctx context.Context) error {
 		var err error
 		if rec.stamp, err = client.UpdateComment(ctx, repo, c.ForgeID, body); err == nil {
 			noteNoStamp(c.BlockID, "comment update", rec.stamp)
 		}
 		return err
-	}, rec.advance(ctx, true))
+	}, rec.advance(true))
 	rec.count(res, err)
 	return cont, err
 }
@@ -435,8 +452,8 @@ type pushRecord struct {
 
 // advance is the section's record; sent says that a PATCH carried ctxH
 // (store.AdvancePushBase).
-func (r *pushRecord) advance(ctx context.Context, sent bool) func(tx pgx.Tx) error {
-	return func(tx pgx.Tx) error {
+func (r *pushRecord) advance(sent bool) func(context.Context, pgx.Tx) error {
+	return func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		r.moved, err = store.AdvancePushBase(ctx, tx, r.blockID, r.listed, r.ctxH, r.ctxFields, r.stamp, sent, r.projected)
 		return err

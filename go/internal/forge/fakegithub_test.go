@@ -62,6 +62,8 @@ type fakeGitHub struct {
 	before      func()      // one-shot seam of the next issue PATCH
 	after       func()
 	stampAnswer fakeStampAnswer
+	pageHolds   map[int]chan struct{} // issue-listing pages held until closed (holdPage)
+	pagesServed atomic.Int64          // issue-listing requests served
 }
 
 // fakeStampAnswer is what a write's answer carries as updated_at.
@@ -203,6 +205,18 @@ func (f *fakeGitHub) seam(before, after func()) {
 	f.mu.Lock()
 	f.before, f.after = before, after
 	f.mu.Unlock()
+}
+
+// holdPage makes the issue listing's page n (of any listing) wait until
+// release is closed or the client gives the request up — a forge that does
+// not answer a page (issue #474).
+func (f *fakeGitHub) holdPage(n int, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pageHolds == nil {
+		f.pageHolds = map[int]chan struct{}{}
+	}
+	f.pageHolds[n] = release
 }
 
 // issue returns a copy of what the forge holds for issue n.
@@ -563,6 +577,17 @@ func (f *fakeGitHub) serveListing(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(q.Get("page"))
 	if page < 1 {
 		page = 1
+	}
+	f.pagesServed.Add(1)
+	f.mu.Lock()
+	hold := f.pageHolds[page]
+	f.mu.Unlock()
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-r.Context().Done():
+			return // the client gave the request up
+		}
 	}
 
 	f.mu.Lock()
