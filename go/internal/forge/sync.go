@@ -610,7 +610,7 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 		relist = relistAt(relistAt(relist, res.Relist), at)
 		if !maxSeen.IsZero() {
 			etag, at := legCursor(firstETag, n, page.NextURL, maxSeen, relist)
-			m.commitFetchCursor(ctx, project.ID, "comments", etag, at, hold, page.NextURL == "", orphansUntil(maxSeen, page.NextURL != ""))
+			m.commitFetchCursor(ctx, project.ID, "comments", etag, at, hold, page.NextURL == "", orphansUntil(maxSeen))
 			m.noteAdvanced(project.ID, since, at)
 		}
 		if page.NextURL == "" {
@@ -742,28 +742,16 @@ type orphanHolds struct {
 	issuesDone bool
 }
 
-// orphansUntil is the cursor key, beside the legs, that records up to where
-// the leg listed every comment so far in this run: a comment at or before
-// it was listed by this run, so a later run knows it held it already if it
-// was an orphan (holdOrphans). After the leg's last page that is maxSeen,
-// the newest comment stamp it listed; after a page with a next page it lies
-// just before maxSeen (more): GitHub stamps whole seconds, and the comments
-// of maxSeen's second can go on on the next page, which a leg that stops
-// there — its page bound, the run's deadline, the process's end — has not
-// listed. With maxSeen there, an orphan on that next page in that second
-// counted as held, the next run moved the cursor past it without holding
-// it, and once its parent issue was mapped no run listed it again (P7 of
-// PR #529). One timestamp, written with each page's cursor (issue #474):
-// the list of held comment ids it replaces was written again after every
-// comment page and carried in every later cursor commit — in a bounded
-// catch-up of 1000 pages of 100 orphans 0.9 MB of JSON, about 240 MB of WAL
-// and 20–28 s of database time per run.
-func orphansUntil(maxSeen time.Time, more bool) json.RawMessage {
-	until := maxSeen.UTC()
-	if more {
-		until = until.Add(-time.Nanosecond)
-	}
-	b, _ := json.Marshal(map[string]time.Time{"orphans_until": until})
+// orphansUntil is the cursor key, beside the legs, that records the newest
+// comment stamp the leg listed so far in this run (maxSeen): a comment at or
+// before it was listed by this run, so a later run knows it held it already
+// if it was an orphan (holdOrphans). One timestamp, written with each page's
+// cursor (issue #474): the list of held comment ids it replaces was written
+// again after every comment page and carried in every later cursor commit —
+// in a bounded catch-up of 1000 pages of 100 orphans 0.9 MB of JSON, about
+// 240 MB of WAL and 20–28 s of database time per run.
+func orphansUntil(maxSeen time.Time) json.RawMessage {
+	b, _ := json.Marshal(map[string]time.Time{"orphans_until": maxSeen.UTC()})
 	return b
 }
 
