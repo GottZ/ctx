@@ -234,49 +234,54 @@ func forgeSeenJSON(seen *ForgeSeen) (any, error) {
 // block out of the project's scope — the 404 a resolution gives there;
 // nothing written). Only rows with a stamp or a snapshot to drop are
 // written — a repeated reset of 100 000 mappings rewrote every row (WAL,
-// dead tuples) to change nothing. It returns the rows it changed and the
-// entity kinds among them (the legs whose fetch cursor the caller holds).
-// Tx-bound; the caller holds the project row, the mapping rows come after it.
+// dead tuples) to change nothing; n counts the rows it changed. kinds are
+// the entity kinds of the mappings the reset covers, written or not: the
+// legs whose fetch cursor the caller holds — an entity whose forge stamp
+// went back behind the leg's since is listed again by the leg, not by the
+// NULL stamp, so a mapping without a stamp needs the hold as much. Tx-bound;
+// the caller holds the project row, the mapping rows come after it.
 func ResetForgeStamps(ctx context.Context, tx pgx.Tx, projectID, scope, blockID string) (found bool, n int, kinds []string, err error) {
 	var block any
 	if blockID != "" {
-		var one int
+		var kind string
 		err := tx.QueryRow(ctx, `
-			SELECT 1 FROM context_project_sync_map m
+			SELECT m.entity_kind FROM context_project_sync_map m
 			  JOIN context_blocks b ON b.id = m.block_id
 			 WHERE m.project_id = $1::uuid AND m.block_id = $2::uuid AND b.scope = $3 AND NOT b.is_archived
-			   FOR NO KEY UPDATE OF m`, projectID, blockID, scope).Scan(&one)
+			   FOR NO KEY UPDATE OF m`, projectID, blockID, scope).Scan(&kind)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, 0, nil, nil
 		}
 		if err != nil {
 			return false, 0, nil, fmt.Errorf("store: reset forge stamps: %w", err)
 		}
-		block = blockID
+		block, kinds = blockID, []string{kind}
+	} else {
+		// One index probe per kind on the mapping's primary key
+		// (project_id, entity_kind, …), not a scan of the project's rows.
+		var issues, comments bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM context_project_sync_map WHERE project_id = $1::uuid AND entity_kind = 'issue'),
+			       EXISTS (SELECT 1 FROM context_project_sync_map WHERE project_id = $1::uuid AND entity_kind = 'comment')`,
+			projectID).Scan(&issues, &comments); err != nil {
+			return false, 0, nil, fmt.Errorf("store: reset forge stamps: %w", err)
+		}
+		if issues {
+			kinds = append(kinds, "issue")
+		}
+		if comments {
+			kinds = append(kinds, "comment")
+		}
 	}
-	rows, err := tx.Query(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE context_project_sync_map
 		   SET forge_updated_at = NULL, metadata = metadata - 'forge_seen'
 		 WHERE project_id = $1::uuid AND ($2::uuid IS NULL OR block_id = $2::uuid)
-		   AND (forge_updated_at IS NOT NULL OR metadata ? 'forge_seen')
-		RETURNING entity_kind`, projectID, block)
+		   AND (forge_updated_at IS NOT NULL OR metadata ? 'forge_seen')`, projectID, block)
 	if err != nil {
 		return false, 0, nil, fmt.Errorf("store: reset forge stamps: %w", err)
 	}
-	defer rows.Close()
-	seen := map[string]bool{}
-	for rows.Next() {
-		var k string
-		if err := rows.Scan(&k); err != nil {
-			return false, 0, nil, fmt.Errorf("store: reset forge stamps: %w", err)
-		}
-		n++
-		if !seen[k] {
-			seen[k] = true
-			kinds = append(kinds, k)
-		}
-	}
-	return true, n, kinds, rows.Err()
+	return true, int(tag.RowsAffected()), kinds, nil
 }
 
 // LockProjectForCursor locks the project row FOR NO KEY UPDATE inside the

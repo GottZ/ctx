@@ -9,6 +9,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -82,7 +83,7 @@ func TestForgeResolveArchivedBlockStampReset(t *testing.T) {
 
 // A project-wide reset rewrites only the mappings that have a stamp or a
 // snapshot to drop, and answers the count it changed: a second reset leaves
-// every row version and the cursor as they are.
+// every row version as it is (it still holds the leg).
 func TestForgeResolveResetAllWithNothingToReset(t *testing.T) {
 	e := newFCMEnv(t)
 	ctx := context.Background()
@@ -98,16 +99,13 @@ func TestForgeResolveResetAllWithNothingToReset(t *testing.T) {
 		}
 		return v
 	}
-	v0, s0 := versions(), e.snapshot(t, ids, []string{proj.ID})
+	v0 := versions()
 	code, body, raw := e.do(t, e.h, e.adminA, "forge-stamp-reset", map[string]any{"project_id": proj.ID, "all": true})
-	if code != http.StatusOK || body["reset"] != float64(0) {
-		t.Errorf("the second reset: %d %s, want reset 0", code, raw)
+	if code != http.StatusOK || body["reset"] != float64(0) || fmt.Sprint(body["legs"]) != "[issues]" {
+		t.Errorf("the second reset: %d %s, want reset 0 and the issue leg held", code, raw)
 	}
 	if v1 := versions(); v1 != v0 {
 		t.Errorf("the second reset rewrote mapping rows: row versions %s -> %s", v0, v1)
-	}
-	if s1 := e.snapshot(t, ids, []string{proj.ID}); s1 != s0 {
-		t.Errorf("the second reset changed state:\nbefore %s\nafter  %s", s0, s1)
 	}
 }
 
