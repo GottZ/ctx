@@ -6,13 +6,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
-	"github.com/GottZ/ctx/internal/util"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -38,89 +36,47 @@ import (
 // internal/digest from importing internal/config. Empty or a German tag keeps
 // the frozen German stub, every other tag renders English; both callers on the
 // production path pass cfg.Dream.Language.
+//
+// The map is capped at maxMapBytes (issue #518): below the cap it is what it
+// always was, above it says what it leaves out (see mapBuilder), and the run
+// holds memory bounded by the cap rather than by the corpus. Result reports
+// the map this run wrote; it is the zero value when the run wrote none (off,
+// stub, an empty source).
 func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Registry,
-	mode, language, tenantScope, homeScope string, readScopes []string) error {
+	mode, language, tenantScope, homeScope string, readScopes []string) (Result, error) {
 	if blocktypes == nil {
-		return fmt.Errorf("digest: nil block-type registry (wiring bug)")
+		return Result{}, fmt.Errorf("digest: nil block-type registry (wiring bug)")
 	}
 	set := blocktypes.SnapshotForTenant(ctx, tenantScope)
 
 	// W-E: the mode decides BEFORE the source query. That order is the whole
-	// point — the corpus scan (no LIMIT, no cursor, the whole result set as
-	// []store.BlockMeta) is what makes the linear map untenable at scale, so a
-	// mode that "only skips the line building" would leave the expensive half in
-	// place.
+	// point — the corpus scan (no LIMIT over the read window) is what makes the
+	// linear map expensive at scale, so a mode that "only skips the line
+	// building" would leave the expensive half in place.
 	switch Normalize(mode) {
 	case ModeOff:
 		slog.Debug("digest: off, leaving the topic map untouched", "scope", homeScope)
-		return nil
+		return Result{}, nil
 	case ModeStub:
-		return writeStub(ctx, pool, set, homeScope, language)
+		return Result{}, writeStub(ctx, pool, set, homeScope, language)
 	}
 
-	// Fetch block metadata (no content), sieved by digest.include (WF T8,
-	// design/01 §4.4 #13): an unregistered type is absent from the allowlist
-	// and therefore fail-closed out of the topic-map source (§5.1).
-	blocks, err := fetchBlockMeta(ctx, pool, readScopes, set.DigestTypes())
-	if err != nil {
-		return fmt.Errorf("digest: fetch meta: %w", err)
+	// Block metadata (no content), sieved by digest.include (WF T8, design/01
+	// §4.4 #13): an unregistered type is absent from the allowlist and
+	// therefore fail-closed out of the topic-map source (§5.1).
+	b := newMapBuilder(homeScope, maxMapBytes)
+	if err := scanMapRows(ctx, pool, readScopes, set.DigestTypes(), b); err != nil {
+		return Result{}, fmt.Errorf("digest: fetch meta: %w", err)
 	}
 
-	if len(blocks) == 0 {
+	if b.blocks == 0 {
 		slog.Info("digest: no blocks found, skipping", "scope", homeScope)
-		return nil
+		return Result{}, nil
 	}
 
-	// Group by category.
-	categories := make(map[string][]store.BlockMeta)
-	for _, b := range blocks {
-		categories[b.Category] = append(categories[b.Category], b)
-	}
-
-	// Sort category names alphabetically.
-	catNames := make([]string, 0, len(categories))
-	for cat := range categories {
-		catNames = append(catNames, cat)
-	}
-	sort.Strings(catNames)
-
-	// Build the compact index text.
-	var sb strings.Builder
-	fmt.Fprintf(&sb,
-		"Context Store Index | scope:%s | %d blocks | %d categories | %s\n",
-		homeScope, len(blocks), len(catNames), time.Now().UTC().Format("2006-01-02"),
-	)
-
-	for _, cat := range catNames {
-		catBlocks := categories[cat]
-		// Sort blocks by title within each category.
-		sort.Slice(catBlocks, func(i, j int) bool {
-			return catBlocks[i].Title < catBlocks[j].Title
-		})
-
-		fmt.Fprintf(&sb, "\n%s (%d)\n", cat, len(catBlocks))
-		for _, b := range catBlocks {
-			// ID prefix: first 8 chars.
-			idPrefix := b.ID
-			if len(idPrefix) > 8 {
-				idPrefix = idPrefix[:8]
-			}
-
-			// Title truncation: max 70 runes (rune-aware — a byte slice can split
-			// a multi-byte char, leaving invalid UTF-8 that fails the upsert: 22021).
-			title := util.TruncateRunes(b.Title, 70)
-
-			// Scope annotation: append [scope] if different from homeScope.
-			scopeAnnotation := ""
-			if b.Scope != homeScope {
-				scopeAnnotation = " [" + b.Scope + "]"
-			}
-
-			fmt.Fprintf(&sb, "  %s %s%s\n", idPrefix, title, scopeAnnotation)
-		}
-	}
-
-	indexContent := sb.String()
+	date := time.Now().UTC().Format("2006-01-02")
+	m := b.render(date)
+	indexContent := m.text
 
 	// Upsert as block: category=index, title=topic-map-{scope}.
 	// Welle 47 (W47-NEU-A): the metadata KEY is_meta=true (classify INPUT —
@@ -137,15 +93,19 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 	indexMetadata := map[string]any{
 		"source":         "context-digest",
 		"is_meta":        true,
-		"generated_at":   time.Now().UTC().Format("2006-01-02"),
+		"generated_at":   date,
 		"scope":          homeScope,
-		"block_count":    len(blocks),
-		"category_count": len(catNames),
+		"block_count":    m.blocks,
+		"category_count": m.categories,
+	}
+	if m.truncated {
+		indexMetadata["truncated"] = true
+		indexMetadata["listed_blocks"] = m.listed
 	}
 
 	block, err := store.UpsertBlock(ctx, pool, "index", indexTitle, indexContent, indexTags, indexMetadata, homeScope, true, store.SensitivityWrite{}, "")
 	if err != nil {
-		return fmt.Errorf("digest: upsert topic map: %w", err)
+		return Result{}, fmt.Errorf("digest: upsert topic map: %w", err)
 	}
 
 	// Welle 44 / WF T4 hook: classify type_name from the registry snapshot
@@ -160,12 +120,20 @@ func RunDigest(ctx context.Context, pool *pgxpool.Pool, blocktypes *blocktype.Re
 
 	slog.Info("digest: topic map updated",
 		"scope", homeScope,
-		"blocks", len(blocks),
-		"categories", len(catNames),
+		"blocks", m.blocks,
+		"categories", m.categories,
 		"content_length", len(indexContent),
+		"listed_blocks", m.listed,
+		"truncated", m.truncated,
 	)
 
-	return nil
+	return Result{Listed: m.listed, Truncated: m.truncated}, nil
+}
+
+// Result is what a run wrote into the topic map.
+type Result struct {
+	Listed    int  // blocks the map lists by line
+	Truncated bool // the map lists fewer blocks than its source holds (maxMapBytes)
 }
 
 // classifyFollowUpTimeout bounds the type classification after a topic map's
@@ -310,13 +278,15 @@ func writeStub(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, home
 	return nil
 }
 
-// fetchBlockMeta retrieves non-archived block metadata for the given scopes,
+// scanMapRows streams the non-archived blocks of the given scopes into b,
 // restricted to the digest.include type allowlist (WF T8). digestTypes is a
 // code-owned bind value from the run's policy snapshot, never user input; an
-// empty list is legitimate policy ("nothing digests") and yields no rows.
-func fetchBlockMeta(ctx context.Context, pool *pgxpool.Pool, readScopes, digestTypes []string) ([]store.BlockMeta, error) {
+// empty list is legitimate policy ("nothing digests") and yields no rows. The
+// order by category is what b relies on (rows grouped by category); the order
+// by title within keeps the order the uncapped map's ties have always had.
+func scanMapRows(ctx context.Context, pool *pgxpool.Pool, readScopes, digestTypes []string, b *mapBuilder) error {
 	rows, err := pool.Query(ctx,
-		`SELECT id, title, category, tags, scope, updated_at
+		`SELECT id, title, category, scope
 		FROM context_blocks
 		WHERE scope = ANY($1::text[]) AND NOT is_archived
 		  AND type_name = ANY($2::text[])
@@ -324,21 +294,19 @@ func fetchBlockMeta(ctx context.Context, pool *pgxpool.Pool, readScopes, digestT
 		readScopes, digestTypes,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("query block meta: %w", err)
+		return fmt.Errorf("query block meta: %w", err)
 	}
 	defer rows.Close()
 
-	var results []store.BlockMeta
 	for rows.Next() {
-		var b store.BlockMeta
-		if err := rows.Scan(&b.ID, &b.Title, &b.Category, &b.Tags, &b.Scope, &b.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan block meta: %w", err)
+		var r mapRow
+		if err := rows.Scan(&r.id, &r.title, &r.category, &r.scope); err != nil {
+			return fmt.Errorf("scan block meta: %w", err)
 		}
-		results = append(results, b)
+		b.add(r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows error: %w", err)
+		return fmt.Errorf("rows error: %w", err)
 	}
-
-	return results, nil
+	return nil
 }

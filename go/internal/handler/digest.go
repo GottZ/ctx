@@ -82,7 +82,7 @@ func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
 	// Run digest. The request path resolves the policy overlay against the
 	// caller's own tenant (HomeScope) — the same scope it writes the topic-map
 	// under (T12: tenant key == write scope on the request path).
-	err := digest.RunDigest(ctx, h.pool, h.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, authResult.HomeScope, authResult.HomeScope, window)
+	res, err := digest.RunDigest(ctx, h.pool, h.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, authResult.HomeScope, authResult.HomeScope, window)
 	if err != nil {
 		logRequestError(ctx, "digest: run error", "error", err, "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -108,6 +108,12 @@ func (h *DigestHandler) HandleDigest(w http.ResponseWriter, r *http.Request) {
 		"contentLength": contentLength,
 		"rootMapTitle":  rootMapTitle,
 		"rootMapLength": rootMapLength,
+		// What the topic map this request wrote lists (issue #518): it is
+		// capped, and a map that leaves blocks out says so here as well as in
+		// its text. 0 and false when the request wrote no map (stub, off, an
+		// empty window).
+		"listedBlocks": res.Listed,
+		"truncated":    res.Truncated,
 	})
 }
 
