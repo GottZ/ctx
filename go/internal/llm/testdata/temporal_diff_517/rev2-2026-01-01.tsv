@@ -1,0 +1,6 @@
+# Differential test of the temporal rules (issue #517): corpus rev2, asked on 2026-01-01 at noon UTC.
+# question, rules output at c367fd44 (the base of issue #517); for a changed output also its verdict (fixed / disputed / broken), the output now and a note.
+Was lief seit 2026?	["seit 2026?|2026-01-01..2026-01-01|range"] linear=1.00
+Was lief bis 2026?	["bis 2026?|2026-01-01..2026-12-31|range"] linear=1.00
+Was lief vor 2026?	["vor 2026?|2025-12-31..|until"] linear=1.00
+Was lief nach 2025?	["nach 2025?|2026-01-01..|from"] linear=1.00

@@ -51,13 +51,13 @@ func TestRules_SecondHoldoutAgainstTheBase(t *testing.T) {
 				t.Fatalf("%s:%d: %d columns, want 7", file, line, len(col))
 			}
 			class, rule, spec, disputed, q := col[0], col[2], col[3], col[4] == "s", col[5]
-			baseFired, baseDates := col[6] != "nil", []TemporalDate(nil)
-			if baseFired {
+			var baseDates []TemporalDate
+			if col[6] != "nil" {
 				if err := json.Unmarshal([]byte(col[6]), &baseDates); err != nil {
 					t.Fatalf("%s:%d: the base column is no JSON list of dates: %v", file, line, err)
 				}
 			}
-			baseOK, _, err := holdout506Right(rule, spec, baseFired, baseDates, day)
+			baseOK, _, err := holdout506Right(rule, spec, baseDates, day)
 			if err != nil {
 				t.Fatalf("%s:%d: %v", file, line, err)
 			}
@@ -66,7 +66,7 @@ func TestRules_SecondHoldoutAgainstTheBase(t *testing.T) {
 			if r != nil {
 				nowDates = r.Dates
 			}
-			nowOK, why, err := holdout506Right(rule, spec, r != nil, nowDates, day)
+			nowOK, why, err := holdout506Right(rule, spec, nowDates, day)
 			if err != nil {
 				t.Fatalf("%s:%d: %v", file, line, err)
 			}
@@ -138,8 +138,10 @@ const (
 // (rule "ja": it answers and its dates fit; "nein": none answers; "egal":
 // none answers, or its dates fit). The dates fit the expectation spec when
 // some alternative of it covers the same days as the dates of the answer
-// (holdout506Fits).
-func holdout506Right(rule, spec string, fired bool, dates []TemporalDate, day time.Time) (bool, string, error) {
+// (holdout506Fits). A rule answers when it gives a date: a result without
+// one answers nothing (issue #517).
+func holdout506Right(rule, spec string, dates []TemporalDate, day time.Time) (bool, string, error) {
+	fired := len(dates) > 0
 	switch rule {
 	case "ja":
 		if !fired {

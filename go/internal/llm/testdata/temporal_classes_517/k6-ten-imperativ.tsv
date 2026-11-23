@@ -1,0 +1,73 @@
+# Class corpus of issue #517: a word on -ten at the place of a finite verb, and a clause of an imperative. Written with its expectations before any rule change (sha256 of the list 0bf6c047c89146c9).
+# Asked at noon UTC of the day. Expected dates: "-" none, "*" any; otherwise alternatives split by " OR ", the dates of one alternative by ";" (holdout506Fits). Hour: the hour of the first date, "-" no date carries one, "*" not judged. Tense: DetectVerbTense, "notpast" future or neutral, "any" not judged.
+# id, day, kind (F: the new reading is right, F2: the first-name reading, G: a counter-case), expected rule (ja/nein/egal), expected dates, hour, tense, disputed (s or -), question, the dates of the rules at c367fd44 as JSON or nil, the tense at c367fd44.
+K6-01	2026-11-22	F	nein	-	*	notpast	-	ab 2050 punkten gilt der block als relevant	nil	past
+K6-02	2026-11-22	F	nein	-	*	notpast	-	ab 2025 punkten gilt der block als relevant	nil	past
+K6-03	2026-11-22	F	ja	2026-11-27	*	any	-	Welche Teams punkten am Freitag?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K6-04	2026-11-22	F	ja	2026-11-23	*	any	-	Welche Jobs belasten am Montag die Datenbank?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-05	2026-11-22	F	ja	2026-11-24	*	any	-	Welche Server rasten am Dienstag aus?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K6-06	2026-11-22	F	ja	2026-11-23	*	any	-	Welche Features boosten am Montag die Conversion?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-07	2026-11-22	F	ja	2026-11-25	*	any	-	Welche Bots tweeten am Mittwoch?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]	neutral
+K6-08	2026-11-22	F	ja	2026-11-23	*	any	-	Am Montag punkten wir mit dem neuen Feature	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-09	2026-11-22	F	ja	2026-11-27	*	any	-	Am Freitag lasten die Jobs den Cluster aus	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K6-10	2026-11-22	F	ja	2026-11-24	*	any	-	Am Dienstag texten wir die Kunden an	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K6-11	2026-11-22	F	nein	-	*	notpast	-	Ab 2024 punkten Blöcke mit Links höher?	nil	past
+K6-12	2026-11-22	F	nein	-	*	notpast	-	ab 2030 punkten zählt der block	nil	past
+K6-13	2026-11-22	F	ja	2026-11-25	*	any	-	Welche Kunden pachten am Mittwoch neue Server?	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]	past
+K6-14	2026-11-22	F	ja	2026-11-26	*	any	-	Am Donnerstag rüsten wir die Nodes auf	[{"ref":"Donnerstag","date":"2026-11-19","end":null,"dir":"past"}]	past
+K6-15	2026-11-22	F	ja	2026-11-23	*	any	-	Welche Alerts lasten am Montag das Team aus?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-16	2026-11-22	G	ja	2026-11-20	*	any	-	Wann landeten die Pakete am Freitag?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K6-17	2026-11-22	G	ja	2026-11-19	*	any	-	Welche Jobs scheiterten am Donnerstag?	[{"ref":"Donnerstag","date":"2026-11-19","end":null,"dir":"past"}]	past
+K6-18	2026-11-22	G	ja	2026-11-16	*	any	-	Am Montag crashten die Worker	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-19	2026-11-22	G	ja	2026-11-17	*	any	-	Welche Devs mergten am Dienstag?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K6-20	2026-11-22	G	ja	2026-11-18	*	any	-	Am Mittwoch pushten wir den Fix	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]	past
+K6-21	2026-11-22	G	ja	2026-11-20	*	any	-	Welche Tests flakten am Freitag?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K6-22	2026-11-22	G	ja	2026-11-16	*	any	-	Wann starteten die Container am Montag neu?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-23	2026-11-22	G	ja	2026-11-20	*	any	-	Am Freitag parkten wir das Thema	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K6-24	2026-11-22	G	ja	2026-11-16	*	any	-	Welche Kunden kündigten am Montag?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-25	2026-11-22	G	ja	2026-11-19	*	any	-	Am Donnerstag planten wir den Rollout	[{"ref":"Donnerstag","date":"2026-11-19","end":null,"dir":"past"}]	past
+K6-26	2026-11-22	G	ja	2026-11-18	*	any	-	Welche Teams lernten am Mittwoch das neue Tool kennen?	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]	past
+K6-27	2026-11-22	G	ja	2026-11-17	*	any	-	Wann merkten wir am Dienstag den Fehler?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K6-28	2026-11-22	G	ja	>=2024-01-01	*	any	-	Ab 2024 galten neue Limits	[{"ref":"ab 2024 galten neue","date":"2024-01-01","end":null,"dir":"from"}]	past
+K6-29	2026-11-22	G	nein	-	*	notpast	-	Bei 100 punkten gilt der Test als bestanden	nil	neutral
+K6-30	2026-11-22	G	ja	2026-11-16	*	any	-	Am Montag punkteten die Blöcke höher	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-31	2026-11-22	G	ja	2026-11-20	*	any	-	Welche Teams punkteten am Freitag?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K6-32	2026-11-22	G	ja	2026-11-17	*	any	-	Am Dienstag belasteten die Jobs die DB	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K6-33	2026-11-22	F	ja	2026-11-27;2026-11-16 OR 2026-11-27	*	any	-	Lass uns am Freitag nochmal über den Bug reden, den wir am Montag hatten	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K6-34	2026-11-22	F	ja	2026-11-23;2026-11-20 OR 2026-11-23	*	any	-	Lass uns am Montag das Review machen, das am Freitag ausgefallen ist	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-35	2026-11-22	F	ja	2026-11-25;2026-11-15 OR 2026-11-25	*	any	-	Lasst uns am Mittwoch über das Incident reden, das wir am Sonntag hatten	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]	past
+K6-36	2026-11-22	F	ja	2026-11-24 OR 2026-11-24;2026-11-21	*	any	-	Lass uns am Dienstag den Fix ausrollen, den wir gestern gebaut haben	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K6-37	2026-11-22	F	ja	2026-11-27;2026-11-19 OR 2026-11-27	*	any	-	Lass uns Freitag deployen, was wir am Donnerstag gemerged haben	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K6-38	2026-11-22	F	ja	2026-11-27;2026-11-16 OR 2026-11-27	*	any	-	Let's talk on Friday about the bug we had on Monday	[{"ref":"Friday","date":"2026-11-20","end":null,"dir":"past"}]	past
+K6-39	2026-11-22	F	ja	2026-11-23;2026-11-20 OR 2026-11-23	*	any	-	Lass mal am Montag pairen, was am Freitag liegen geblieben ist	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-40	2026-11-22	F	ja	2026-11-27;2026-11-16 OR 2026-11-27	*	any	-	Erinnere mich am Freitag an den Bug, den wir am Montag hatten	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K6-41	2026-11-22	F	ja	2026-11-23;2026-11-20 OR 2026-11-23	*	any	-	Schau dir am Montag an, was am Freitag kaputt gegangen ist	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-42	2026-11-22	F	ja	2026-11-24 OR 2026-11-24;2026-11-15	*	any	-	Bitte am Dienstag die Logs prüfen, die wir am Sonntag gesichert haben	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K6-43	2026-11-22	F	ja	2026-11-23	*	any	-	Lass uns am Montag deployen, das hatten wir so besprochen	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-44	2026-11-22	F	ja	2026-11-25;2026-11-16 OR 2026-11-25	*	any	-	Lass uns am Mittwoch reden. Am Montag war alles kaputt.	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]	past
+K6-45	2026-11-22	F	ja	2026-11-26 OR 2026-11-26;2026-11-20	*	any	-	Lasst uns am Donnerstag den Bug fixen, der am Freitag aufgetaucht ist	[{"ref":"Donnerstag","date":"2026-11-19","end":null,"dir":"past"}]	past
+K6-46	2026-11-22	G	ja	2026-11-16	*	any	-	Der Bug am Montag, den wir gefixt hatten?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-47	2026-11-22	G	ja	2026-11-20	*	any	-	Das Meeting am Freitag, das abgesagt wurde?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K6-48	2026-11-22	G	ja	2026-11-17	*	any	-	Die Logs vom Dienstag, die gelöscht wurden	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K6-49	2026-11-22	G	ja	2026-11-16	*	any	-	Am Montag, was ist da passiert?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-50	2026-11-22	G	ja	2026-11-18	*	any	-	Der Deploy am Mittwoch, der fehlgeschlagen ist	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]	neutral
+K6-51	2026-11-22	G	ja	2026-11-16	*	any	-	Lass uns über den Bug reden, den wir am Montag hatten	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-52	2026-11-22	G	ja	2026-11-20	*	any	-	Lass uns klären, was am Freitag passiert ist	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K6-53	2026-11-22	G	ja	2026-11-16	*	any	-	Lass die Logs vom Montag liegen	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	neutral
+K6-54	2026-11-22	G	ja	2026-11-27	*	any	-	Lass uns am Freitag feiern	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K6-55	2026-11-22	G	ja	2026-11-27;2026-11-16 OR 2026-11-27	*	any	-	Wollen wir am Freitag über das reden, was am Montag schiefging?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K6-56	2026-11-22	G	ja	2026-11-19	*	any	-	Das Release am Donnerstag, das wir verschieben mussten?	[{"ref":"Donnerstag","date":"2026-11-19","end":null,"dir":"past"}]	past
+K6-57	2026-11-22	G	ja	2026-11-21	*	any	-	Der Alarm am Samstag, der niemanden geweckt hat?	[{"ref":"Samstag","date":"2026-11-21","end":null,"dir":"past"}]	past
+K6-58	2026-11-22	G	ja	2026-11-17	*	any	-	Und am Dienstag, was haben wir da beschlossen?	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K6-59	2026-11-22	G	ja	2026-11-16	*	any	-	Die Änderung vom Montag, die den Build gebrochen hat	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K6-60	2026-11-22	G	ja	2026-11-20	*	any	-	Lass uns nachsehen, wer am Freitag deployed hat	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+B6-01	2026-03-18	F	ja	2026-03-20;2026-03-16 OR 2026-03-20	*	any	-	Lass uns am Freitag über den Bug reden, den wir am Montag hatten	[{"ref":"Freitag","date":"2026-03-13","end":null,"dir":"past"}]	past
+B6-02	2026-03-18	F	ja	2026-03-23	*	any	-	Welche Teams punkten am Montag?	[{"ref":"Montag","date":"2026-03-16","end":null,"dir":"past"}]	past
+B6-03	2026-03-18	F	ja	2026-03-20	*	any	-	Am Freitag punkten wir mit dem Release	[{"ref":"Freitag","date":"2026-03-13","end":null,"dir":"past"}]	past
+B6-04	2026-03-18	F	nein	-	*	notpast	-	ab 2050 punkten gilt der Block als relevant	nil	past
+B6-05	2026-03-18	G	ja	2026-03-17	*	any	-	Welche Jobs scheiterten am Dienstag?	[{"ref":"Dienstag","date":"2026-03-17","end":null,"dir":"past"}]	past
+B6-06	2026-03-18	G	ja	2026-03-16	*	any	-	Am Montag parkten wir das Ticket	[{"ref":"Montag","date":"2026-03-16","end":null,"dir":"past"}]	past
+B6-07	2026-03-18	G	ja	2026-03-16	*	any	-	Der Bug am Montag, den wir gefixt hatten?	[{"ref":"Montag","date":"2026-03-16","end":null,"dir":"past"}]	past
+B6-08	2026-03-18	F	ja	2026-03-19;2026-03-17 OR 2026-03-19	*	any	-	Lasst uns am Donnerstag deployen, was am Dienstag gemerged wurde	[{"ref":"Donnerstag","date":"2026-03-12","end":null,"dir":"past"}]	past
+B6-09	2026-03-18	G	ja	2026-03-13	*	any	-	Lass uns klären, was am Freitag passiert ist	[{"ref":"Freitag","date":"2026-03-13","end":null,"dir":"past"}]	past
+B6-10	2026-03-18	G	ja	2026-03-13	*	any	-	Welche Teams punkteten am Freitag?	[{"ref":"Freitag","date":"2026-03-13","end":null,"dir":"past"}]	past

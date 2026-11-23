@@ -140,7 +140,7 @@ ab Jänner 2027	nil
 seit „März 2024“	2024-03-01|2026-11-21|range
 seit März 2024	2024-03-01|2026-11-21|range
 Was ist nach August 2026 passiert, also ab 2026-09?	2026-09-01||from
-Gibt es nach dem 2026-03-10 vor dem 2026-03-20 Einträge?	2026-03-10||past
+Gibt es nach dem 2026-03-10 vor dem 2026-03-20 Einträge?	2026-03-11|2026-03-19|range
 vor 3 Tagen	2026-11-18||past
 vor einer Woche	nil
 nach 3 Wochen	nil

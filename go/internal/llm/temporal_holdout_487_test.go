@@ -127,7 +127,9 @@ func holdoutJudge(e holdoutCase, r *TemporalResult, tense string, ref time.Time)
 	if (e.tense == "future" || e.tense == "neutral") && tense == "past" {
 		why = append(why, "tense past instead of "+e.tense)
 	}
-	fired := r != nil
+	// A result without a date answers nothing (issue #517): the query path
+	// would skip the LLM fallback for it and find no date to rank by.
+	fired := r != nil && len(r.Dates) > 0
 	if e.rule == "ja" && !fired {
 		why = append(why, "no rule answers")
 	}

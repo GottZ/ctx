@@ -1,0 +1,65 @@
+# Class corpus of issue #517: a year before an English participle used as an attribute. Written with its expectations before any rule change (sha256 of the list 8f3cf9b62db6d1b7).
+# Asked at noon UTC of the day. Expected dates: "-" none, "*" any; otherwise alternatives split by " OR ", the dates of one alternative by ";" (holdout506Fits). Hour: the hour of the first date, "-" no date carries one, "*" not judged. Tense: DetectVerbTense, "notpast" future or neutral, "any" not judged.
+# id, day, kind (F: the new reading is right, F2: the first-name reading, G: a counter-case), expected rule (ja/nein/egal), expected dates, hour, tense, disputed (s or -), question, the dates of the rules at c367fd44 as JSON or nil, the tense at c367fd44.
+K5-01	2026-11-22	F	nein	-	*	any	-	After 2021 failed logins the account locks	[{"ref":"after 2021 failed logins","date":"2022-01-01","end":null,"dir":"from"}]	past
+K5-02	2026-11-22	F	nein	-	*	any	-	After 2024 failed attempts, lock the account	[{"ref":"after 2024 failed attempts,","date":"2025-01-01","end":null,"dir":"from"}]	past
+K5-03	2026-11-22	F	nein	-	*	any	-	After 2022 failed requests the circuit breaker opens	nil	past
+K5-04	2026-11-22	F	nein	-	*	any	-	After 2025 retried jobs we stop	nil	neutral
+K5-05	2026-11-22	F	nein	-	*	any	-	Before 2024 processed events, the cache is cold	nil	neutral
+K5-06	2026-11-22	F	nein	-	*	any	-	After 2026 failed builds the pipeline pauses	[{"ref":"after 2026 failed builds","date":"2027-01-01","end":null,"dir":"from"}]	past
+K5-07	2026-11-22	F	nein	-	*	any	-	After 2023 queued messages the broker drops new ones	nil	neutral
+K5-08	2026-11-22	F	nein	-	*	any	-	after 2020 failed health checks the pod restarts	[{"ref":"after 2020 failed health","date":"2021-01-01","end":null,"dir":"from"}]	past
+K5-09	2026-11-22	F	nein	-	*	any	-	After 2027 dropped packets the link is marked down	nil	neutral
+K5-10	2026-11-22	F	nein	-	*	any	-	After 2021 rejected tokens the client gets banned	nil	neutral
+K5-11	2026-11-22	F	nein	-	*	any	-	Nach 2021 fehlgeschlagenen Logins sperrt das Konto	nil	neutral
+K5-12	2026-11-22	F	nein	-	*	any	-	Nach 2024 abgelehnten Requests greift das Rate-Limit	nil	past
+K5-13	2026-11-22	F	nein	-	*	any	-	After 2024 cached entries, eviction starts	nil	neutral
+K5-14	2026-11-22	F	nein	-	*	any	-	After 2022 indexed documents the search slows down	nil	neutral
+K5-15	2026-11-22	F	nein	-	*	any	-	After 2025 failed logins	[{"ref":"after 2025 failed logins","date":"2026-01-01","end":null,"dir":"from"}]	past
+K5-16	2026-11-22	F	nein	-	*	any	-	How many accounts lock after 2021 failed logins?	[{"ref":"after 2021 failed logins?","date":"2022-01-01","end":null,"dir":"from"}]	past
+K5-17	2026-11-22	F	nein	-	*	any	-	After 2028 completed runs we rotate keys	nil	neutral
+K5-18	2026-11-22	F	nein	-	*	any	-	After 2023 timed-out requests the node is drained	nil	neutral
+K5-19	2026-11-22	F	nein	-	*	any	-	After 2026 skipped tests the CI fails	nil	neutral
+K5-20	2026-11-22	F	nein	-	*	any	-	Ab 2024 gescheiterten Versuchen wird gesperrt	nil	past
+K5-21	2026-11-22	F	nein	-	*	any	-	After 2022 queued jobs, new ones are rejected	nil	neutral
+K5-22	2026-11-22	F	nein	-	*	any	s	After 2022 failed logins, users must reset their passwords	[{"ref":"after 2022 failed logins,","date":"2023-01-01","end":null,"dir":"from"}]	past
+K5-23	2026-11-22	F	nein	-	*	any	-	Before 2023 acknowledged alerts the pager keeps ringing	nil	neutral
+K5-24	2026-11-22	F	nein	-	*	any	-	after 2024 reported bugs we freeze the branch	nil	neutral
+K5-25	2026-11-22	F	nein	-	*	any	-	After 2048 failed logins the account locks	nil	past
+K5-26	2026-11-22	G	ja	<=2024-12-31	*	any	-	Before 2025 released versions had no SBOM	nil	past
+K5-27	2026-11-22	G	ja	2022-01-01..2026-11-22	*	any	-	Since 2022 merged PRs need two reviews	nil	past
+K5-28	2026-11-22	G	ja	>=2025-01-01	*	any	-	After 2024 deployed services must use TLS	[{"ref":"after 2024 deployed services","date":"2025-01-01","end":null,"dir":"from"}]	past
+K5-29	2026-11-22	G	ja	>=2026-01-01	*	any	-	After 2025 failed builds were retried automatically	[{"ref":"after 2025 failed builds","date":"2026-01-01","end":null,"dir":"from"}]	past
+K5-30	2026-11-22	G	ja	<=2022-12-31	*	any	-	Before 2023 archived logs were stored on tape	nil	past
+K5-31	2026-11-22	G	ja	2024-01-01..2026-11-22	*	any	-	Since 2024 signed commits are required	nil	neutral
+K5-32	2026-11-22	G	ja	>=2025-01-01	*	any	s	After 2024 failed logins were logged	[{"ref":"after 2024 failed logins","date":"2025-01-01","end":null,"dir":"from"}]	past
+K5-33	2026-11-22	G	ja	>=2026-01-01	*	any	-	After 2025 deprecated endpoints will be removed	nil	future
+K5-34	2026-11-22	G	ja	<=2023-12-31	*	any	-	Before 2024 created users have no MFA	[{"ref":"before 2024 created users","date":"2023-12-31","end":null,"dir":"until"}]	past
+K5-35	2026-11-22	G	ja	2023-01-01..2026-11-22	*	any	-	Since 2023 failed deployments trigger a rollback	[{"ref":"since 2023 failed deployments","date":"2023-01-01","end":"2026-11-22","dir":"range"}]	past
+K5-36	2026-11-22	G	ja	>=2023-01-01	*	any	-	After 2022 the failed logins dropped	[{"ref":"after 2022 the failed","date":"2023-01-01","end":null,"dir":"from"}]	past
+K5-37	2026-11-22	G	ja	2021-01-01..2026-11-22	*	any	-	Since 2021, merged PRs need review	[{"ref":"since 2021, merged prs","date":"2021-01-01","end":"2026-11-22","dir":"range"}]	past
+K5-38	2026-11-22	G	ja	<=2024-12-31	*	any	-	Before 2025, failed logins were not logged	[{"ref":"before 2025, failed logins","date":"2024-12-31","end":null,"dir":"until"}]	past
+K5-39	2026-11-22	G	ja	>=2026-01-01	*	any	-	After 2025 nothing failed	nil	past
+K5-40	2026-11-22	G	ja	2024-01-01..2026-11-22	*	any	-	Since 2024 we deployed weekly	[{"ref":"since 2024 we deployed","date":"2024-01-01","end":"2026-11-22","dir":"range"}]	past
+K5-41	2026-11-22	G	ja	>=2025-01-01	*	any	-	What changed after 2024?	[{"ref":"after 2024?","date":"2025-01-01","end":null,"dir":"from"}]	past
+K5-42	2026-11-22	G	ja	2022-01-01..2026-11-22	*	any	-	Since 2022 updated packages break the build	[{"ref":"since 2022 updated packages","date":"2022-01-01","end":"2026-11-22","dir":"range"}]	past
+K5-43	2026-11-22	G	ja	>=2027-01-01	*	any	-	After 2026 removed features are gone for good	[{"ref":"after 2026 removed features","date":"2027-01-01","end":null,"dir":"from"}]	past
+K5-44	2026-11-22	G	ja	<=2025-12-31	*	any	-	Before 2026 migrated tables use the old schema	nil	neutral
+K5-45	2026-11-22	G	ja	>=2024-01-01	*	any	-	After 2023 rotated keys expire faster	nil	neutral
+K5-46	2026-11-22	G	ja	2024-01-01..2026-11-22	*	any	-	Since 2024 reviewed PRs merge automatically	nil	past
+K5-47	2026-11-22	G	ja	>=2026-01-01	*	any	-	After 2025 failed logins lock the account	[{"ref":"after 2025 failed logins","date":"2026-01-01","end":null,"dir":"from"}]	past
+K5-48	2026-11-22	G	ja	2023-01-01..2026-11-22	*	any	-	Since 2023 deployed models are versioned	[{"ref":"since 2023 deployed models","date":"2023-01-01","end":"2026-11-22","dir":"range"}]	past
+K5-49	2026-11-22	G	ja	<=2023-12-31	*	any	-	Before 2024 merged branches were squashed	[{"ref":"before 2024 merged branches","date":"2023-12-31","end":null,"dir":"until"}]	past
+K5-50	2026-11-22	G	ja	>=2025-01-01	*	any	-	After 2024 failed jobs alert the on-call	[{"ref":"after 2024 failed jobs","date":"2025-01-01","end":null,"dir":"from"}]	past
+K5-51	2026-11-22	G	ja	2022-01-01..2026-11-22	*	any	-	Since 2022 cached responses expire after an hour	nil	neutral
+K5-52	2026-11-22	G	ja	<=2025-12-31	*	any	-	Before 2026 signed releases used GPG	nil	neutral
+B5-01	2026-03-18	F	nein	-	*	any	-	After 2021 failed logins the account locks	[{"ref":"after 2021 failed logins","date":"2022-01-01","end":null,"dir":"from"}]	past
+B5-02	2026-03-18	G	ja	<=2024-12-31	*	any	-	Before 2025 released versions had no SBOM	nil	past
+B5-03	2026-03-18	F	nein	-	*	any	-	After 2023 failed attempts the user is locked out	[{"ref":"after 2023 failed attempts","date":"2024-01-01","end":null,"dir":"from"}]	past
+B5-04	2026-03-18	G	ja	2022-01-01..2026-03-18	*	any	-	Since 2022 merged PRs need two approvals	nil	past
+B5-05	2026-03-18	F	nein	-	*	any	-	After 2024 dropped connections the pool resets	nil	neutral
+B5-06	2026-03-18	G	ja	>=2026-01-01	*	any	-	After 2025 deprecated APIs will be removed	nil	future
+B5-07	2026-03-18	F	nein	-	*	any	-	After 2022 queued jobs, new ones are rejected	nil	neutral
+B5-08	2026-03-18	G	ja	2024-01-01..2026-03-18	*	any	-	Since 2024 signed images are mandatory	nil	neutral
+B5-09	2026-03-18	F	nein	-	*	any	-	After 2026 failed builds the runner is paused	[{"ref":"after 2026 failed builds","date":"2027-01-01","end":null,"dir":"from"}]	past
+B5-10	2026-03-18	G	ja	<=2022-12-31	*	any	-	Before 2023 created accounts lack MFA	[{"ref":"before 2023 created accounts","date":"2022-12-31","end":null,"dir":"until"}]	past

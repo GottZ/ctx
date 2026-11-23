@@ -1,0 +1,494 @@
+# Differential test of the temporal rules (issue #517): corpus all, asked on 2026-11-22 at noon UTC.
+# question, rules output at c367fd44 (the base of issue #517); for a changed output also its verdict (fixed / disputed / broken), the output now and a note.
+Was passiert nach 2000 Requests?	nil
+Was passiert vor 2048 Tokens?	nil
+Warum bricht die Ausgabe bis 2025 Zeichen ab?	nil
+Wird der Kontext ab 2048 Tokens abgeschnitten?	nil
+Seit 2024 Zeilen ist die Datei zu groß.	nil
+Bis 2048 Bytes passt es in den Puffer.	nil
+Nach 2025 Anfragen greift das Rate-Limit.	nil
+Ab 2026 Blöcken wird die Suche langsamer?	nil
+Vor 2030 Millisekunden kommt keine Antwort.	nil
+Wie verhält sich das System nach 2024 Iterationen?	nil
+What happens after 2048 tokens?	nil
+What happens before 2048 tokens are reached?	nil
+Does the cache evict after 2025 entries?	nil
+Is the output truncated until 2048 characters?	nil
+Since 2024 lines were added the build is slow.	nil
+Between 2020 and 2048 tokens the latency doubles.	nil
+From 2024 to 2048 tokens the model degrades.	nil
+Ab 2024 Einträgen wird paginiert?	nil
+Nach 2026 Versuchen gibt der Client auf.	nil
+Bis 2023 Treffer werden angezeigt.	nil
+Ab 2021 MB wird es eng im Speicher.	nil
+Ab 2022 Nutzern brauchen wir mehr Replikas.	nil
+Before 2025 requests per second the service is fine.	nil
+After 2024 retries the job is marked failed.	nil
+Zeig mir die Zeilen ab 2024.	nil
+Zeig mir die Logzeilen nach 2025.	nil
+Welche Tokens kommen nach 2048?	nil
+Was steht in Zeile ab 2024?	nil
+Zeig mir alle Issues nach 2025.	nil
+Welche PRs kamen nach 2026?	nil
+Zeig die Commits seit 2023.	["seit 2023.|2023-01-01..2026-11-22|range"] linear=1.00
+Liste die Einträge bis 2025.	nil
+Welche Ports sind zwischen 2020 und 2030?	nil
+Welche Ports liegen zwischen 2020 und 2026?	nil
+Gib mir die Blöcke ab 2024.	["ab 2024.|2024-01-01..|from"] linear=1.00
+Show me the lines after 2024.	nil
+Show me the log lines until 2025.	nil
+List the issues since 2023.	nil
+Which ports are between 2020 and 2030?	nil
+Which PRs came after 2025?	nil
+Show the tokens before 2048.	nil
+Was kam in der Liste nach 2025?	nil
+Was war in der Tabelle vor 2026?	nil
+Welcher Wert folgt nach 2024?	nil
+Was folgt nach 2025?	["nach 2025?|2026-01-01..|from"] linear=1.00
+Zähle von 2020 bis 2026.	nil
+Count from 2020 to 2026.	nil
+Was steht in den Zeilen von 2021 bis 2025?	nil
+Show me lines from 2021 to 2025.	nil
+Welche Issues liegen zwischen 2024 und 2026?	nil
+Which issues are between 2024 and 2026?	nil
+Die Antwort wird nach 2048 abgeschnitten.	nil
+Der Kontext reicht bis 2048.	nil
+Das Embedding hat Dimensionen bis 2048.	nil
+The context window goes up to 2048.	nil
+The embedding goes until 2048.	nil
+Was bedeutet Fehlercode ab 2024?	nil
+Läuft der Dienst auf Port ab 2024?	nil
+Welcher Dienst lauscht auf Ports ab 2025?	nil
+Port nach 2024 ist belegt, warum?	nil
+Gibt es einen Konflikt bei Ports vor 2025?	nil
+Blockiert die Firewall Ports bis 2026?	nil
+Does the firewall block ports above 2024 or after 2024?	nil
+Is anything listening on ports since 2025?	nil
+Was ist Ticket nach 2024?	nil
+Was macht der Fix nach 2025 genau?	nil
+Was hat sich seit #2024 geändert?	nil
+Was änderte sich seit PR 2024?	nil
+Was hat sich nach Issue 2025 geändert?	nil
+What changed after PR 2025?	nil
+What changed since #2023?	nil
+What changed since issue 2024?	nil
+Was steht in Kommentar ab 2024?	nil
+Was ist neu ab 2024.1?	nil
+Was ändert sich ab Version 2024.2?	nil
+Was ist neu seit 2024.3?	nil
+Was ist neu nach 2025.1?	nil
+What is new since 2024.1?	nil
+What changed after 2025.2?	nil
+Funktioniert das bis 2024.3.1?	nil
+Is it supported until 2025.1?	nil
+Was ist neu ab v2024?	nil
+Was gilt vor 2024.04?	nil
+Kostet es ab 2025 Euro mehr?	nil
+Gilt der Rabatt ab 2024 €?	nil
+Ab 2026€ fällt Versand weg.	nil
+Was kostet es bis 2025 EUR?	nil
+Is shipping free after 2024 dollars?	nil
+Was zahlen wir nach 2025 Stunden?	nil
+Zahlen wir ab 2024 Stück weniger?	nil
+Ist das Budget bis 2025 ausgeschöpft?	nil
+Wie viel kostet es ab 2023?	nil
+Was kostet der Server bis 2024?	nil
+Was läuft nach 2030 Uhr?	nil
+Wer hat nach 2030 Uhr Bereitschaft?	nil
+Läuft das Backup ab 2045?	nil
+Ist nach 2030 noch jemand im Büro?	nil
+Was passiert ab 2100 Uhr?	nil
+Is anyone on call after 2030 hours?	nil
+Does the cron run after 2045?	nil
+Startet der Job vor 2030?	nil
+Wer ist bis 2030 erreichbar?	nil
+Wer ist ab 2045 online?	nil
+Was passiert nach 2024 in der Queue?	nil
+Was steht bis 2025 in der Ausgabe?	nil
+Seit 2024 im Index liegen zu viele Blöcke?	nil
+Ab 2025 im Kontext wird es langsam.	nil
+Nach 2023 im Batch bricht es ab.	nil
+Was kommt nach 2024 im Log?	["nach 2024 im log?|2025-01-01..|from"] linear=1.00
+Was steht ab 2024 in der Datei?	nil
+Was ist nach 2025 im Buffer?	nil
+After 2024 in the queue the worker stalls.	nil
+What comes after 2025 in the log?	["after 2025 in the|2026-01-01..|from"] linear=1.00
+Since 2024 in the index search is slow.	nil
+Until 2025 in the buffer is fine.	nil
+Was passiert ab 2024 und mehr?	nil
+Nach 2024 oder mehr Requests bricht es.	nil
+After 2025 or more requests it fails.	nil
+Ab 2022 und weniger ist alles ok.	nil
+Was passiert nach 2,024 Requests?	nil
+Was passiert nach 2.048 Tokens?	nil
+Seit 2024ms hängt der Request.	nil
+Nach 2024ms Timeout bricht es ab.	nil
+Nach 2025-mal versuchen gibt es auf.	nil
+Bis 2024x schneller?	nil
+Vor 2024k Tokens ist Schluss.	nil
+Zeig mir alles nach 2024-03.	nil
+Ab 2024,5 GB wird es knapp.	nil
+Limit: ab 2048.	nil
+Grenze: bis 2048.	nil
+Was passiert bei Werten ab 2024?	nil
+Was passiert bei Werten nach 2025?	nil
+Wie reagiert das System auf Eingaben bis 2025?	nil
+What happens with values after 2025?	nil
+What happens for inputs until 2026?	nil
+Welche Fehler treten vor 2048 auf?	nil
+Welche Fehler treten ab 2024 auf?	["ab 2024 auf?|2024-01-01..|from"] linear=1.00
+Welche IDs kommen nach 2025?	nil
+Welche IDs liegen zwischen 2021 und 2024?	nil
+Which IDs lie between 2021 and 2024?	nil
+Welche Zeilen von 2022 bis 2024 sind fehlerhaft?	nil
+Which lines from 2022 to 2024 are broken?	nil
+Scroll nach 2024.	nil
+Spring zu Zeile nach 2025.	nil
+Lies weiter ab 2024.	nil
+Lies die Datei ab 2025.	nil
+Read the file from 2024.	nil
+Start reading after 2024.	nil
+Skip until 2025.	nil
+Überspring alles bis 2025.	nil
+Überspring alles vor 2024.	nil
+Zeig mir die Antworten nach 2025!	["nach 2025!|2026-01-01..|from"] linear=1.00
+Gib mir die Elemente seit 2024!	nil
+Wie lange dauert es nach 2024 Durchläufen?	nil
+Wann fällt der Knoten nach 2025 Verbindungen aus?	nil
+Nach wie vielen Requests, ab 2024?	nil
+Was ist mit den Requests ab 2024, werden die gedrosselt?	nil
+Was passiert mit den Tokens nach 2048, werden sie verworfen?	nil
+Was passiert mit Zeilen nach 2025, werden sie gekürzt?	nil
+What happens to tokens after 2048, are they dropped?	nil
+What happens to lines after 2025, are they truncated?	nil
+Werden Tokens nach 2048 abgeschnitten?	nil
+Werden Zeilen nach 2025 ignoriert?	nil
+Are tokens after 2048 dropped?	nil
+Are lines after 2025 ignored?	nil
+Werden Einträge ab 2024 doppelt gezählt?	nil
+Are entries after 2024 counted twice?	nil
+Werden Blöcke vor 2024 nicht indiziert?	["vor 2024 nicht indiziert?|2023-12-31..|until"] linear=1.00
+Are blocks before 2024 not indexed?	["before 2024 not indexed?|2023-12-31..|until"] linear=1.00
+Was hat sich seit 2024 geändert?	["seit 2024 geändert?|2024-01-01..2026-11-22|range"] linear=1.00
+Was ist seit 2024 passiert?	["seit 2024 passiert?|2024-01-01..2026-11-22|range"] linear=1.00
+Seit 2024 gibt es neue Regeln?	["seit 2024 gibt es|2024-01-01..2026-11-22|range"] linear=1.00
+Was galt bis 2024?	["bis 2024?|2024-12-31..|until"] linear=1.00
+Was gilt bis 2027?	["bis 2027?|2026-11-22..2027-12-31|range"] linear=1.00
+Was kam nach 2025?	["nach 2025?|2026-01-01..|from"] linear=1.00
+Was war vor 2025?	["vor 2025?|2024-12-31..|until"] linear=1.00
+Was gilt ab 2025?	["ab 2025?|2025-01-01..|from"] linear=1.00
+Was lief von 2024 bis 2026?	["von 2024 bis 2026?|2024-01-01..2026-12-31|range"] linear=1.00
+Was passierte zwischen 2024 und 2026?	["zwischen 2024 und 2026?|2024-01-01..2026-12-31|range"] linear=1.00
+What changed since 2024?	["since 2024?|2024-01-01..2026-11-22|range"] linear=1.00
+What happened after 2025?	["after 2025?|2026-01-01..|from"] linear=1.00
+What was before 2025?	["before 2025?|2024-12-31..|until"] linear=1.00
+What applied until 2024?	["until 2024?|2024-12-31..|until"] linear=1.00
+What happened between 2024 and 2026?	["between 2024 and 2026?|2024-01-01..2026-12-31|range"] linear=1.00
+What happened from 2024 to 2026?	["from 2024 to 2026?|2024-01-01..2026-12-31|range"] linear=1.00
+Welche Entscheidungen seit 2023?	["seit 2023?|2023-01-01..2026-11-22|range"] linear=1.00
+Welche Releases gab es nach 2024?	["nach 2024?|2025-01-01..|from"] linear=1.00
+Welche Projekte liefen vor 2024?	["vor 2024?|2023-12-31..|until"] linear=1.00
+Welche Blöcke stammen aus der Zeit vor 2025?	["vor 2025?|2024-12-31..|until"] linear=1.00
+Was haben wir seit 2024 gelernt?	nil
+Was wurde seit 2025 entschieden?	["seit 2025 entschieden?|2025-01-01..2026-11-22|range"] linear=1.00
+Welche Bugs wurden nach 2024 gefixt?	["nach 2024 gefixt?|2025-01-01..|from"] linear=1.00
+Was ist seit 2024 neu im Stack?	nil
+Was hat sich seit Anfang 2024 geändert?	nil
+Was haben wir bis Ende 2025 geplant?	nil
+Was steht für 2027 an?	nil
+Was passierte im Jahr 2024?	nil
+Was passierte 2024?	nil
+Welche Releases gab es 2025?	nil
+Seit 2024 nutzen wir Postgres 18?	nil
+Nutzen wir seit 2024 pgvector?	nil
+Was ist seit 2024 anders an der Suche?	nil
+Seit 2025 läuft Spark produktiv?	["seit 2025 läuft spark|2025-01-01..2026-11-22|range"] linear=1.00
+Ab 2025 gilt das neue Lizenzmodell?	["ab 2025 gilt das|2025-01-01..|from"] linear=1.00
+Ab 2026 gilt die neue Policy.	["ab 2026 gilt die|2026-01-01..|from"] linear=1.00
+Nach 2024 kam die Go-Migration?	["nach 2024 kam die|2025-01-01..|from"] linear=1.00
+Vor 2025 lief alles auf n8n?	["vor 2025 lief alles|2024-12-31..|until"] linear=1.00
+Bis 2025 war Ollama der einzige Backend?	["bis 2025 war ollama|2025-12-31..|until"] linear=1.00
+Was wissen wir über die Zeit zwischen 2023 und 2025?	["zwischen 2023 und 2025?|2023-01-01..2025-12-31|range"] linear=1.00
+What do we know about the period between 2023 and 2025?	["between 2023 and 2025?|2023-01-01..2025-12-31|range"] linear=1.00
+Since 2024 we use pgvector, right?	["since 2024 we use|2024-01-01..2026-11-22|range"] linear=1.00
+After 2025 the license changes?	["after 2025 the license|2026-01-01..|from"] linear=1.00
+Before 2025 everything ran on n8n?	nil
+Until 2024 we used Ollama?	["until 2024 we used|2024-12-31..|until"] linear=1.00
+Which decisions were made since 2024?	["since 2024?|2024-01-01..2026-11-22|range"] linear=1.00
+Which bugs were fixed after 2024?	["after 2024?|2025-01-01..|from"] linear=1.00
+Welche Architekturentscheidungen seit 2024 gelten noch?	["seit 2024 gelten noch?|2024-01-01..2026-11-22|range"] linear=1.00
+Welche Notizen aus der Zeit nach 2024 gibt es?	["nach 2024 gibt es?|2025-01-01..|from"] linear=1.00
+Gibt es Blöcke von vor 2024?	["vor 2024?|2023-12-31..|until"] linear=1.00
+Gibt es Notizen von 2024 bis heute?	["von 2024 bis heute?|2024-01-01..2026-11-22|range"] linear=1.00
+Von 2024 bis heute, was hat sich geändert?	["von 2024 bis heute, was hat|2024-01-01..2026-11-22|range"] linear=1.00
+Was hat sich seit 2024 bis 2025 getan?	["seit 2024 bis 2025 getan?|2024-01-01..2025-12-31|range"] linear=1.00
+Was hat sich von Juni bis 2026 getan?	["von juni bis 2026 getan?|2026-06-01..2026-12-31|range"] linear=1.00
+Seit 2024, was ist neu?	["seit 2024, was ist|2024-01-01..2026-11-22|range"] linear=1.00
+Was ist neu seit 2024 im Projekt?	["seit 2024 im projekt?|2024-01-01..2026-11-22|range"] linear=1.00
+Was ist neu seit 2024 bei der Suche?	["seit 2024 bei der|2024-01-01..2026-11-22|range"] linear=1.00
+Was gilt seit 2024 für Migrationen?	["seit 2024 für migrationen?|2024-01-01..2026-11-22|range"] linear=1.00
+Was ist ab 2025 für Deploys vorgeschrieben?	["ab 2025 für deploys|2025-01-01..|from"] linear=1.00
+Was galt vor 2025 für Releases?	["vor 2025 für releases?|2024-12-31..|until"] linear=1.00
+Was war bis 2024 Standard?	nil
+Wer war seit 2024 Maintainer?	nil
+Since 2024 who maintains it?	["since 2024 who maintains|2024-01-01..2026-11-22|range"] linear=1.00
+After 2025 who maintains it?	["after 2025 who maintains|2026-01-01..|from"] linear=1.00
+Was lief seit 2024 schief?	nil
+Was kam nach 2024 und vor 2026?	["nach 2024 und vor 2026?|2025-01-01..2025-12-31|range"] linear=1.00
+Was gab es zwischen 2025 und 2026?	["zwischen 2025 und 2026?|2025-01-01..2026-12-31|range"] linear=1.00
+Was ist am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was steht am Montag an?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was plane ich für Dienstag?	["Dienstag|2026-11-24..|future"] linear=0.60,weekday=0.40
+Was kommt am Freitag?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Was gibt es am Wochenende?	["am Wochenende|2026-11-28..2026-11-29|future"] weekday=1.00
+Was muss ich bis Freitag erledigen?	["bis freitag erledigen?|2026-11-22..2026-11-27|range"] linear=0.80,month=0.20
+Was soll am Montag deployed werden?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was kann ich am Mittwoch machen?	["Mittwoch|2026-11-25..|future"] linear=0.60,weekday=0.40
+Was läuft am Donnerstag?	["Donnerstag|2026-11-26..|future"] linear=0.60,weekday=0.40
+Was machen wir am Samstag?	["Samstag|2026-11-28..|future"] linear=0.60,weekday=0.40
+Was liegt am Montag an?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was ist für Montag geplant?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was haben wir am Montag vor?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was habe ich am Freitag vor?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Was erwartet uns im März?	nil
+Was steht im Mai an?	nil
+Was gilt ab Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was ist am Wochenende los?	["am Wochenende|2026-11-28..2026-11-29|future"] weekday=1.00
+Was passiert am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was wird am Montag besprochen?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was wird am Freitag released?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Was bringt der Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was fehlt noch für Freitag?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Was bleibt für Dienstag übrig?	["Dienstag|2026-11-24..|future"] linear=0.60,weekday=0.40
+Was genau ist am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was denn am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was noch am Freitag?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Was für Termine habe ich am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was alles steht am Freitag an?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Was sonst noch am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Und was ist am Wochenende?	["am Wochenende|2026-11-28..2026-11-29|future"] weekday=1.00
+Aber was kommt am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Zeig mir, was am Freitag ansteht.	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Sag mir, was am Montag läuft.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Weißt du, was am Dienstag ist?	["Dienstag|2026-11-24..|future"] linear=0.60,weekday=0.40
+Sag mir was am Montag ansteht.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Zeig mir was am Freitag läuft.	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Weißt du was am Dienstag ist?	["Dienstag|2026-11-24..|future"] linear=0.60,weekday=0.40
+Was meinst du, was am Montag ansteht?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was wir am Montag machen, steht im Plan.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was ist der RRF-Score?	nil
+Was bedeutet Gravity?	nil
+Was macht der Dream-Lauf?	nil
+Was tut der Guard am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was kostet der Server im März?	nil
+Was heißt das für Freitag?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Was gehört am Montag dazu?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was brauchen wir am Freitag?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Was fehlt am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was ändert sich im Juni?	nil
+Was Neues am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was los am Freitag?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Was war am Montag?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was gab es am Freitag?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was lief am Dienstag?	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40
+Was geschah im Mai?	nil
+Was passierte im Juni?	nil
+Was lief im Februar?	nil
+Was war im März?	nil
+Was ist am Montag passiert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag besprochen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag im Meeting besprochen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was habe ich am Freitag gemacht?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was hast du am Montag deployed?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was habt ihr am Freitag entschieden?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was bist du am Montag gefahren?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Freitag eskaliert?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was wurde am Montag entschieden?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was wurde am Montag beschlossen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was wurde am Freitag deployed?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was hat sich am Montag verändert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was hat sich im März geändert?	nil
+Was hatten wir am Montag vereinbart?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was machten wir am Freitag?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was sagten sie am Montag?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was fanden wir am Dienstag heraus?	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40
+Was kam am Montag raus?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ging am Freitag schief?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was ist am Wochenende kaputtgegangen?	["am Wochenende|2026-11-21..2026-11-22|past"] weekday=1.00
+Was ist am Montag schiefgelaufen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was wurde am Montag gelöscht?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Freitag erschienen?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was haben wir im Mai veröffentlicht?	nil
+Was hat Damien am Montag gesagt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was hat GottZ am Freitag gefixt?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was hat sich seit Montag getan?	["seit montag getan?|2026-11-16..2026-11-22|range"] linear=0.80,month=0.20
+Was ist seit Freitag neu?	["seit freitag neu?|2026-11-20..2026-11-22|range"] linear=0.80,month=0.20
+Wer hat am Montag die Datenbank migriert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Wer war am Freitag im Büro?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Wer hat am Montag deployed?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Wer kam am Dienstag?	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40
+Wer hat das Ticket am Freitag geschlossen?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Wie lief der Release am Montag?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Wie war das Meeting am Freitag?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Wie hat der Test am Montag funktioniert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Wann haben wir am Montag angefangen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Warum ist der Build am Montag fehlgeschlagen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Warum hat das Deploy am Freitag nicht funktioniert?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Warum war die Suche am Dienstag langsam?	["Dienstag|2026-11-17..|past"] linear=0.60,weekday=0.40
+Warum ist der Server am Wochenende abgestürzt?	["am Wochenende|2026-11-21..2026-11-22|past"] weekday=1.00
+Wieso hat der Guard am Montag blockiert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Wer ist am Montag im Büro?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Wer hat am Montag Bereitschaft?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Wer kommt am Freitag?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Wie wird das Wetter am Samstag?	["Samstag|2026-11-28..|future"] linear=0.60,weekday=0.40
+Wann ist das Meeting am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Warum ist der Build am Montag rot?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Wie läuft der Release am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Wer macht am Freitag den Deploy?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Wann beginnt das Meeting am Dienstag?	["Dienstag|2026-11-24..|future"] linear=0.60,weekday=0.40
+Wo findet das Meeting am Donnerstag statt?	["Donnerstag|2026-11-26..|future"] linear=0.60,weekday=0.40
+Ist das Büro am Samstag geöffnet?	["Samstag|2026-11-28..|future"] linear=0.60,weekday=0.40
+Ist der Laden am Montag geöffnet?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Ist der Raum am Montag reserviert?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Sind die Tickets bis Freitag erledigt?	["bis freitag erledigt?|2026-11-22..2026-11-27|range"] linear=0.80,month=0.20
+Ist der Bug bis Montag behoben?	["bis montag behoben?|2026-11-22..2026-11-23|range"] linear=0.80,month=0.20
+Ist das Feature bis Freitag erledigt?	["bis freitag erledigt?|2026-11-22..2026-11-27|range"] linear=0.80,month=0.20
+Hast du am Freitag Zeit?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Bist du am Montag im Büro?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Habt ihr am Montag ein Meeting?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Seid ihr am Freitag da?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Hast du am Montag Bereitschaft?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Ist am Montag etwas geplant?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Ist für Freitag etwas entschieden?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Ist am Montag ein Termin eingetragen?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Ist die Entscheidung für Montag getroffen?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Sollten wir am Freitag deployen?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Wollten wir am Montag nicht deployen?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Könnten wir am Montag releasen?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Würdest du am Freitag deployen?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Hätten wir am Montag Zeit?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Müssten wir am Freitag nicht releasen?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Wird am Montag deployed?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Werden wir am Freitag releasen?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Wir werden am Montag deployen.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Ich werde am Freitag frei haben.	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Am Montag wird released.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was werden wir am Montag tun?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was wird am Freitag passieren?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Was hätten wir am Montag tun sollen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Sie sagten, wir treffen uns am Montag.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Wir hatten vor, am Montag zu deployen.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+What is on Monday?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
+What is planned for Friday?	["Friday|2026-11-27..|future"] linear=0.60,weekday=0.40
+What do we have on Monday?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
+What happens on Friday?	["Friday|2026-11-27..|future"] linear=0.60,weekday=0.40
+What will happen on Monday?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
+What's on Friday?	["Friday|2026-11-27..|future"] linear=0.60,weekday=0.40
+Is the office open on Saturday?	["Saturday|2026-11-28..|future"] linear=0.60,weekday=0.40
+Who is on call on Monday?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
+When is the meeting on Tuesday?	["Tuesday|2026-11-24..|future"] linear=0.60,weekday=0.40
+Will we deploy on Friday?	["Friday|2026-11-27..|future"] linear=0.60,weekday=0.40
+Are we releasing on Monday?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
+Should we deploy on Friday?	["Friday|2026-11-27..|future"] linear=0.60,weekday=0.40
+Do we have a meeting on Monday?	["Monday|2026-11-23..|future"] linear=0.60,weekday=0.40
+What was decided on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+What was on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+What was deployed on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+What happened on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+What did we decide on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+What did Damien say on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Who deployed on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Who was in the office on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was it deployed on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was the build green on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was there an incident on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was CI green on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was production down on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was deployment successful on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was Damien in the standup on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was Robert at the meeting on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was Jürgen there on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was Karsten in the office on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was Ben at the standup on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was Qwen slow on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was herbert offline on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was Vault sealed on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was incident 42 resolved on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was rollout complete on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was Grafana down on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was Kubernetes upgraded on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was Postgres slow on Tuesday?	["Tuesday|2026-11-17..|past"] linear=0.60,weekday=0.40
+Was Spark down on the weekend?	["am Wochenende|2026-11-21..2026-11-22|past"] weekday=1.00
+Was Owen on call on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was Scott in the meeting on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was last week's deploy rolled back on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was everything green on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was anyone on call on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was our backup successful on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was my PR merged on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was that fixed on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was this deployed on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was Matt there on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was content indexed on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was test coverage green on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was agent X running on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was output correct on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was token usage high on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+It was broken on Monday, why?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+There was an outage on Friday, what caused it?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+The build was red on Monday, why?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+What was the cause of the outage on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Which PR was merged on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+Why was the build red on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+When was the meeting on Monday?	["Monday|2026-11-16..|past"] linear=0.60,weekday=0.40
+How was the release on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Where was the outage on Friday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was hat Damien am Montag deployed?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was hat er im Meeting am Montag erklärt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was wurde am Freitag im Review gefunden?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was hat der Dream-Lauf am Montag gelöscht?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Freitag im Retro über die Suche gelernt?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag zur Migration festgelegt?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was haben wir am Montag beim Deploy übersehen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was habe ich am Montag in der Session über Gravity notiert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was hat der Guard am Montag bei der Prüfung blockiert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was wurde am Montag reserviert?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist für Montag reserviert?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Welche Räume sind am Montag reserviert?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Welche Termine sind am Freitag geplant?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Welche Tickets sind am Freitag fällig?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Welche Aufgaben sind bis Montag zu erledigen?	["bis montag zu erledigen?|2026-11-22..2026-11-23|range"] linear=0.80,month=0.20
+Welche Tickets wurden am Freitag geschlossen?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Welche Entscheidungen haben wir am Montag getroffen?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Welche Fehler sind am Montag aufgetreten?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Welche Tests sind am Freitag fehlgeschlagen?	["Freitag|2026-11-20..|past"] linear=0.60,weekday=0.40
+Welche Blöcke wurden am Montag gelöscht?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ist am Montag zu tun?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was gibt's am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was geht am Freitag?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Was steht von Montag bis Freitag an?	["von montag bis freitag an?|2026-11-23..2026-11-27|range"] linear=0.60,weekday=0.40
+Was lief von Montag bis Freitag?	["von montag bis freitag?|2026-11-16..2026-11-20|range"] linear=0.60,weekday=0.40
+Was ist von Freitag bis Montag geplant?	["von freitag bis montag geplant?|2026-11-27..2026-11-30|range"] linear=0.60,weekday=0.40
+Was haben wir von Freitag bis Montag gemacht?	["von freitag bis montag gemacht?|2026-11-13..2026-11-16|range"] linear=0.60,weekday=0.40
+Was steht im Mai an, und was im Juni?	nil
+Was ist am Montag und was am Dienstag?	["Montag|2026-11-23..|future","Dienstag|2026-11-24..|future"] linear=0.60,weekday=0.40
+Hey, was ist am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Ok, was steht am Freitag an?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Also, was machen wir am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Ich frage mich, was am Montag ist.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Kannst du mir sagen, was am Freitag ansteht?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Kannst du mir sagen was am Freitag ansteht?	["Freitag|2026-11-27..|future"] linear=0.60,weekday=0.40
+Ich will wissen, was wir am Montag besprechen.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Ich will wissen, was wir am Montag besprochen haben.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Ich will wissen, was am Montag passiert ist.	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ich wissen will: was war am Montag?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Was ich wissen will: was ist am Montag?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Weißt du noch, was wir am Montag besprochen haben?	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
+Weißt du, was wir am Montag besprechen?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Wann ist der nächste Release, was steht am Montag an?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Was ist im Juni?	nil
+Was ist im Dezember geplant?	nil
+Was kommt im Januar?	nil
+Was gilt im März?	nil
+Was haben wir im Juni vor?	nil
+Was hatten wir im Juni vor?	nil

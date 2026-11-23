@@ -1,0 +1,75 @@
+# Class corpus of issue #517: an ellipsis of participles only. Written with its expectations before any rule change (sha256 of the list bbb3bfe3b91efc5c).
+# Asked at noon UTC of the day. Expected dates: "-" none, "*" any; otherwise alternatives split by " OR ", the dates of one alternative by ";" (holdout506Fits). Hour: the hour of the first date, "-" no date carries one, "*" not judged. Tense: DetectVerbTense, "notpast" future or neutral, "any" not judged.
+# id, day, kind (F: the new reading is right, F2: the first-name reading, G: a counter-case), expected rule (ja/nein/egal), expected dates, hour, tense, disputed (s or -), question, the dates of the rules at c367fd44 as JSON or nil, the tense at c367fd44.
+K4-01	2026-11-22	F	ja	2026-11-16;2026-11-17	*	any	-	Am Montag repariert, am Dienstag wieder kaputt?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-02	2026-11-22	F	ja	2026-11-16;2026-11-18	*	any	-	Am Montag gelauncht, am Mittwoch gerollbackt – warum?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-03	2026-11-22	F	ja	2026-11-16;2026-11-17	*	any	-	Montag deployed, Dienstag zurückgerollt?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-04	2026-11-22	F	ja	2026-11-20;2026-11-23 OR 2026-11-20;2026-11-16	*	any	s	Am Freitag gemerged, am Montag deployed?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K4-05	2026-11-22	F	ja	2026-11-17;2026-11-18	*	any	-	Dienstag gefixt, Mittwoch wieder aufgetreten	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]	neutral
+K4-06	2026-11-22	F	ja	2026-11-19;2026-11-20	*	any	-	Am Donnerstag installiert, am Freitag abgestürzt	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]	neutral
+K4-07	2026-11-22	F	ja	2026-11-16;2026-11-17	*	any	-	Montag migriert, Dienstag Daten verloren?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-08	2026-11-22	F	ja	2026-11-18;2026-11-19	*	any	-	Am Mittwoch gepatcht, am Donnerstag erneut kompromittiert?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]	neutral
+K4-09	2026-11-22	F	ja	2026-11-18;2026-11-19;2026-11-20	*	any	-	Mittwoch gebaut, Donnerstag getestet, Freitag ausgerollt	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]	neutral
+K4-10	2026-11-22	F	ja	2026-11-16;2026-11-17	*	any	-	Am Montag aktualisiert, am Dienstag Fehler gemeldet	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-11	2026-11-22	F	ja	2026-11-17;2026-11-18	*	any	-	Am Dienstag umgestellt, am Mittwoch Beschwerden bekommen	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]	neutral
+K4-12	2026-11-22	F	ja	2026-11-16;2026-11-17	*	any	-	Montag eingespielt, Dienstag wieder ausgebaut – was war los?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-13	2026-11-22	F	ja	2026-11-16;2026-11-20	*	any	-	Am Montag gelöscht, am Freitag wiederhergestellt?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-14	2026-11-22	F	ja	2026-11-17;2026-11-18	*	any	-	Dienstag ausgefallen, Mittwoch neu gestartet	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K4-15	2026-11-22	F	ja	2026-11-19;2026-11-20	*	any	-	Am Donnerstag committed, am Freitag gereverted?	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]	neutral
+K4-16	2026-11-22	F	ja	2026-11-16;2026-11-18	*	any	-	Montag aufgesetzt, Mittwoch schon wieder kaputt	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-17	2026-11-22	F	ja	2026-11-16;2026-11-17	*	any	-	Am Montag gemeldet, am Dienstag behoben	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-18	2026-11-22	F	ja	2026-11-18;2026-11-19	*	any	-	Am Mittwoch reviewed, am Donnerstag gemerged, warum noch nicht live?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]	neutral
+K4-19	2026-11-22	F	ja	2026-11-16;2026-11-20 OR 2026-11-23;2026-11-27	*	any	s	Montag bestellt, Freitag geliefert?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-20	2026-11-22	F	ja	2026-11-17;2026-11-18	*	any	-	Am Dienstag eskaliert, am Mittwoch geklärt	[{"ref":"Dienstag","date":"2026-11-17","end":null,"dir":"past"}]	past
+K4-21	2026-11-22	F	ja	2026-11-16;2026-11-17	*	any	-	Was ist mit dem Ticket: Montag zugewiesen, Dienstag erledigt?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-22	2026-11-22	F	ja	2026-11-17;2026-11-19	*	any	-	Am Dienstag beantragt, am Donnerstag genehmigt – wann kommt das Geld?	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]	neutral
+K4-23	2026-11-22	F	ja	2026-11-16;2026-11-18	*	any	-	Deployed Monday, rolled back Wednesday – why?	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]	past
+K4-24	2026-11-22	F	ja	2026-11-16;2026-11-18	*	any	-	Fixed on Monday, broken again on Wednesday?	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]	past
+K4-25	2026-11-22	F	ja	2026-11-16;2026-11-17	*	any	-	Am Montag aufgeräumt, am Dienstag dokumentiert	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-26	2026-11-22	F	ja	2026-11-16;2026-11-20	*	any	-	Am Montag zugesagt, am Freitag geliefert	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-27	2026-11-22	F	ja	2026-11-16;2026-11-17	*	any	-	Montag vorbereitet, Dienstag präsentiert, Feedback?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-28	2026-11-22	F	ja	2026-11-19;2026-11-20	*	any	-	Am Donnerstag geplant, am Freitag umgesetzt	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]	neutral
+K4-29	2026-11-22	F	ja	2026-11-16;2026-11-17	*	any	-	Am Montag geprüft, am Dienstag freigegeben	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-30	2026-11-22	F	ja	2026-11-17;2026-11-19	*	any	-	Dienstag gemeldet, Donnerstag repariert, Freitag wieder kaputt – Muster?	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]	neutral
+K4-31	2026-11-22	G	ja	2026-11-23;2026-11-24	*	any	-	Montag Deployment geplant, Dienstag Review angesetzt	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-32	2026-11-22	G	ja	2026-11-23;2026-11-24	*	any	-	Am Montag geschlossen, am Dienstag geöffnet?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K4-33	2026-11-22	G	ja	2026-11-20;2026-11-23 OR 2026-11-27;2026-11-30	*	any	s	Freitag Release freigegeben, Montag Rollout geplant	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K4-34	2026-11-22	G	ja	2026-11-23;2026-11-24	*	any	-	Montag gebucht, Dienstag reserviert	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-35	2026-11-22	G	ja	2026-11-25;2026-11-26	*	any	s	Am Mittwoch gesperrt, am Donnerstag wieder freigeschaltet?	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]	neutral
+K4-36	2026-11-22	G	ja	2026-11-23;2026-11-25	*	any	-	Montag Wartung angekündigt, Mittwoch Downtime eingeplant	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-37	2026-11-22	G	ja	2026-11-24;2026-11-26	*	any	-	Dienstag Termin vereinbart, Donnerstag Abnahme vorgesehen	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]	neutral
+K4-38	2026-11-22	G	ja	2026-11-23;2026-11-24	*	any	s	Montag: Server bereitgestellt? Dienstag: Zugang eingerichtet?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-39	2026-11-22	G	ja	2026-11-23;2026-11-27	*	any	-	Am Montag geschlossen, am Freitag wieder geöffnet	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K4-40	2026-11-22	G	ja	2026-11-23;2026-11-24	*	any	-	Montag eingeplant, Dienstag fest zugesagt	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-41	2026-11-22	G	ja	2026-11-25;2026-11-26	*	any	-	Mittwoch Maintenance angesetzt, Donnerstag Update terminiert	[{"ref":"Mittwoch","date":"2026-11-25","end":null,"dir":"future"}]	neutral
+K4-42	2026-11-22	G	ja	2026-11-23;2026-11-24	*	any	-	Am Montag geöffnet, am Dienstag geschlossen?	[{"ref":"Montag","date":"2026-11-16","end":null,"dir":"past"}]	past
+K4-43	2026-11-22	G	ja	2026-11-24;2026-11-25	*	any	-	Dienstag frei, Mittwoch gebucht	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]	neutral
+K4-44	2026-11-22	G	ja	2026-11-23;2026-11-27	*	any	s	Montag reserviert, Freitag bestätigt?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-45	2026-11-22	G	ja	2026-11-23;2026-11-24	*	any	-	Am Montag Meeting, am Dienstag Demo	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-46	2026-11-22	G	ja	2026-11-20;2026-11-23	*	any	s	Freitag deployt, Montag getestet?	[{"ref":"Freitag","date":"2026-11-27","end":null,"dir":"future"}]	neutral
+K4-47	2026-11-22	G	ja	2026-11-16;2026-11-24	*	any	s	Montag Deployment vorbereitet, Dienstag Go-Live vorgesehen	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-48	2026-11-22	G	ja	2026-11-23;2026-11-25	*	any	-	Scheduled for Monday, moved to Wednesday	[{"ref":"Monday","date":"2026-11-16","end":null,"dir":"past"}]	past
+K4-49	2026-11-22	G	ja	2026-11-23;2026-11-24	*	any	-	Closed on Monday, open on Tuesday?	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-50	2026-11-22	G	ja	2026-11-23	*	any	-	montag deployment geplant	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-51	2026-11-22	G	ja	2026-11-23	*	any	s	Bug am Montag gefixt?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-52	2026-11-22	G	ja	2026-11-20	*	any	-	Server am Freitag abgestürzt?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K4-53	2026-11-22	G	ja	2026-11-20	*	any	-	am freitag was kaputt gemacht?	[{"ref":"Freitag","date":"2026-11-20","end":null,"dir":"past"}]	past
+K4-54	2026-11-22	G	ja	2026-11-23	*	any	s	Am Montag repariert?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-55	2026-11-22	G	ja	2026-11-18	*	any	-	Am Mittwoch neu gestartet, läuft wieder?	[{"ref":"Mittwoch","date":"2026-11-18","end":null,"dir":"past"}]	past
+K4-56	2026-11-22	G	ja	2026-11-16;2026-11-17;2026-11-18 OR 2026-11-23;2026-11-24;2026-11-25	*	any	s	Montag gemerged, Dienstag deployed, Mittwoch getestet – stimmt die Reihenfolge?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-57	2026-11-22	G	ja	2026-11-23;2026-11-24	*	any	s	Montag angesetzt, Dienstag abgesagt	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-58	2026-11-22	G	ja	2026-11-24;2026-11-25	*	any	-	Dienstag geplant, Mittwoch eingetragen	[{"ref":"Dienstag","date":"2026-11-24","end":null,"dir":"future"}]	neutral
+K4-59	2026-11-22	G	ja	2026-11-23;2026-11-24	*	any	-	Montag ausgebucht, Dienstag schon reserviert?	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-60	2026-11-22	G	ja	2026-11-26;2026-11-27	*	any	-	Donnerstag vormerken, Freitag eingeplant	[{"ref":"Donnerstag","date":"2026-11-26","end":null,"dir":"future"}]	neutral
+K4-61	2026-11-22	G	ja	2026-11-23;2026-11-25	*	any	-	Planned for Monday, scheduled for Wednesday	[{"ref":"Monday","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+K4-62	2026-11-22	G	ja	2026-11-23;2026-11-24	*	any	-	Montag Büro geschlossen, Dienstag Homeoffice angeordnet	[{"ref":"Montag","date":"2026-11-23","end":null,"dir":"future"}]	neutral
+B4-01	2026-03-18	F	ja	2026-03-16;2026-03-17	*	any	-	Am Montag repariert, am Dienstag wieder kaputt?	[{"ref":"Montag","date":"2026-03-23","end":null,"dir":"future"}]	neutral
+B4-02	2026-03-18	F	ja	2026-03-16;2026-03-17	*	any	-	Montag gelauncht, Dienstag gerollbackt	[{"ref":"Montag","date":"2026-03-23","end":null,"dir":"future"}]	neutral
+B4-03	2026-03-18	G	ja	2026-03-20;2026-03-23	*	any	-	Freitag Deployment geplant, Montag Review angesetzt	[{"ref":"Freitag","date":"2026-03-20","end":null,"dir":"future"}]	neutral
+B4-04	2026-03-18	G	ja	2026-03-19;2026-03-20	*	any	-	Am Donnerstag geschlossen, am Freitag geöffnet?	[{"ref":"Donnerstag","date":"2026-03-12","end":null,"dir":"past"}]	past
+B4-05	2026-03-18	F	ja	2026-03-16;2026-03-17	*	any	-	Montag gepatcht, Dienstag erneut ausgefallen	[{"ref":"Montag","date":"2026-03-23","end":null,"dir":"future"}]	neutral
+B4-06	2026-03-18	G	ja	2026-03-20;2026-03-21	*	any	-	Freitag gebucht, Samstag reserviert	[{"ref":"Freitag","date":"2026-03-20","end":null,"dir":"future"}]	neutral
+B4-07	2026-03-18	F	ja	2026-03-16;2026-03-17	*	any	-	Am Montag gemeldet, am Dienstag behoben	[{"ref":"Montag","date":"2026-03-23","end":null,"dir":"future"}]	neutral
+B4-08	2026-03-18	G	ja	2026-03-19;2026-03-20	*	any	-	Donnerstag Wartung angesetzt, Freitag Update eingeplant	[{"ref":"Donnerstag","date":"2026-03-19","end":null,"dir":"future"}]	neutral
+B4-09	2026-03-18	F	ja	2026-03-16;2026-03-17	*	any	-	Fixed Monday, broken again Tuesday?	[{"ref":"Monday","date":"2026-03-16","end":null,"dir":"past"}]	past
+B4-10	2026-03-18	G	ja	2026-03-19;2026-03-20	*	any	-	Closed Thursday, open Friday?	[{"ref":"Thursday","date":"2026-03-19","end":null,"dir":"future"}]	neutral
