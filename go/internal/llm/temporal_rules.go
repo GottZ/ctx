@@ -1796,7 +1796,9 @@ func (c clauseWords) clausePerfekt(s, e int, closing *[]int) bool {
 			continue
 		}
 		for j := i + 1; j < e && j <= i+5; j++ {
-			if w := c.words[j]; knownParticiples[w] && !participleExceptions[w] || perfektParticiplePat.MatchString(w) || ierenParticiple(w) {
+			// The exceptions hold for the pattern as for the list: "haben wir
+			// am montag gehalt auf dem konto?" has no participle (issue #517).
+			if w := c.words[j]; (knownParticiples[w] || perfektParticiplePat.MatchString(w) || ierenParticiple(w)) && !participleExceptions[w] {
 				return true
 			}
 		}

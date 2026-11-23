@@ -198,3 +198,19 @@ func TestRules_TwoOpposingDayEdgesAreTheWindowBetween(t *testing.T) {
 		"What happened after 2026-03-15?":                          "2026-03-16/from",
 	})
 }
+
+// TestRules_TheParticipleExceptionsHoldForThePattern (the bot review's
+// point 4 of issue #517): the nouns of participle shape that are no
+// participle (participleExceptions) are none behind an auxiliary in the
+// window of the old pattern either: "haben wir am montag gehalt auf dem
+// konto?" asks for the coming Monday; a participle there still makes the
+// Perfekt.
+func TestRules_TheParticipleExceptionsHoldForThePattern(t *testing.T) {
+	check517(t, now517, want517{
+		"haben wir am montag gehalt auf dem konto?": "2026-11-23/future",
+		"Haben wir am Freitag Gericht?":             "2026-11-27/future",
+		"haben wir am dienstag gehalt bekommen?":    "2026-11-17/past",
+		"Haben wir am Montag Verlust gemacht?":      "2026-11-16/past",
+		"Hat das Büro am Samstag geöffnet?":         "2026-11-28/future",
+	})
+}
