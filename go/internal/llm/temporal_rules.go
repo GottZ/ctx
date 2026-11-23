@@ -321,7 +321,10 @@ func (c *clauseWords) coordinate() {
 		if s >= se {
 			var ss int
 			ss, se = c.sentenceOf(s)
-			lang = c.sentenceLanguage(ss, se)
+			lang = c.lang // the language of a question of one sentence
+			if ss > 0 || se < len(c.words) {
+				lang = c.sentenceLanguage(ss, se)
+			}
 		}
 		drop = c.coordinateClause(s, e, lang, drop)
 		s = e
@@ -582,8 +585,11 @@ var (
 // compounded with a part of the day ("montagmorgen", "dienstagabend"), issue
 // #517.
 func weekdayCompound(w string) (time.Weekday, int, bool) {
-	for wd, name := range weekdayNameDE {
-		if rest, ok := strings.CutPrefix(w, strings.ToLower(name)); ok {
+	if len(w) < len("montagfrüh") {
+		return 0, 0, false
+	}
+	for wd, name := range weekdayStemsDE {
+		if rest, ok := strings.CutPrefix(w, name); ok {
 			if h, ok := compoundDayParts[rest]; ok {
 				return time.Weekday(wd), h, true
 			}
@@ -591,6 +597,14 @@ func weekdayCompound(w string) (time.Weekday, int, bool) {
 	}
 	return 0, 0, false
 }
+
+// weekdayStemsDE are the German weekday names in lower case, by weekday.
+var weekdayStemsDE = func() (out [7]string) {
+	for i, name := range weekdayNameDE {
+		out[i] = strings.ToLower(name)
+	}
+	return out
+}()
 
 // weekdayWord returns the weekday w names: a weekday name of either language
 // or a German weekday compounded with a part of the day.
@@ -3409,6 +3423,17 @@ func matchWeekend(query string, now time.Time) *TemporalResult {
 	return rangeResult("am Wochenende", fmtDate(nextSat), fmtDate(nextSun), "future")
 }
 
+// weekdayMentions counts the weekday names in lower, a lowercased question,
+// as substrings (the German names, the English ones): an upper bound of its
+// weekday words, read without tokenizing it.
+func weekdayMentions(lower string) int {
+	n := 0
+	for i := range weekdayStemsDE {
+		n += strings.Count(lower, weekdayStemsDE[i]) + strings.Count(lower, strings.ToLower(weekdayNameEN[i]))
+	}
+	return n
+}
+
 // afterCapital reports whether word i of c stands right behind a word in its
 // clause that is written with a capital and is no acronym, not the word that
 // opens the clause. It reads the case as written (written), also where a
@@ -3463,10 +3488,13 @@ func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 	// Dienstag", "Monday or Tuesday") and two clauses with a weekday each,
 	// with or without a conjunction ("Am Mittwoch hatten wir 3 Incidents, am
 	// Freitag werden wir das Postmortem halten", issue #517).
-	c := clauseTokens(query)
-	weekdays := c.dayWeekdays()
 	hasConjunction := strings.Contains(lower, " und ") || strings.Contains(lower, " and ")
 	hasDisjunction := strings.Contains(lower, " oder ") || strings.Contains(lower, " or ")
+	if !hasConjunction && !hasDisjunction && weekdayMentions(lower) < 2 {
+		return nil // no two weekdays, no conjunction: nothing for either branch
+	}
+	c := clauseTokens(query)
+	weekdays := c.dayWeekdays()
 	if !hasConjunction && !hasDisjunction {
 		// Without a conjunction a weekday beyond the first right behind a
 		// word written with a capital inside its clause may be a surname
