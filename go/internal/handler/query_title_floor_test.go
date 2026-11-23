@@ -90,8 +90,8 @@ func TestFloorTitleMatchLeavesTheOrder(t *testing.T) {
 		{"title of one frequent word other titles contain",
 			titleFloorList("Deploy runbook 1", "Deploy runbook 2", "Deploy runbook 3", "a", "b", "c", "d", "e", "f", "g", "h", "Deploy"),
 			"deploy", 10, nil},
-		{"two candidates carry the title",
-			titleFloorList("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "Release notes", "Release notes"),
+		{"of two candidates with the title the higher one already stands inside",
+			titleFloorList("a", "Release notes", "c", "d", "e", "f", "g", "h", "i", "j", "k", "Release notes"),
 			"Release notes", 10, nil},
 		{"a shadow row is never placed", fam, "Orbit nightly report 2026-08-13", 10, []string{"knowledge"}},
 		{"a title that differs from the question only in a closing mark other titles contain",
@@ -193,6 +193,19 @@ func TestFloorTitleMatchInjectedRowGetsNoOriginal(t *testing.T) {
 		if out[9].RRFScoreOriginal != nil {
 			t.Errorf("%s: injected row got rrf_score_original %v", via, *out[9].RRFScoreOriginal)
 		}
+	}
+}
+
+// Two candidates fold to the question (P4): the one the pipeline ranks higher
+// is placed, the other stays where it was.
+func TestFloorTitleMatchTwinsPlaceTheHigherOne(t *testing.T) {
+	in := titleFloorList("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "Release notes", "m", "Release notes.")
+	out := floorTitleMatch(in, "release notes", 10, nil)
+	if out[9].ID != "b11" {
+		t.Fatalf("place 10 holds %s, want the higher-ranked b11", out[9].ID)
+	}
+	if got := titleFloorIDs(out[10:]); got != "b09,b10,b12,b13" {
+		t.Errorf("tail = %s, want the lower one (b13) left where it was", got)
 	}
 }
 

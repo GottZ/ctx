@@ -10,8 +10,8 @@ import (
 )
 
 // floorTitleMatch is the query's Step 6d-title (issue #507): a question that
-// is the title of exactly one candidate names that block, and the block comes
-// to a place every synthesis prompt carries (place, from titleFloorPlace).
+// is the title of a candidate names that block, and the block comes to a place
+// every synthesis prompt carries (place, from titleFloorPlace).
 //
 // Why a floor behind every stage: among blocks whose titles differ in a date or
 // a version number only (one block per release, handover, daily report,
@@ -29,10 +29,11 @@ import (
 //     (foldTitle: normal form, quotes, case, white space, closing
 //     punctuation) — no similarity threshold, so a question about a family's
 //     topic, or one that contains a short title, moves nothing;
-//   - it names exactly ONE candidate: a second candidate with the same title,
-//     or any other candidate whose title contains the question (a title made
-//     of one frequent word, "Deploy" beside "Deploy runbook"), leaves the
-//     order as it is;
+//   - any other candidate whose title contains the question (a title made of
+//     one frequent word, "Deploy" beside "Deploy runbook") leaves the order as
+//     it is; of several candidates whose titles fold to the question, the one
+//     the pipeline ranks highest is the named block, and if it already stands
+//     at the place or in front of it nothing moves;
 //   - a block behind the place moves to it; the results before the place keep
 //     their order, those from the place on move down by one, and the result at
 //     the end of the limit leaves the answer. The place is the last one a
@@ -68,10 +69,9 @@ func floorTitleMatch(results []rrf.SearchResult, question string, place int, ski
 	for i := range results {
 		t := foldTitle(results[i].Title)
 		if t == q {
-			if match >= 0 {
-				return results
+			if match < 0 {
+				match = i
 			}
-			match = i
 			continue
 		}
 		if strings.Contains(t, q) {
