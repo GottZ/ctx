@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -22,7 +23,7 @@ import (
 // numbers in order, or the first error.
 func walkIssues(t *testing.T, gh *fakeGitHub) ([]int64, error) {
 	t.Helper()
-	c := &githubClient{http: gh.srv.Client()}
+	c := gh.client()
 	page, err := c.ListIssuesSince(context.Background(), gh.repo(), time.Time{}, "")
 	var got []int64
 	for err == nil {
@@ -227,7 +228,7 @@ func TestPaginationResolvesAgainstTheURLThatAnswered(t *testing.T) {
 		_, _ = fmt.Fprintf(w, `[{"number":%d,"title":"t","state":"open"}]`, page)
 	}))
 	t.Cleanup(srv.Close)
-	c := &githubClient{http: srv.Client()}
+	c := &githubClient{http: dialGuardedClient(t, srv, new(atomic.Int64))}
 	page, err := c.ListIssuesSince(context.Background(), RepoRef{Owner: "o", Repo: "r", APIBase: srv.URL}, time.Time{}, "")
 	var got []int64
 	for err == nil {

@@ -336,6 +336,12 @@ type PushProjection func(b *Block) string
 // left the remote edit behind a 304 or a since past it, and a later local
 // edit was pushed over it without a flag.
 //
+// A row it writes loses its forge snapshot (metadata.forge_seen, issue
+// #509): a pull that flagged the row while the PATCH was on the wire saw a
+// forge version from before or after the PATCH landed, and which one the
+// forge holds now is not known — a resolution then keeps the local version
+// against an unknown base (a full push) instead of a stale one.
+//
 // sent says that a wire write carried ctxHash (false: the advance alone, the
 // listed block projecting to its base already, or only a never-pushed field
 // diverging). An advance without a wire write writes only while the row still holds
@@ -367,7 +373,7 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 		UPDATE context_project_sync_map
 		   SET base_hash = CASE WHEN base_hash IN ($6, $2) THEN $2 ELSE $7 END,
 		       synced_at = CASE WHEN $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
-		       metadata = CASE WHEN base_hash IN ($6, $2) THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END,
+		       metadata = (CASE WHEN base_hash IN ($6, $2) THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END) - 'forge_seen',
 		       forge_updated_at = CASE WHEN base_hash IN ($6, $2) THEN GREATEST(forge_updated_at, $8::timestamptz) ELSE forge_updated_at END,
 		       conflict = conflict OR base_hash NOT IN ($6, $2),
 		       conflict_at = CASE WHEN base_hash IN ($6, $2) THEN conflict_at ELSE COALESCE(conflict_at, now()) END
@@ -470,6 +476,20 @@ func TryLockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID, listedB
 	return true, "", nil
 }
 
+// TryPushLock takes the entity's push lock on conn without waiting — the
+// lock a push section holds from before its wire write until its advance
+// committed (TryLockPushEntity) — and answers whether this session holds it
+// now. The resolve surface takes it before it writes the mapping (issue
+// #509), so no resolution lands while a PATCH of the entity is on the wire.
+// err means the outcome is unknown; the caller closes the connection.
+func TryPushLock(ctx context.Context, conn *pgxpool.Conn, blockID string) (bool, error) {
+	var locked bool
+	if err := conn.QueryRow(ctx, pushLockSQL, blockID).Scan(&locked); err != nil {
+		return false, fmt.Errorf("store: push lock: %w", err)
+	}
+	return locked, nil
+}
+
 // UnlockPushEntity gives back the push lock TryLockPushEntity took on conn
 // and answers whether the session held it.
 func UnlockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID string) (bool, error) {
@@ -486,6 +506,6 @@ func UnlockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID string) (
 // surface (forge-sync-status/CLI/UI) is identical to a pull-side conflict.
 func FlagPushConflict(ctx context.Context, pool *pgxpool.Pool, blockID string, at time.Time) error {
 	return pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
-		return FlagSyncMapConflict(ctx, tx, blockID, at)
+		return FlagSyncMapConflict(ctx, tx, blockID, at, nil)
 	})
 }

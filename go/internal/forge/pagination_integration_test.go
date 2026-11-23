@@ -47,7 +47,7 @@ func TestSyncPullReachesEveryPage(t *testing.T) {
 		} else {
 			proj = *p
 		}
-		m := mgr(pool, okTenant, okPolicy, &githubClient{http: gh.srv.Client()}, applierWithRegistry(pool).ApplyIssues)
+		m := mgr(pool, okTenant, okPolicy, gh.client(), applierWithRegistry(pool).ApplyIssues)
 		if _, err := m.StartSync(context.Background(), proj, false); err != nil {
 			t.Fatalf("start: %v", err)
 		}
@@ -168,7 +168,7 @@ func TestSyncETagOnlyForAWholeListing(t *testing.T) {
 			t.Fatal(err)
 		}
 		ap := applierWithRegistry(pool)
-		r.m = mgr(pool, okTenant, okPolicy, &githubClient{http: r.gh.srv.Client()},
+		r.m = mgr(pool, okTenant, okPolicy, r.gh.client(),
 			func(ctx context.Context, p store.ProjectRow, page []IssueRemote) (ApplyResult, error) {
 				r.mu.Lock()
 				for _, it := range page {
@@ -291,7 +291,7 @@ func TestSyncBoundDoesNotStallOnPullRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	ap := applierWithRegistry(pool)
-	m := mgr(pool, okTenant, okPolicy, &githubClient{http: gh.srv.Client()}, ap.ApplyIssues)
+	m := mgr(pool, okTenant, okPolicy, gh.client(), ap.ApplyIssues)
 	m.applyComments = ap.ApplyComments
 	m.pageBound = 3 // three pages of two: the bound falls inside the pull requests
 

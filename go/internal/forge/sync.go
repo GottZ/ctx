@@ -64,6 +64,16 @@ type ApplyResult struct {
 	// saves its cursor no further than it and without an ETag (legCursor),
 	// so the next run lists those entities again (issue #509).
 	Relist time.Time
+	// orphans are the fetched comments whose parent issue has no mapping
+	// (ApplyComments skips them); the comment leg holds its cursor for those
+	// a later run may still find a parent for (issue #509, holdOrphans).
+	orphans []orphanComment
+}
+
+// orphanComment is a fetched comment whose parent issue is not mapped.
+type orphanComment struct {
+	id, parent int64
+	at         time.Time
 }
 
 // relistAt is the earlier of two Relist stamps; a zero one is none.
@@ -412,6 +422,7 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 		return err
 	}
 	firstETag := page.ETag
+	hold := readHold(project.SyncCursor, "issues")
 	var maxSeen, relist time.Time
 	seen := map[string]bool{}
 	for n := 1; ; n++ {
@@ -433,7 +444,7 @@ func (m *SyncManager) pullIssues(ctx context.Context, project store.ProjectRow, 
 			relist = relistAt(relist, res.Relist)
 			if !maxSeen.IsZero() {
 				etag, at := legCursor(firstETag, n, page.NextURL, maxSeen, relist)
-				m.commitFetchCursor(ctx, project.ID, "issues", etag, at)
+				m.commitFetchCursor(ctx, project.ID, "issues", etag, at, hold, page.NextURL == "", nil)
 			}
 		}
 		if page.NextURL == "" {
@@ -456,6 +467,8 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 		return err
 	}
 	firstETag := page.ETag
+	hold := readHold(project.SyncCursor, "comments")
+	orphans := orphanHolds{prev: readOrphans(project.SyncCursor), maxIssue: -1}
 	var maxSeen, relist time.Time
 	seen := map[string]bool{}
 	for n := 1; ; n++ {
@@ -467,10 +480,14 @@ func (m *SyncManager) pullComments(ctx context.Context, project store.ProjectRow
 		if mu := maxCommentUpdated(page); mu.After(maxSeen) {
 			maxSeen = mu
 		}
-		relist = relistAt(relist, res.Relist)
+		at, err := m.holdOrphans(ctx, project.ID, &orphans, res.orphans)
+		if err != nil {
+			return err
+		}
+		relist = relistAt(relistAt(relist, res.Relist), at)
 		if !maxSeen.IsZero() {
 			etag, at := legCursor(firstETag, n, page.NextURL, maxSeen, relist)
-			m.commitFetchCursor(ctx, project.ID, "comments", etag, at)
+			m.commitFetchCursor(ctx, project.ID, "comments", etag, at, hold, page.NextURL == "", orphans.extra())
 		}
 		if page.NextURL == "" {
 			return nil
@@ -571,14 +588,68 @@ func legCursor(first string, n int, next string, maxSeen, relist time.Time) (str
 }
 
 // commitFetchCursor durably advances the etag/since fetch cursor for one leg
-// (leg = "issues" | "comments") after a successful page apply. jsonb `||` replaces
-// only that leg's sub-object; backoff_n and the other leg survive.
-func (m *SyncManager) commitFetchCursor(ctx context.Context, projectID, leg, etag string, since time.Time) {
-	patch, err := json.Marshal(map[string]any{leg: map[string]any{"etag": etag, "since": since}})
-	if err != nil {
-		return
+// (leg = "issues" | "comments") after a successful page apply; backoff_n and
+// the other leg survive. hold is the nonce of the leg's hold in the cursor
+// this run started from ("" for none) and last says the leg read its last
+// page: a hold a resolution or a stamp reset set (store.HoldFetchCursor,
+// issue #509) keeps a run that did not read it from saving a since past
+// hold.at or an ETag, and goes once a run that read it read the leg to its
+// end (store.CommitFetchCursor).
+func (m *SyncManager) commitFetchCursor(ctx context.Context, projectID, leg, etag string, since time.Time, hold string, last bool, extra json.RawMessage) {
+	_ = store.CommitFetchCursor(ctx, m.pool, projectID, leg, etag, since, hold, last, extra)
+}
+
+// orphanHolds is the comment leg's account of comments whose parent issue
+// has no mapping (issue #509): prev, the ones the previous run held already
+// (sync_cursor.comments.orphans); held, the ones this run holds; maxIssue,
+// the highest issue number the project maps (-1 until read).
+type orphanHolds struct {
+	prev     map[int64]bool
+	held     []int64
+	maxIssue int64
+}
+
+// extra is the comment leg's cursor key that carries the held orphans.
+func (o *orphanHolds) extra() json.RawMessage {
+	held := o.held
+	if held == nil {
+		held = []int64{}
 	}
-	_ = store.MergeProjectSyncCursor(ctx, m.pool, projectID, patch)
+	b, _ := json.Marshal(map[string]any{"orphans": held})
+	return b
+}
+
+// holdOrphans answers the earliest stamp of the orphan comments the leg
+// holds its cursor for (zero for none): those whose parent number lies
+// above every issue number the project maps — an issue the forge created
+// after this run's issue leg listed, whose comment the comment leg lists
+// already — and that the previous run did not hold. The next run's issue
+// leg lists that issue (it was created after the listing) and its comment
+// leg lists the comment again. A comment on a pull request — the issue
+// listing drops those, so its parent is never mapped — is held at most
+// once; one on an issue or pull request older than the newest mapped issue
+// is not held. Before, the comment cursor moved past such a comment and it
+// was not listed again until it was edited.
+func (m *SyncManager) holdOrphans(ctx context.Context, projectID string, o *orphanHolds, page []orphanComment) (time.Time, error) {
+	var at time.Time
+	for _, c := range page {
+		if o.prev[c.id] {
+			continue
+		}
+		if o.maxIssue < 0 {
+			mx, err := store.MaxMappedForgeID(ctx, m.pool, projectID, entityKindIssue)
+			if err != nil {
+				return time.Time{}, err
+			}
+			o.maxIssue = mx
+		}
+		if c.parent <= o.maxIssue {
+			continue
+		}
+		o.held = append(o.held, c.id)
+		at = relistAt(at, c.at)
+	}
+	return at, nil
 }
 
 // maxIssueUpdated / maxCommentUpdated return the newest updated_at of a page — the
@@ -810,15 +881,51 @@ func repoRefFromForge(raw json.RawMessage) (RepoRef, error) {
 // etag/since leg per entity kind (issues, comments — a comment-only change does
 // not bump the issue leg) plus the shared backoff counter.
 type cursor struct {
-	Issues struct {
-		ETag  string    `json:"etag"`
-		Since time.Time `json:"since"`
-	} `json:"issues"`
-	Comments struct {
-		ETag  string    `json:"etag"`
-		Since time.Time `json:"since"`
-	} `json:"comments"`
-	BackoffN int `json:"backoff_n"`
+	Issues   legCursorJSON `json:"issues"`
+	Comments legCursorJSON `json:"comments"`
+	BackoffN int           `json:"backoff_n"`
+}
+
+// legCursorJSON is one leg's cursor: the ETag and since the next run asks
+// with, and a hold a resolution or a stamp reset set (issue #509,
+// store.HoldFetchCursor): its time and its nonce.
+type legCursorJSON struct {
+	ETag  string    `json:"etag"`
+	Since time.Time `json:"since"`
+	Hold  *struct {
+		At time.Time `json:"at"`
+		N  string    `json:"n"`
+	} `json:"hold,omitempty"`
+	Orphans []int64 `json:"orphans,omitempty"`
+}
+
+// readOrphans is the set of comment ids the previous run held as orphans.
+func readOrphans(raw json.RawMessage) map[int64]bool {
+	var c cursor
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &c)
+	}
+	out := make(map[int64]bool, len(c.Comments.Orphans))
+	for _, id := range c.Comments.Orphans {
+		out[id] = true
+	}
+	return out
+}
+
+// readHold is the nonce of leg's hold in raw, "" for none.
+func readHold(raw json.RawMessage, leg string) string {
+	var c cursor
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &c)
+	}
+	l := c.Issues
+	if leg == "comments" {
+		l = c.Comments
+	}
+	if l.Hold == nil {
+		return ""
+	}
+	return l.Hold.N
 }
 
 func readCursor(raw json.RawMessage) (etag string, since time.Time, backoffN int) {
