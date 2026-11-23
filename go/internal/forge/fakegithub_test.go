@@ -64,6 +64,7 @@ type fakeGitHub struct {
 	stampAnswer fakeStampAnswer
 	pageHolds   map[int]chan struct{} // issue-listing pages held until closed (holdPage)
 	pagesServed atomic.Int64          // issue-listing requests served
+	auths       []string              // the Authorization header of every request, in order
 }
 
 // fakeStampAnswer is what a write's answer carries as updated_at.
@@ -333,6 +334,9 @@ func (f *fakeGitHub) answer(w http.ResponseWriter, status int, fields map[string
 }
 
 func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.auths = append(f.auths, r.Header.Get("Authorization"))
+	f.mu.Unlock()
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/comments":
 		f.commentPages.Add(1)

@@ -399,9 +399,17 @@ func validIdentity(identity string) bool {
 }
 
 // validateForge returns a non-empty error message if forge carries an api_base
-// that violates the §5.7 SSRF deny-list, "" if forge is absent/valid. PATCH-time
-// enforcement only (scheme + IP-literal deny-list); DNS-rebinding is the
-// dial-time Achse-02 guard (§5.7 point 2), out of this wave's scope.
+// that violates the §5.7 SSRF deny-list or carries credentials, "" if forge is
+// absent/valid. PATCH-time enforcement only (scheme + IP-literal deny-list);
+// DNS-rebinding is the dial-time Achse-02 guard (§5.7 point 2), out of this
+// wave's scope.
+//
+// Userinfo is refused as a backend row's base_url refuses it
+// (backends/validate.go, issue #474): the project row serves its forge config
+// to every member of the scope (GET /api/project), and a sync without a token
+// sent it to the forge as Basic credentials. The token goes through
+// forge-token-set, sealed. The message echoes nothing of the input
+// (url.Redacted keeps the user name).
 func validateForge(forge json.RawMessage) string {
 	if len(forge) == 0 {
 		return ""
@@ -418,6 +426,9 @@ func validateForge(forge json.RawMessage) string {
 	u, err := url.Parse(f.APIBase)
 	if err != nil {
 		return "forge.api_base is not a valid URL"
+	}
+	if u.User != nil {
+		return "forge.api_base must not carry credentials (user:password@) — they would be served to every member of the scope; set the token with forge-token-set instead"
 	}
 	if u.Scheme != "https" {
 		return "forge.api_base must be https"

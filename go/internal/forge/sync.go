@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -954,8 +955,21 @@ func repoRefFromForge(raw json.RawMessage) (RepoRef, error) {
 	if f.Owner == "" || f.Repo == "" {
 		return RepoRef{}, fmt.Errorf("forge: owner/repo required in forge config")
 	}
+	if u, err := url.Parse(f.APIBase); err == nil && u.User != nil {
+		return RepoRef{}, errAPIBaseCredentials
+	}
 	return RepoRef{Owner: f.Owner, Repo: f.Repo, APIBase: f.APIBase}, nil
 }
+
+// errAPIBaseCredentials ends a run whose forge.api_base carries userinfo
+// (issue #474), before its first request. The API refuses such an api_base
+// since issue #474 (handler.validateForge); a row written before still
+// syncs nothing until the userinfo is gone. Before, a run without a token
+// sent it to the forge as Basic credentials (net/http takes them from the
+// URL when the request carries no Authorization header), and with a token
+// it went unused. Refusing names the change; ignoring it would turn an
+// unauthenticated sync that relied on it into a 401 or 404 without a hint.
+var errAPIBaseCredentials = &configError{"forge: forge.api_base carries credentials (user:password@); the sync does not run with them: remove them from forge.api_base and set the token with forge-token-set"}
 
 // cursor is the sync_cursor JSONB shape this wave reads/writes: an independent
 // etag/since leg per entity kind (issues, comments — a comment-only change does
