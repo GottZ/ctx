@@ -77,3 +77,32 @@ func TestRules_AWeekdayBehindATitleIsASurname(t *testing.T) {
 		"Am Montag hat Max Montag den PR gemerged": "2026-11-16/past",
 	})
 }
+
+// TestRules_AWeekdayWithAPartOfTheDay (issue #517 class 2): a part of the
+// day that belongs to a weekday — compounded with it, right behind it, or in
+// English "early"/"late" right before it — gives the hour, the weekday the
+// day; a weekday answers before a time-of-day word that belongs to no day,
+// and a part of the day that is today's stays today's.
+func TestRules_AWeekdayWithAPartOfTheDay(t *testing.T) {
+	check517(t, now517, want517{
+		"Was the cluster down on Tuesday morning?":               "2026-11-17/past@8",
+		"Who restarted spark on saturday night?":                 "2026-11-21/past@23",
+		"What was the state of the queue on Friday afternoon?":   "2026-11-20/past@15",
+		"Was lief am Montagmorgen schief?":                       "2026-11-16/past@8",
+		"Wurde am Dienstagabend noch was eingecheckt?":           "2026-11-17/past@19",
+		"Am Mittwochabend ist Wartung":                           "2026-11-25/future@19",
+		"Montag früh deployen wir":                               "2026-11-23/future@8",
+		"Am Montag-Abend ist das Release":                        "2026-11-23/future@19",
+		"Was the server slow early Tuesday?":                     "2026-11-17/past@8",
+		"Am Donnerstagvormittag fällt der Server aus":            "2026-11-26/future@10",
+		"Was war am Freitag Abend und am Samstagnachmittag los?": "2026-11-20/past@19 2026-11-21/past@15",
+		// counter-cases: no part of the day of the weekday
+		"Was the Monday release late?":                               "2026-11-16/past",
+		"Ist das Meeting am Dienstag zu früh angesetzt?":             "2026-11-24/future",
+		"Monday is too early for the release":                        "2026-11-23/future",
+		"Did the nightly job fail on Wednesday?":                     "2026-11-18/past",
+		"What broke this morning? We had issues on Monday.":          "2026-11-22/today@8",
+		"Wie war das Freitag-Release, und was ist heute nachts los?": "2026-11-22/today@23",
+		"Was läuft nachts?":                                          "2026-11-22/today@23",
+	})
+}

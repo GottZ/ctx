@@ -290,6 +290,73 @@ func (c clauseWords) dayWeekdays() []struct {
 	return all[:n]
 }
 
+// dayPartHours are the words of a part of the day that may follow a weekday
+// and belong to it, with the hour matchTimeOfDay gives the part (issue
+// #517): "Tuesday morning", "saturday night", "Freitag Abend", "Montag früh",
+// "Montag-Abend". dayPartsBefore are those English puts before the weekday
+// ("early Tuesday", "late Friday"); behind it "early" and "late" say how a
+// thing came, not when ("Was the Monday release late?" is no night).
+var (
+	dayPartHours = map[string]int{
+		"morgen": 8, "früh": 8, "vormittag": 10, "mittag": 12, "nachmittag": 15, "abend": 19, "nacht": 23, "spät": 23,
+		"morgens": 8, "vormittags": 10, "mittags": 12, "nachmittags": 15, "abends": 19, "nachts": 23,
+		"morning": 8, "noon": 12, "midday": 12, "afternoon": 15, "evening": 19, "night": 23,
+	}
+	dayPartsBefore = map[string]int{"early": 8, "late": 23}
+	// compoundDayParts are the parts of the day German compounds a weekday
+	// with: "Montagmorgen", "Dienstagabend", "Freitagnachmittag".
+	compoundDayParts = map[string]int{"morgen": 8, "früh": 8, "vormittag": 10, "mittag": 12, "nachmittag": 15, "abend": 19, "nacht": 23}
+)
+
+// weekdayCompound returns the weekday and the hour of a German weekday
+// compounded with a part of the day ("montagmorgen", "dienstagabend"), issue
+// #517.
+func weekdayCompound(w string) (time.Weekday, int, bool) {
+	for wd, name := range weekdayNameDE {
+		if rest, ok := strings.CutPrefix(w, strings.ToLower(name)); ok {
+			if h, ok := compoundDayParts[rest]; ok {
+				return time.Weekday(wd), h, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+// weekdayWord returns the weekday w names: a weekday name of either language
+// or a German weekday compounded with a part of the day.
+func weekdayWord(w string) (time.Weekday, bool) {
+	if wd, ok := weekdayMapDE[w]; ok {
+		return wd, true
+	}
+	if wd, ok := weekdayMapEN[w]; ok {
+		return wd, true
+	}
+	wd, _, ok := weekdayCompound(w)
+	return wd, ok
+}
+
+// dayPartAt returns the hour of the part of the day that belongs to word i
+// of c, a weekday (issue #517): the part it is compounded with
+// ("Montagmorgen"), the word of a part of the day right behind it in its
+// clause ("Tuesday morning", "Freitag Abend", "Montag-Abend") or, in
+// English, right before it ("early Tuesday", "late Friday").
+func (c clauseWords) dayPartAt(i int) (int, bool) {
+	if _, h, ok := weekdayCompound(c.words[i]); ok {
+		return h, true
+	}
+	if i+1 < len(c.words) && !c.starts[i+1] {
+		if h, ok := dayPartHours[c.words[i+1]]; ok {
+			return h, true
+		}
+	}
+	if i > 0 && !c.starts[i] {
+		if h, ok := dayPartsBefore[c.words[i-1]]; ok {
+			return h, true
+		}
+	}
+	return 0, false
+}
+
 // dashAt reports whether the byte i of lower is a hyphen between spaces, a
 // dash.
 func dashAt(lower string, i int) bool {
@@ -770,7 +837,7 @@ func (c clauseWords) wholeTense() string {
 // year or a day date —, as clauseTokens' offsets count.
 func (c clauseWords) firstDateWord(query string) (int, bool) {
 	for i, w := range c.words {
-		_, de := weekdayMapDE[w]
+		_, de := weekdayWord(w)
 		_, en := weekdayMapEN[w]
 		_, month := lookupMonth(w)
 		_, year := isYear(w)
@@ -1099,7 +1166,7 @@ func (c clauseWords) afterFirstConstituent(s, e int) int {
 // dateWord reports whether w names a day, a week, a month or a year: a
 // weekday, the weekend, a month name, a four-digit year or a day date.
 func dateWord(w string) bool {
-	_, de := weekdayMapDE[w]
+	_, de := weekdayWord(w)
 	_, en := weekdayMapEN[w]
 	_, month := lookupMonth(w)
 	_, year := isYear(w)
@@ -2832,28 +2899,63 @@ var (
 func matchTimeOfDay(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
 	today := now.Format("2006-01-02")
+	var r *TemporalResult
 	// Reference hour per pattern (middle of each daypart).
-	mk := func(ref string, hour int) *TemporalResult {
+	mk := func(ref string, hour int) {
 		h := hour
-		return &TemporalResult{
+		r = &TemporalResult{
 			Dates: []TemporalDate{{Ref: ref, Date: today, Dir: "today", Hour: &h}},
 		}
 	}
 	switch {
 	case reMorgens.MatchString(lower):
-		return mk("morgens", 8) // 07:00-10:00
+		mk("morgens", 8) // 07:00-10:00
 	case reVormittags.MatchString(lower):
-		return mk("vormittags", 10) // 10:00-12:00
+		mk("vormittags", 10) // 10:00-12:00
 	case reMittags.MatchString(lower):
-		return mk("mittags", 12) // 12:00-14:00
+		mk("mittags", 12) // 12:00-14:00
 	case reNachmittags.MatchString(lower):
-		return mk("nachmittags", 15) // 14:00-17:00
+		mk("nachmittags", 15) // 14:00-17:00
 	case reAbends.MatchString(lower):
-		return mk("abends", 19) // 17:00-22:00
+		mk("abends", 19) // 17:00-22:00
 	case reNachts.MatchString(lower):
-		return mk("nachts", 23) // 22:00-06:00
+		mk("nachts", 23) // 22:00-06:00
+	default:
+		return nil
 	}
-	return nil
+	// A part of the day that belongs to a weekday is a time of that day, not
+	// of today: the weekday rules read it with its hour (dayPartAt). And a
+	// weekday that names a day answers before a time-of-day word that belongs
+	// to none, unless the word is today's ("heute Abend", "this morning"):
+	// "early", "late", "früh" and "spät" say how a thing came as often as
+	// when ("Was the Monday release late?", "Ist das Meeting am Dienstag zu
+	// früh angesetzt?"), issue #517.
+	c := clauseTokens(query)
+	weekdays := c.dayWeekdays()
+	for _, w := range weekdays {
+		if _, ok := c.dayPartAt(w.idx); ok {
+			return nil
+		}
+	}
+	if len(weekdays) > 0 && !c.todaysDayPart() {
+		return nil
+	}
+	return r
+}
+
+// todayWords make the part of the day right behind them today's ("heute
+// Abend", "this morning"), issue #517.
+var todayWords = toWordSet("heute", "today", "this")
+
+// todaysDayPart reports whether c has a word of a part of the day right
+// behind a word of todayWords.
+func (c clauseWords) todaysDayPart() bool {
+	for i := 1; i < len(c.words); i++ {
+		if _, ok := dayPartHours[c.words[i]]; ok && todayWords[c.words[i-1]] {
+			return true
+		}
+	}
+	return false
 }
 
 func matchRelativeDays(query string, now time.Time) *TemporalResult {
@@ -2976,6 +3078,12 @@ func findAllWeekdays(tokens []string) []struct {
 				idx int
 				ref string
 			}{wd, i, weekdayNameEN[wd]})
+		} else if wd, _, ok := weekdayCompound(tok); ok {
+			results = append(results, struct {
+				wd  time.Weekday
+				idx int
+				ref string
+			}{wd, i, weekdayNameDE[wd]})
 		}
 	}
 	return results
@@ -3013,9 +3121,11 @@ func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 			key := fmtDate(d)
 			if !seen[key] {
 				seen[key] = true
-				dates = append(dates, TemporalDate{
-					Ref: w.ref, Date: key, Dir: dir,
-				})
+				td := TemporalDate{Ref: w.ref, Date: key, Dir: dir}
+				if h, ok := c.dayPartAt(w.idx); ok {
+					td.Hour = &h
+				}
+				dates = append(dates, td)
 			}
 		}
 		if len(dates) >= 2 {
@@ -3064,7 +3174,7 @@ func matchWeekday(query string, tokens []string, now time.Time) *TemporalResult 
 	var wd time.Weekday
 	wdIdx, found := -1, false
 	for i := range c.words {
-		if w, _, ok := findWeekday(c.words[i : i+1]); ok && !c.notADay(i) {
+		if w, ok := weekdayWord(c.words[i]); ok && !c.notADay(i) {
 			wd, wdIdx, found = w, i, true
 			break
 		}
@@ -3093,7 +3203,13 @@ func matchWeekday(query string, tokens []string, now time.Time) *TemporalResult 
 	if _, ok := weekdayMapEN[tokens[wdIdx]]; ok {
 		ref = weekdayNameEN[wd]
 	}
-	return singleResult(ref, fmtDate(d), dir)
+	r := singleResult(ref, fmtDate(d), dir)
+	// A part of the day that belongs to the weekday gives the hour: the day
+	// is the weekday's, the hour the part's (issue #517).
+	if h, ok := c.dayPartAt(wdIdx); ok {
+		r.Dates[0].Hour = &h
+	}
+	return r
 }
 
 func matchSimpleKeywords(query string, now time.Time) *TemporalResult {

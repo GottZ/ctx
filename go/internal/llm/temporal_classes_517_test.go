@@ -132,7 +132,7 @@ func TestRules_ClassCorporaOfIssue517(t *testing.T) {
 // that keeps its improvements counted.
 var classCorpusFloor = map[string]int{
 	"k1-nachname":      58,
-	"k2-tageszeit":     9,
+	"k2-tageszeit":     71,
 	"k3-klauseln":      34,
 	"k4-ellipse":       4,
 	"k5-jahr-partizip": 36,
