@@ -69,13 +69,15 @@ func TestRules_AWeekdayBehindATitleIsASurname(t *testing.T) {
 		"Ist Frau Freitag heute im Büro?":            "2026-11-22/today",
 		"Herr Freitag kommt am Freitag":              "2026-11-27/future",
 		// counter-cases: the weekday is a day
-		"Frau Schmidt, Donnerstag passt mir":       "2026-11-26/future",
-		"Kam die Frau Montag oder Dienstag?":       "2026-11-16/past 2026-11-17/past",
-		"Mr. Smith, Monday was a disaster":         "2026-11-16/past",
-		"Treffen wir Herrn Schulz am Montag?":      "2026-11-23/future",
-		"Is the DR Monday drill still planned?":    "2026-11-23/future",
-		"Ist DR Montag noch geplant?":              "2026-11-23/future",
-		"Am Montag hat Max Montag den PR gemerged": "2026-11-16/past",
+		"Frau Schmidt, Donnerstag passt mir":        "2026-11-26/future",
+		"Kam die Frau Montag oder Dienstag?":        "2026-11-16/past 2026-11-17/past",
+		"Mr. Smith, Monday was a disaster":          "2026-11-16/past",
+		"Treffen wir Herrn Schulz am Montag?":       "2026-11-23/future",
+		"Is the DR Monday drill still planned?":     "2026-11-23/future",
+		"Ist DR Montag noch geplant?":               "2026-11-23/future",
+		"Am Montag hat Max Montag den PR gemerged":  "2026-11-16/past",
+		"Did you miss Monday?":                      "2026-11-16/past",
+		"p99 was 250 ms Friday and 900 ms Saturday": "2026-11-20/past 2026-11-21/past",
 	})
 }
 
@@ -96,6 +98,7 @@ func TestRules_AWeekdayWithAPartOfTheDay(t *testing.T) {
 		"Am Montag-Abend ist das Release":                        "2026-11-23/future@19",
 		"Was the server slow early Tuesday?":                     "2026-11-17/past@8",
 		"Am Donnerstagvormittag fällt der Server aus":            "2026-11-26/future@10",
+		"Am Montagabend crashte der Server":                      "2026-11-16/past@19",
 		"Was war am Freitag Abend und am Samstagnachmittag los?": "2026-11-20/past@19 2026-11-21/past@15",
 		// counter-cases: no part of the day of the weekday
 		"Was the Monday release late?":                               "2026-11-16/past",
@@ -131,6 +134,17 @@ func TestRules_ACoordinatedClauseHasItsOwnTense(t *testing.T) {
 		"Has it been built and deployed on Monday?":            "2026-11-16/past",
 		"Montag und Dienstag sind Feiertage":                   "2026-11-23/future 2026-11-24/future",
 		"Wie lief der Mittwochs-Job am Montag?":                "2026-11-16/past",
+		// from the review: a possessive "ihr" is no subject; a Perfekt or a
+		// state behind a clause in the past shares its past, behind one in
+		// the present it has its own; without a conjunction a weekday right
+		// behind a capital inside its clause may be a surname
+		"Wir haben Max und ihr Team am Montag getroffen":                       "2026-11-16/past",
+		"Am Montag war alles grün und am Dienstag ist der Build gebrochen":     "2026-11-16/past 2026-11-17/past",
+		"It was fine on Monday and on Tuesday it has broken":                   "2026-11-16/past 2026-11-17/past",
+		"Wir haben am Freitag deployed und am Dienstag sind wir zurückgerollt": "2026-11-20/past 2026-11-17/past",
+		"Ist am Montag Meeting und haben wir das Protokoll gelesen?":           "2026-11-23/future",
+		"Am Dienstag hat Anna Freitag angerufen":                               "2026-11-17/past",
+		"Deployed Monday, rolled back Wednesday – why?":                        "2026-11-16/past 2026-11-18/past",
 	})
 }
 
@@ -151,6 +165,7 @@ func TestRules_AYearBeforeAParticipleAndItsNoun(t *testing.T) {
 		"Since 2023 failed deployments trigger a rollback":    "2023-01-01..2026-11-22/range",
 		"After 2022 the failed logins dropped":                "2023-01-01/from",
 		"Before 2024 merged branches were squashed":           "2023-12-31/until",
+		"After 2025 failed access the account locks":          "2026-01-01/from",
 	})
 }
 
@@ -197,6 +212,7 @@ func TestRules_TwoOpposingDayEdgesAreTheWindowBetween(t *testing.T) {
 		"Was war am 2026-03-15 und am 2026-03-20?":                 "2026-03-15/past 2026-03-20/past",
 		"zwischen dem 15.03.2026 und dem 20.03.2026":               "2026-03-15..2026-03-20/range",
 		"What happened after 2026-03-15?":                          "2026-03-16/from",
+		"Was passierte ab 2026-03-15 und vor 2026-03-16?":          "2026-03-15..2026-03-15/range",
 	})
 }
 

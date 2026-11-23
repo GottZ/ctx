@@ -27,7 +27,9 @@ import (
 
 // --- Tokenizer ---.
 
-// ruleTokenize splits query on whitespace and hyphens, trims punctuation, lowercases.
+// ruleTokenize splits query on whitespace and hyphens, trims punctuation,
+// lowercases — the words of clauseTokens, without a conjunction that joins
+// two clauses (coordinate).
 func ruleTokenize(query string) []string {
 	return clauseTokens(query).words
 }
@@ -55,6 +57,9 @@ type clauseWords struct {
 	// joinedNext: the word is joined to the next one by a hyphen
 	// ("Wochenende-Flag", "friday-deploy-script"), issue #506.
 	joinedNext []bool
+	// written: the word starts with an upper-case letter as written, also in
+	// a question whose case caps disregards (afterCapital, issue #517).
+	written []bool
 	// closing caches the table of closingParticiples, filled once per
 	// question by the first clause that needs it (issue #506).
 	closing *[]int
@@ -121,6 +126,7 @@ func clauseTokens(query string) clauseWords {
 	}
 	c.markJoins(lower)
 	c.lang = c.languageOf(0, len(c.words))
+	c.written = append([]bool(nil), c.caps...)
 	// A question written in capitals, or with every word capitalized, says
 	// nothing by its case.
 	n, m := 0, 0
@@ -184,8 +190,10 @@ var englishFiniteWords = toWordSet("will", "would", "shall", "should", "can", "c
 
 // germanSubjects are the German pronouns that are the subject wherever they
 // stand in a clause ("und am Dienstag testen wir"); "es" and "sie" are the
-// object as often and count only where they open it.
-var germanSubjects = toWordSet("ich", "du", "er", "wir", "ihr", "man")
+// object as often and count only where they open it, and "ihr" is the
+// possessive and the dative as often ("Wir haben Max und ihr Team am Montag
+// getroffen") and counts nowhere.
+var germanSubjects = toWordSet("ich", "du", "er", "wir", "man")
 
 // bothLanguageWords are words of finiteWord's sets that are another word in
 // the other language: the German "was" and "am" are the English "was" and
@@ -230,6 +238,71 @@ func (c clauseWords) finiteOpening(s, e, lang int) bool {
 	return false
 }
 
+// englishPerfectAux are the English auxiliaries of the perfect.
+var englishPerfectAux = toWordSet("has", "have", "had", "hasn't", "haven't", "hadn't", "'ve")
+
+// perfectBracket reports whether the words [s, e) of c, a conjunct in a
+// sentence of the language lang, have the verb of a Perfekt or a state: a
+// German auxiliary of the Perfekt with a participle at the conjunct's end
+// ("und am Dienstag ist der Build gebrochen", "und sind am Dienstag
+// zurückgerollt"), or an English auxiliary of the perfect before "been" or a
+// form on -ed ("and on Tuesday it has stopped"). The rules read "sein" with
+// the participle of a verb that does not take it as a state, which names no
+// time; behind a clause in the past the conjunct reports what followed, so
+// it keeps the tense it shares with that clause rather than a neutral one of
+// its own (issue #517).
+func (c clauseWords) perfectBracket(s, e, lang int) bool {
+	last := c.words[e-1]
+	closes := c.participleAt(s, e-1) || seinParticiple(last) || strings.Contains(last, "ge") && (strings.HasSuffix(last, "t") || strings.HasSuffix(last, "en"))
+	for i := s; i < e; i++ {
+		w := c.words[i]
+		if lang != langEnglish && perfektAux[w] && closes {
+			return true
+		}
+		if lang != langGerman && englishPerfectAux[w] && i+1 < e && englishPerfectParticiple(c.words[i+1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// englishPerfectParticiple reports whether w, right behind an English
+// auxiliary of the perfect, has the shape of a participle: a form on -ed, or
+// one on -en, -ne, -wn or -un of at least four letters ("broken", "been",
+// "gone", "done", "shown", "begun") that is no determiner or pronoun.
+func englishPerfectParticiple(w string) bool {
+	if englishParticiple(w) {
+		return true
+	}
+	if utf8.RuneCountInString(w) < 4 || englishDeterminers[w] || englishSubjects[w] {
+		return false
+	}
+	for _, end := range []string{"en", "ne", "wn", "un"} {
+		if strings.HasSuffix(w, end) {
+			return true
+		}
+	}
+	return false
+}
+
+// pastWord reports whether word k of c, in a conjunct that starts at s and a
+// clause that ends at e, in a sentence of the language lang, is a verb in the
+// past the conjunct names its time by (coordinate): a German simple past the
+// rules know, an English past form ("was", "did", "deployed") that no form of
+// "be" makes a passive, or an English verb on -ed right behind its subject
+// ("It worked on Monday").
+func (c clauseWords) pastWord(s, k, e, lang int) bool {
+	w := c.words[k]
+	if lang != langEnglish && germanPastVerbs[w] {
+		return true
+	}
+	if lang == langGerman || lang == langMixed && w == "was" {
+		return false
+	}
+	words := c.words[s:e]
+	return (englishPastVerbs[w] || englishFinitePast(words, k-s)) && !englishPassiveAt(words, k-s)
+}
+
 // coordinate starts a clause at each conjunction of clauseConjunctions that
 // stands between two clauses with a finite verb each (finiteWord or
 // finiteOpening, in the language of the sentence), issue #517, and takes the
@@ -250,50 +323,82 @@ func (c *clauseWords) coordinate() {
 			ss, se = c.sentenceOf(s)
 			lang = c.sentenceLanguage(ss, se)
 		}
-		ls, leftFinite := s, c.finiteOpening(s, e, lang)
-		for j := s; j < e; {
-			if j == ls || !clauseConjunctions[c.words[j]] {
-				leftFinite = leftFinite || finiteWord(c.words[j], lang)
-				j++
-				continue
-			}
-			re := j + 1
-			for re < e && !clauseConjunctions[c.words[re]] {
-				re++
-			}
-			scanned(re - j)
-			rightFinite := c.finiteOpening(j+1, re, lang)
-			for k := j + 1; k < re && !rightFinite; k++ {
-				rightFinite = finiteWord(c.words[k], lang)
-			}
-			if leftFinite && rightFinite && j+1 < re {
-				drop = append(drop, j)
-				c.starts[j+1] = true
-				ls, leftFinite = j+1, true
-			} else {
-				leftFinite = leftFinite || rightFinite
-			}
-			j = re
-		}
+		drop = c.coordinateClause(s, e, lang, drop)
 		s = e
 	}
+	c.dropWords(drop)
+}
+
+// conjunct is what coordinate reads of the words of a conjunct: a finite verb
+// of its own (finiteWord, finiteOpening), a verb in the past (pastWord), an
+// auxiliary of the German Perfekt.
+type conjunct struct{ finite, past, aux bool }
+
+// add reads word i of c into the conjunct that starts at s, in a clause that
+// ends at e.
+func (k conjunct) add(c *clauseWords, s, i, e, lang int) conjunct {
+	k.finite = k.finite || finiteWord(c.words[i], lang)
+	k.past = k.past || c.pastWord(s, i, e, lang)
+	k.aux = k.aux || lang != langEnglish && perfektAux[c.words[i]]
+	return k
+}
+
+// coordinateClause appends to drop the conjunctions of the clause [s, e)
+// that start a clause (coordinate) and marks the word behind each as a
+// clause start.
+func (c *clauseWords) coordinateClause(s, e, lang int, drop []int) []int {
+	ls := s
+	left := conjunct{finite: c.finiteOpening(s, e, lang)}
+	for j := s; j < e; {
+		if j == ls || !clauseConjunctions[c.words[j]] {
+			left = left.add(c, ls, j, e, lang)
+			j++
+			continue
+		}
+		re := j + 1
+		for re < e && !clauseConjunctions[c.words[re]] {
+			re++
+		}
+		scanned(re - j)
+		right := conjunct{finite: c.finiteOpening(j+1, re, lang)}
+		for k := j + 1; k < re; k++ {
+			right = right.add(c, j+1, k, e, lang)
+		}
+		// A conjunct whose verb is a Perfekt or a state behind one in the
+		// past reports what followed and shares that past ("Am Montag war
+		// alles grün und am Dienstag ist der Build gebrochen"); behind one in
+		// the present it has a tense of its own.
+		shared := j+1 < re && c.perfectBracket(j+1, re, lang) && (left.past || left.aux && c.participleAt(ls, j-1))
+		if left.finite && right.finite && j+1 < re && !shared {
+			drop = append(drop, j)
+			c.starts[j+1] = true
+			ls, left = j+1, right
+			left.finite = true
+		} else {
+			left = conjunct{left.finite || right.finite, left.past || right.past, left.aux || right.aux}
+		}
+		j = re
+	}
+	return drop
+}
+
+// dropWords takes the words at the sorted indexes drop out of c.
+func (c *clauseWords) dropWords(drop []int) {
 	if len(drop) == 0 {
 		return
 	}
-	keep := func(i int) bool {
-		k := sort.SearchInts(drop, i)
-		return k == len(drop) || drop[k] != i
-	}
-	n := 0
+	n, k := 0, 0
 	for i := range c.words {
-		if keep(i) {
-			c.words[n], c.starts[n], c.caps[n], c.offs[n] = c.words[i], c.starts[i], c.caps[i], c.offs[i]
-			c.sentence[n], c.upper[n], c.joinedNext[n] = c.sentence[i], c.upper[i], c.joinedNext[i]
-			n++
+		if k < len(drop) && drop[k] == i {
+			k++
+			continue
 		}
+		c.words[n], c.starts[n], c.caps[n], c.offs[n] = c.words[i], c.starts[i], c.caps[i], c.offs[i]
+		c.sentence[n], c.upper[n], c.joinedNext[n], c.written[n] = c.sentence[i], c.upper[i], c.joinedNext[i], c.written[i]
+		n++
 	}
 	c.words, c.starts, c.caps, c.offs = c.words[:n], c.starts[:n], c.caps[:n], c.offs[:n]
-	c.sentence, c.upper, c.joinedNext = c.sentence[:n], c.upper[:n], c.joinedNext[:n]
+	c.sentence, c.upper, c.joinedNext, c.written = c.sentence[:n], c.upper[:n], c.joinedNext[:n], c.written[:n]
 }
 
 // colloquialForms are spoken forms of German auxiliaries and verbs a
@@ -419,11 +524,16 @@ var (
 // gesagt?" names no Friday. A title written in capitals is an acronym ("DR
 // Monday", "MS Teams"), and one behind an article the noun.
 func (c clauseWords) surnameAt(i int) bool {
-	if i == 0 || c.starts[i] || !titleWords[c.words[i-1]] || c.upper[i-1] {
+	if i == 0 || c.starts[i] || !titleWords[c.words[i-1]] || c.upper[i-1] || commonTitleWords[c.words[i-1]] && !c.caps[i-1] {
 		return false
 	}
 	return i < 2 || !titleArticles[c.words[i-2]]
 }
+
+// commonTitleWords are titles that are other words as well when written in
+// lower case: "ms" the milliseconds, "miss" the verb ("Did you miss
+// Monday?"); they are a title only with their capital (issue #517).
+var commonTitleWords = toWordSet("ms", "miss")
 
 // notADay reports whether word i of c, a weekday or the weekend, names no day:
 // it is joined to a word that names none (inCompound) or a surname
@@ -3299,6 +3409,17 @@ func matchWeekend(query string, now time.Time) *TemporalResult {
 	return rangeResult("am Wochenende", fmtDate(nextSat), fmtDate(nextSun), "future")
 }
 
+// afterCapital reports whether word i of c stands right behind a word in its
+// clause that is written with a capital and is no acronym, not the word that
+// opens the clause. It reads the case as written (written), also where a
+// question capitalizes most of its words: German capitalizes its nouns, and a
+// short question with a name is mostly capitals ("Am Dienstag hat Anna
+// Freitag angerufen"). A question with every word capitalized loses a
+// weekday beyond the first here, as the rules lost it before issue #517.
+func (c clauseWords) afterCapital(i int) bool {
+	return i > 0 && !c.starts[i] && !c.starts[i-1] && c.written[i-1] && !c.upper[i-1]
+}
+
 // findAllWeekdays returns all weekday tokens found in the query with their positions.
 func findAllWeekdays(tokens []string) []struct {
 	wd  time.Weekday
@@ -3344,6 +3465,24 @@ func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 	// Freitag werden wir das Postmortem halten", issue #517).
 	c := clauseTokens(query)
 	weekdays := c.dayWeekdays()
+	hasConjunction := strings.Contains(lower, " und ") || strings.Contains(lower, " and ")
+	hasDisjunction := strings.Contains(lower, " oder ") || strings.Contains(lower, " or ")
+	if !hasConjunction && !hasDisjunction {
+		// Without a conjunction a weekday beyond the first right behind a
+		// word written with a capital inside its clause may be a surname
+		// ("Am Dienstag hat Max Montag die Migration gemacht", "Am Mittwoch
+		// hat die Frau Montag angerufen"); it counts only elsewhere ("…, am
+		// Freitag werden wir …", "Deployed Monday, rolled back Wednesday"),
+		// issue #517.
+		n := 0
+		for k, w := range weekdays {
+			if k == 0 || !c.afterCapital(w.idx) {
+				weekdays[n] = w
+				n++
+			}
+		}
+		weekdays = weekdays[:n]
+	}
 	if len(weekdays) >= 2 {
 		// Each weekday by the tense of its own clause (tenseAt): "We
 		// deployed on Monday, and we will deploy on Monday" names two days
@@ -3373,8 +3512,6 @@ func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 		}
 	}
 
-	hasConjunction := strings.Contains(lower, " und ") || strings.Contains(lower, " and ")
-	hasDisjunction := strings.Contains(lower, " oder ") || strings.Contains(lower, " or ")
 	if !hasConjunction && !hasDisjunction {
 		return nil
 	}
