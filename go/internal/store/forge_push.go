@@ -447,6 +447,11 @@ const (
 	PushSkipFlagged PushSkip = "flagged"
 	// PushSkipGone: the mapping row is gone.
 	PushSkipGone PushSkip = "gone"
+	// PushSkipGated: a remote resolution since the listing keeps the push
+	// away until a pull decided over the entity (issue #509) — the base the
+	// resolution wrote can equal the listed one, so the base check alone
+	// lets a pass that listed the entity before it send its listing.
+	PushSkipGated PushSkip = "gated"
 )
 
 // pushLockSQL and pushUnlockSQL take and give back the advisory lock of one
@@ -499,9 +504,9 @@ func TryLockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID, listedB
 		return false, PushSkipInFlight, nil
 	}
 	var base string
-	var conflict bool
+	var conflict, gated bool
 	err = conn.QueryRow(ctx,
-		`SELECT base_hash, conflict FROM context_project_sync_map WHERE block_id = $1::uuid`, blockID).Scan(&base, &conflict)
+		`SELECT base_hash, conflict, synced_at = 'infinity'::timestamptz FROM context_project_sync_map WHERE block_id = $1::uuid`, blockID).Scan(&base, &conflict, &gated)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return true, PushSkipGone, nil
@@ -511,6 +516,8 @@ func TryLockPushEntity(ctx context.Context, conn *pgxpool.Conn, blockID, listedB
 		return true, PushSkipOvertaken, nil
 	case conflict:
 		return true, PushSkipFlagged, nil
+	case gated:
+		return true, PushSkipGated, nil
 	}
 	return true, "", nil
 }
