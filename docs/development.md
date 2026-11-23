@@ -216,17 +216,22 @@ cd go && CTX_TEST_PG_IMAGE=pgvector-timescaledb:pg18 PGOPTIONS='-c random_page_c
 A result that follows the setting on both images is not tied to an image: the
 setting decides it, and a deployment on the default gets the result of 4.
 
-Expected red on the production image (`internal/store`, measured for issue
-#485, where the follow-up issues are linked): `TestBlockCounts_StatsCostIndependentOfCorpus`
-(at `random_page_cost` 4 the oldest/newest entry of `GetStats` walks
-`idx_context_created` instead of reading one entry of
-`idx_context_scope_active` per scope) and
-`TestEmbedExcludedTenantEntryCostBothDirections` (at `random_page_cost` 4 the
-reconcile's batches walk `context_blocks_pkey` and `idx_context_scope`
-instead of the scope's range of their partial indexes). Both are product
-findings, not image artefacts: the same plans and buffer counts appear on the
-CI image under `random_page_cost` 4. In one run of the whole package on each
-image (2026-11-22, 633 top-level tests) every other test passed.
+A pin whose plan depends on `random_page_cost` states its assertions under
+both values instead of the container's own: `testdb.RandomPageCosts` lists 1.1
+and 4, and `testdb.WithRandomPageCost(t, pool, value)` returns a pool on the
+test's database whose every connection plans with that value (a startup
+parameter of the connection, so it holds for prepared statements and their
+generic plans, survives `RESET`, and wins over `PGOPTIONS`).
+`TestBlockCounts_StatsCostIndependentOfCorpus`,
+`TestEmbedExcludedTenantEntryCostBothDirections` and
+`TestEmbedExcludedStaleCostAgainstForeignStale` run that way (issues #512,
+#513: at 4 the oldest/newest entry of `GetStats` walked `idx_context_created`,
+and the reconcile's batches `context_blocks_pkey`, `idx_context_scope` and
+`idx_embedding_pending`, instead of the scope's range of their indexes), so
+they are red on either image when a statement takes such a plan under one of
+the two values. The two embed-excluded pins replay a statement that ran in a
+transaction under that transaction's `SET LOCAL` settings, and a statement
+trigger checks that the settings were in effect when the batch ran.
 
 ### Gates by impact (`go/gates.sh`)
 
