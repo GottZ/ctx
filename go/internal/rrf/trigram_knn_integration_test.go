@@ -121,16 +121,39 @@ func vw4CTE(t *testing.T, file, query, strip string) (string, []any) {
 	if err != nil {
 		t.Fatalf("read embedded %s: %v", file, err)
 	}
-	body := string(raw)
+	return vw4LiftCTE(t, file, string(raw), query, strip)
+}
+
+// vw4InstalledCTE lifts the trigram_title CTE out of the ctx_rrf body the
+// database runs, read back from the catalog: the migrations after 140 that
+// replace ctx_rrf (145, 147) carry their own copy of the CTE, and a test that
+// pins how production delivers the arm has to plan that copy, not 140's.
+func vw4InstalledCTE(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string) (string, []any) {
+	t.Helper()
+	var def string
+	if err := pool.QueryRow(ctx,
+		`SELECT pg_get_functiondef(p.oid) FROM pg_proc p
+		 JOIN pg_namespace n ON n.oid = p.pronamespace
+		 WHERE p.proname = 'ctx_rrf' AND n.nspname = 'public'`).Scan(&def); err != nil {
+		t.Fatalf("pg_get_functiondef(ctx_rrf): %v", err)
+	}
+	return vw4LiftCTE(t, "the installed ctx_rrf", def, query, "")
+}
+
+// vw4LiftCTE cuts the FIRST trigram_title CTE out of body (a migration file
+// or a function definition; source names it in failures) and wraps it as
+// vw4CTE describes.
+func vw4LiftCTE(t *testing.T, source, body, query, strip string) (string, []any) {
+	t.Helper()
 	const open = "    trigram_title AS (\n"
 	const closeMark = "\n    ),\n    block_mass AS ("
 	i := strings.Index(body, open)
 	if i < 0 {
-		t.Fatalf("%s: no trigram_title CTE — migration drifted?", file)
+		t.Fatalf("%s: no trigram_title CTE — migration drifted?", source)
 	}
 	j := strings.Index(body[i:], closeMark)
 	if j < 0 {
-		t.Fatalf("%s: trigram_title CTE has no block_mass terminator — migration drifted?", file)
+		t.Fatalf("%s: trigram_title CTE has no block_mass terminator — migration drifted?", source)
 	}
 	cte := body[i+len(open) : i+j]
 
@@ -145,7 +168,7 @@ func vw4CTE(t *testing.T, file, query, strip string) (string, []any) {
 			kept = append(kept, line)
 		}
 		if hits != 1 {
-			t.Fatalf("%s: strip %q matched %d lines, want exactly 1", file, strip, hits)
+			t.Fatalf("%s: strip %q matched %d lines, want exactly 1", source, strip, hits)
 		}
 		cte = strings.Join(kept, "\n")
 	}
@@ -161,7 +184,7 @@ func vw4CTE(t *testing.T, file, query, strip string) (string, []any) {
 		stmt = strings.ReplaceAll(stmt, p.name, fmt.Sprintf("$%d%s", len(used), p.cast))
 	}
 	if strings.Contains(stmt, "p_") {
-		t.Fatalf("%s: unsubstituted parameter left in the lifted CTE:\n%s", file, stmt)
+		t.Fatalf("%s: unsubstituted parameter left in the lifted CTE:\n%s", source, stmt)
 	}
 	return stmt, used
 }
@@ -800,12 +823,11 @@ func TestVW4IndexGuardDefinition(t *testing.T) {
 // The inner tiebreak `, cb.id` (review V-W4, finding #2)
 // ---------------------------------------------------------------------------.
 
-// vw4RunCTEUnder runs the lifted CTE inside a transaction with the given
-// `SET LOCAL` statements applied, and returns the plan alongside the rows so a
-// caller can prove that the perturbation actually moved the plan.
-func vw4RunCTEUnder(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, gucs ...string) ([]vw4Ranked, string) {
+// vw4RunCTEUnder runs a lifted CTE statement inside a transaction with the
+// given `SET LOCAL` statements applied, and returns the plan alongside the
+// rows so a caller can prove that the perturbation actually moved the plan.
+func vw4RunCTEUnder(t *testing.T, ctx context.Context, pool *pgxpool.Pool, stmt string, args []any, gucs ...string) ([]vw4Ranked, string) {
 	t.Helper()
-	stmt, args := vw4CTE(t, vw4New, query, "")
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
@@ -846,6 +868,27 @@ func vw4RunCTEUnder(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query
 	return out, strings.Join(plan, "\n")
 }
 
+// vw4PlanA and vw4PlanB are the two plans TestVW4TrigramInnerTiebreak runs
+// the arm under, each forced by its transaction's settings rather than left
+// to the cost model.
+//
+// Plan A is the KNN scan of the GiST index. On the 72-row fixture the planner
+// prefers a sequential scan plus sort to it at random_page_cost 4
+// (PostgreSQL's default and a deployment's value; issue #514), and with
+// sequential scans disabled it takes a bitmap scan, then a plain index scan,
+// of another index plus an explicit sort (measured on both images at 4). With
+// all three disabled, the GiST scan is the one path whose order needs no
+// explicit sort of its own: it delivers the distance order, and the id
+// tiebreak on top of it is an incremental sort, which enable_sort does not
+// govern. The outer sort by rank is common to every path.
+//
+// Plan B can use neither an index scan nor a bitmap scan of any index, which
+// leaves the sequential scan.
+var (
+	vw4PlanA = []string{"SET LOCAL enable_seqscan = off", "SET LOCAL enable_bitmapscan = off", "SET LOCAL enable_sort = off"}
+	vw4PlanB = []string{"SET LOCAL enable_indexscan = off", "SET LOCAL enable_bitmapscan = off"}
+)
+
 // TestVW4TrigramInnerTiebreak is the trigram-arm counterpart to migration
 // 139's plan-perturbation gate (gen17_tiebreak_integration_test.go,
 // bw1bSequenceDiff): with a similarity tie straddling the cap, the delivered
@@ -856,12 +899,17 @@ func vw4RunCTEUnder(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query
 // gen_random_uuid() (v4), not the uuidv7 default, so heap order carries no
 // information about id order — without `, cb.id` in the inner ORDER BY the two
 // plans pick different members and the gate is red.
+//
+// The arm under test is the trigram_title CTE of the ctx_rrf body the
+// database runs (vw4InstalledCTE), and both plans are forced (vw4PlanA,
+// vw4PlanB), under each value of testdb.RandomPageCosts: the comparison holds
+// whatever plan the cost model would pick on its own.
 func TestVW4TrigramInnerTiebreak(t *testing.T) {
-	pool := testdb.SetupTestDB(t)
+	base := testdb.SetupTestDB(t)
 	ctx := context.Background()
 	const q = "vw4 tiebreak anchor"
 
-	if _, err := pool.Exec(ctx, `
+	if _, err := base.Exec(ctx, `
 		WITH f AS (SELECT string_agg(md5(k::text), ' ') AS filler FROM generate_series(1, 8) k)
 		INSERT INTO context_blocks (id, category, title, content, scope, type_name)
 		SELECT gen_random_uuid(), 'vw4tb' || s,
@@ -871,9 +919,9 @@ func TestVW4TrigramInnerTiebreak(t *testing.T) {
 		FROM f, generate_series(1, 72) s`, q, vw4Scope, vw4Type); err != nil {
 		t.Fatalf("seed tie fixture: %v", err)
 	}
-	vw4Analyze(t, ctx, pool)
+	vw4Analyze(t, ctx, base)
 
-	sims := vw4Similarities(t, ctx, pool, q)
+	sims := vw4Similarities(t, ctx, base, q)
 	tie := 0
 	for _, s := range sims {
 		if s == sims[len(sims)-1] {
@@ -886,25 +934,31 @@ func TestVW4TrigramInnerTiebreak(t *testing.T) {
 	t.Logf("fixture: %d rows above the threshold, one exact tie group of %d spanning ranks %d..%d — the cap at %d cuts through it",
 		len(sims), tie, len(sims)-tie+1, len(sims), vw4Cap)
 
-	indexed, planA := vw4RunCTEUnder(t, ctx, pool, q)
-	seq, planB := vw4RunCTEUnder(t, ctx, pool, q, "SET LOCAL enable_indexscan = off", "SET LOCAL enable_bitmapscan = off")
+	stmt, args := vw4InstalledCTE(t, ctx, base, q)
+	for _, rpc := range testdb.RandomPageCosts {
+		t.Run("random_page_cost="+rpc, func(t *testing.T) {
+			pool := testdb.WithRandomPageCost(t, base, rpc)
+			indexed, planA := vw4RunCTEUnder(t, ctx, pool, stmt, args, vw4PlanA...)
+			seq, planB := vw4RunCTEUnder(t, ctx, pool, stmt, args, vw4PlanB...)
 
-	if !strings.Contains(planA, "Index Scan using "+vw4Index) {
-		t.Fatalf("plan A does not use the GiST index — the two plans are not two plans:\n%s", planA)
+			if !strings.Contains(planA, "Index Scan using "+vw4Index) {
+				t.Fatalf("plan A (%s) does not use the GiST index — the two plans are not two plans:\n%s", strings.Join(vw4PlanA, "; "), planA)
+			}
+			if strings.Contains(planB, "Index Scan using "+vw4Index) {
+				t.Fatalf("plan B still uses the GiST index — the perturbation did not take:\n%s", planB)
+			}
+			if len(indexed) != vw4Cap || len(seq) != vw4Cap {
+				t.Fatalf("plan A delivered %d rows, plan B %d, want %d each", len(indexed), len(seq), vw4Cap)
+			}
+			for i := range indexed {
+				if indexed[i] != seq[i] {
+					t.Errorf("position %d differs between plans: index scan = (%s, rank %d), sequential scan = (%s, rank %d) — the selection at the cap boundary is plan-dependent, which is exactly what the inner `, cb.id` is there to prevent",
+						i, indexed[i].ID, indexed[i].Rank, seq[i].ID, seq[i].Rank)
+				}
+			}
+			t.Logf("inner tiebreak: %d ids identical in identical rank order across an index-scan and a sequential-scan plan", len(indexed))
+		})
 	}
-	if strings.Contains(planB, "Index Scan using "+vw4Index) {
-		t.Fatalf("plan B still uses the GiST index — the perturbation did not take:\n%s", planB)
-	}
-	if len(indexed) != vw4Cap || len(seq) != vw4Cap {
-		t.Fatalf("plan A delivered %d rows, plan B %d, want %d each", len(indexed), len(seq), vw4Cap)
-	}
-	for i := range indexed {
-		if indexed[i] != seq[i] {
-			t.Errorf("position %d differs between plans: index scan = (%s, rank %d), sequential scan = (%s, rank %d) — the selection at the cap boundary is plan-dependent, which is exactly what the inner `, cb.id` is there to prevent",
-				i, indexed[i].ID, indexed[i].Rank, seq[i].ID, seq[i].Rank)
-		}
-	}
-	t.Logf("inner tiebreak: %d ids identical in identical rank order across an index-scan and a sequential-scan plan", len(indexed))
 }
 
 // ---------------------------------------------------------------------------
