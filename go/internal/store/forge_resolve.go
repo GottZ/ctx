@@ -52,7 +52,7 @@ type FlaggedSyncMap struct {
 // SeenValid answers whether the row's forge snapshot describes the newest
 // forge observation the row records (Seen.At == ForgeUpdatedAt).
 func (m FlaggedSyncMap) SeenValid() bool {
-	if m.Seen == nil || m.Seen.At == nil || m.ForgeUpdatedAt == nil || m.Seen.Hash == "" || len(m.Seen.Fields) == 0 {
+	if m.Seen == nil || m.Seen.At == nil || m.ForgeUpdatedAt == nil || m.Seen.Hash == "" || len(m.Seen.Fields) == 0 || string(m.Seen.Fields) == "null" {
 		return false
 	}
 	return m.Seen.At.Truncate(time.Microsecond).Equal(m.ForgeUpdatedAt.Truncate(time.Microsecond))

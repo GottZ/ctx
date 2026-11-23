@@ -9,6 +9,7 @@
 package forge
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -168,12 +169,17 @@ func TestARemoteRevertToTheBaseInsideAPushWindowIsPulled(t *testing.T) {
 		name       string
 		etags, six bool
 		sameSecond bool
+		runs       int // the other instance's runs inside the window (0: one)
 	}{
-		{"etags, #6 a second later", true, true, false},
-		{"etags, no #6", true, false, false},
-		{"no etags, #6 a second later", false, true, false},
-		{"no etags, no #6", false, false, false},
-		{"no etags, #6 a second later, revert in the PATCH's second", false, true, true},
+		{"etags, #6 a second later", true, true, false, 0},
+		{"etags, no #6", true, false, false, 0},
+		{"no etags, #6 a second later", false, true, false, 0},
+		{"no etags, no #6", false, false, false, 0},
+		{"no etags, #6 a second later, revert in the PATCH's second", false, true, true, 0},
+		// The second run reads the revert again with the stamp the first
+		// one recorded (no hold) and saves its cursor past it; the advance
+		// finds the observation later than its PATCH and flags the mapping.
+		{"etags, #6 a second later, two runs in the window", true, true, false, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := i509WithSix(t, "lsr", tc.etags)
@@ -189,8 +195,10 @@ func TestARemoteRevertToTheBaseInsideAPushWindowIsPulled(t *testing.T) {
 				if tc.six {
 					e.gh.edit(t, 6, func(it *fakeIssue) { it.Body = "six, edited on the forge" })
 				}
-				if _, err := e.i509Run(other); err != nil {
-					t.Errorf("the other instance's run in the window: %v", err)
+				for i := 0; i < max(tc.runs, 1); i++ {
+					if _, err := e.i509Run(other); err != nil {
+						t.Errorf("the other instance's run %d in the window: %v", i+1, err)
+					}
 				}
 			})
 			if pr := e.pushOn(t, e.pool); pr.Pushed != 1 {
@@ -203,6 +211,18 @@ func TestARemoteRevertToTheBaseInsideAPushWindowIsPulled(t *testing.T) {
 			if !flagged && (e.body(t) != orig || base != e.forgeH(t)) {
 				t.Fatalf("SILENT LOSS: the remote revert to %q is not in the block (%q), no flag", orig, e.body(t))
 			}
+			if !flagged {
+				return
+			}
+			// The flag the advance set lists the revert as the forge side,
+			// and taking the remote version pulls it.
+			cs, _, err := e.resolverOn(e.pool).ListConflicts(context.Background(), e.proj, "", 0)
+			if err != nil || len(cs) != 1 || !cs[0].Forge.SeenCurrent || cs[0].Forge.Seen.Hash != e.forgeH(t) {
+				t.Fatalf("the listed flag: %+v %v — want the revert as the current forge side", cs, err)
+			}
+			e.resolve(t, ResolveRemote)
+			e.i509MustRun(t)
+			e.i509WantPulled(t, orig, "the run after the remote resolution")
 		})
 	}
 }

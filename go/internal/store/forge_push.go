@@ -342,6 +342,21 @@ type PushProjection func(b *Block) string
 // forge holds now is not known — a resolution then keeps the local version
 // against an unknown base (a full push) instead of a stale one.
 //
+// A remote edit that brought the forge back to the listed base after the
+// PATCH landed, seen by a pull before this advance, is flagged here (issue
+// #509): the row still holds the listed base, and its forge_updated_at — the
+// pull recorded that observation (a ctx-ahead read with a newer fetch) — is
+// later than the PATCH's answer, so the forge held the base's content after
+// this write. The base becomes the sent version as always, the flag goes on,
+// and the flag's forge snapshot is that observation (the listed base's
+// fields, hash and stamp), so the resolve surface lists both sides and
+// keeping the local version pushes it again. The pull that saw it held its
+// leg's cursor and its next run pulls the revert and clears the flag; when
+// another run of that instance read the entity again before this advance
+// (the same stamp, no hold) and saved its cursor past it, the flag keeps the
+// revert visible instead of the sent version standing over it unseen. moved
+// reports this case too (the push counts a conflict).
+//
 // sent says that a wire write carried ctxHash (false: the advance alone, the
 // listed block projecting to its base already, or only a never-pushed field
 // diverging). An advance without a wire write writes only while the row still holds
@@ -369,17 +384,26 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 	// UPDATE, so every expression tests the stored base: the listed one ($6)
 	// or the version the PATCH sent ($2), on which another instance's pull
 	// may have converged in the meantime.
+	// reverted (R below): a pull saw the forge after this PATCH landed — its
+	// observation is later than the PATCH's answer — holding the listed
+	// base's content, while the row still holds that base (issue #509).
+	const reverted = `($9 AND base_hash = $6 AND base_hash <> $2 AND $8::timestamptz IS NOT NULL AND forge_updated_at > $8::timestamptz)`
+	var revert bool
 	err = tx.QueryRow(ctx, `
 		UPDATE context_project_sync_map
 		   SET base_hash = CASE WHEN base_hash IN ($6, $2) THEN $2 ELSE $7 END,
 		       synced_at = CASE WHEN $4 THEN $5::timestamptz ELSE '-infinity'::timestamptz END,
-		       metadata = (CASE WHEN base_hash IN ($6, $2) THEN metadata || $3::jsonb ELSE metadata - 'base_fields' END) - 'forge_seen',
+		       metadata = CASE WHEN `+reverted+`
+		                       THEN (metadata || $3::jsonb) || jsonb_build_object('forge_seen', jsonb_build_object(
+		                              'fields', metadata->'base_fields', 'hash', base_hash, 'at', `+utcJSON(`forge_updated_at`)+`))
+		                       WHEN base_hash IN ($6, $2) THEN (metadata || $3::jsonb) - 'forge_seen'
+		                       ELSE (metadata - 'base_fields') - 'forge_seen' END,
 		       forge_updated_at = CASE WHEN base_hash IN ($6, $2) THEN GREATEST(forge_updated_at, $8::timestamptz) ELSE forge_updated_at END,
-		       conflict = conflict OR base_hash NOT IN ($6, $2),
-		       conflict_at = CASE WHEN base_hash IN ($6, $2) THEN conflict_at ELSE COALESCE(conflict_at, now()) END
+		       conflict = conflict OR base_hash NOT IN ($6, $2) OR `+reverted+`,
+		       conflict_at = CASE WHEN base_hash IN ($6, $2) AND NOT `+reverted+` THEN conflict_at ELSE COALESCE(conflict_at, now()) END
 		 WHERE block_id = $1::uuid AND ($9 OR base_hash = $6)
-		RETURNING old.base_hash NOT IN ($6, $2)`,
-		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash, forgeUpdatedAt, sent).Scan(&moved)
+		RETURNING old.base_hash NOT IN ($6, $2), `+reverted,
+		blockID, ctxHash, baseFieldsMeta(ctxFields), holds, at, listedBase, UnknownBaseHash, forgeUpdatedAt, sent).Scan(&moved, &revert)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		// The mapping is gone, or an advance without a wire write found the
@@ -391,7 +415,7 @@ func AdvancePushBase(ctx context.Context, tx pgx.Tx, blockID, listedBase, ctxHas
 	if moved {
 		return true, nil
 	}
-	return false, StampForgeState(ctx, tx, blockID, ctxFields)
+	return revert, StampForgeState(ctx, tx, blockID, ctxFields)
 }
 
 // PushSkip names why a push section leaves an entity to the next run; ""
