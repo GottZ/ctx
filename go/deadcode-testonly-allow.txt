@@ -222,6 +222,8 @@ internal/testdb/explain.go	ExplainGeneric	# testdb: integration-getaggter EXPLAI
 internal/testdb/explain.go	PlanCost.String	# testdb: integration-getaggter EXPLAIN-Helfer der Kosten-Pins (issue #239), 0 Prod
 internal/testdb/explain.go	parsePlanCost	# testdb: integration-getaggter EXPLAIN-Helfer der Kosten-Pins (issue #239), 0 Prod
 internal/testdb/explain.go	sqlLiteral	# testdb: integration-getaggter EXPLAIN-Helfer der Kosten-Pins (issue #239), 0 Prod
+internal/testdb/planner.go	WithRandomPageCost	# testdb: integration-getaggter Pool mit random_page_cost 1.1/4 für die Kosten-Pins (issues #512, #513), 0 Prod
+internal/testdb/planner.go	WithSessionSettings	# testdb: integration-getaggter Pool mit Sitzungs-Settings für die Kosten-Pins (issues #512, #513), 0 Prod
 internal/testdb/setup.go	SetupSeededTestDB	# testdb: integration-getaggtes Container-/Template-DB-Setup, 393 Test-Importeure, 0 Prod
 internal/testdb/setup.go	SetupTestDB	# testdb: integration-getaggtes Container-/Template-DB-Setup, 393 Test-Importeure, 0 Prod
 internal/testdb/setup.go	SetupTestDBUpTo	# testdb: integration-getaggtes Container-/Template-DB-Setup, 393 Test-Importeure, 0 Prod
