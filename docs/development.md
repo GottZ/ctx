@@ -182,13 +182,16 @@ and 4, and `testdb.WithRandomPageCost(t, pool, value)` returns a pool on the
 test's database whose every connection plans with that value (a startup
 parameter of the connection, so it holds for prepared statements and their
 generic plans, survives `RESET`, and wins over `PGOPTIONS`).
-`TestBlockCounts_StatsCostIndependentOfCorpus` and
-`TestEmbedExcludedTenantEntryCostBothDirections` run that way (issues #512,
+`TestBlockCounts_StatsCostIndependentOfCorpus`,
+`TestEmbedExcludedTenantEntryCostBothDirections` and
+`TestEmbedExcludedStaleCostAgainstForeignStale` run that way (issues #512,
 #513: at 4 the oldest/newest entry of `GetStats` walked `idx_context_created`,
 and the reconcile's batches `context_blocks_pkey`, `idx_context_scope` and
 `idx_embedding_pending`, instead of the scope's range of their indexes), so
 they are red on either image when a statement takes such a plan under one of
-the two values.
+the two values. The two embed-excluded pins replay a statement that ran in a
+transaction under that transaction's `SET LOCAL` settings, and a statement
+trigger checks that the settings were in effect when the batch ran.
 
 ### Gates by impact (`go/gates.sh`)
 
