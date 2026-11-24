@@ -646,9 +646,10 @@ type restUpdateItem struct {
 	ParentItem json.RawMessage `json:"parent_item"`
 }
 
-// decodeStoreBatchItem decodes one REST batch item: an item with a non-null
+// decodeStoreBatchItem decodes one REST batch item: an item with a non-empty
 // `id` is an update item, every other one a store item, decoded exactly as
-// /api/store decodes its body.
+// /api/store decodes its body — the reading of the MCP item (an empty id is
+// no id there either).
 func decodeStoreBatchItem(raw json.RawMessage) (storeBatchEntry, error) {
 	var probe struct {
 		ID *string `json:"id"`
@@ -656,7 +657,7 @@ func decodeStoreBatchItem(raw json.RawMessage) (storeBatchEntry, error) {
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		return storeBatchEntry{}, err
 	}
-	if probe.ID == nil {
+	if probe.ID == nil || *probe.ID == "" {
 		var it restStoreItem
 		if err := json.Unmarshal(raw, &it); err != nil {
 			return storeBatchEntry{}, err
