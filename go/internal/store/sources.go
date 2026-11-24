@@ -75,7 +75,7 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 	// see prepareUpsert).
 	insertCols += ", content_times"
 	selectVals += fmt.Sprintf(", $%d::timestamptz[]", len(args)+1)
-	args = append(args, ExtractDates(content))
+	args = append(args, temporalExtraction(content))
 	setClauses = append(setClauses, "content_times = EXCLUDED.content_times")
 
 	query := fmt.Sprintf(`INSERT INTO context_blocks (%s)

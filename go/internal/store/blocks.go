@@ -859,7 +859,7 @@ func guardInsertPath(ctx context.Context, tx pgx.Tx, writer provenanceIdentity, 
 // validates the name against the registry snapshot (422 on unknown) — this
 // layer trusts its caller like it does for sensitivity levels.
 func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string) (*Block, error) {
-	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName, ExtractDates(content))
+	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName, temporalExtraction(content))
 	var b *Block
 	if err := pgxdb.Write(ctx, pool, pgxdb.At("store: upsert block"), func(tx pgx.Tx) error {
 		var err error
@@ -885,9 +885,10 @@ type upsertStatement struct {
 }
 
 // prepareUpsert is the pure half of UpsertBlock (see there for the rules).
-// contentTimes is ExtractDates(content), which the caller computes before it
-// opens the write's transaction: on a large content it takes milliseconds,
-// and inside the transaction it would extend the hold of the rows it locked.
+// contentTimes is temporalExtraction(content), which the caller computes
+// before it opens the write's transaction: on a large content it takes
+// milliseconds, and inside the transaction it would extend the hold of the
+// rows it locked.
 func prepareUpsert(category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string, contentTimes []time.Time) upsertStatement {
 	if tags == nil {
 		tags = []string{}
@@ -1916,7 +1917,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 			edits = &contentEditPlan{edits: data.Edits, arg: len(args), writeScopes: writeScopes}
 			args = append(args, nil, nil)
 		} else {
-			args = append(args, *data.Content, ExtractDates(*data.Content))
+			args = append(args, *data.Content, temporalExtraction(*data.Content))
 		}
 		argIdx += 2
 	}

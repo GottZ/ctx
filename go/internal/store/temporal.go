@@ -333,10 +333,14 @@ func RefreshTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content s
 	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt, mark, temporalContentGuardSQL, blockID, content)
 }
 
-// temporalExtraction is the extraction the temporal writers write their rows
-// from and the review records (ExtractDates); a variable only so a test can
-// stand in a different extraction for the same content, as a later release's
-// would be (issue #466 point 8).
+// temporalExtraction is the extraction of every temporal writer
+// (ExtractDates): the content writes compute a block's content_times with it
+// (UpsertBlock, UpsertBlockSupersedes, UpsertBlocks, UpdateBlock and its
+// edits, InsertChunk), the afterwork writes its rows from the dates it yields,
+// the backfill writes both, and the dream's review records it. A variable
+// only so a test can stand in a different extraction for the same content, as
+// a later release's would be (issue #466 point 8), or count the extractions a
+// write makes (issue #434; SetTemporalExtractionForTest).
 var temporalExtraction = ExtractDates
 
 // backfillTemporalBlock is RefreshTemporal for the backfill, which writes the
