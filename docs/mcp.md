@@ -484,10 +484,14 @@ an identity another block holds, an edit that does not match answer as `update` 
 them, with a code. An update item takes no `sensitivity`, `scope` or `supersedes`, a
 store item no `edits` or `metadata_merge` (`invalid_body`). Two items that would write
 one block — two updates of one id, a store item whose identity is an update item's
-block, an update renamed onto the identity another item writes — are refused
-(`constraint`, `same block as items[<j>]` / `same category, title and scope as
-items[<j>]`); a block an earlier item of the batch creates cannot be updated in the same
-batch (its id does not exist yet). Parents are REST only (`parent_id`, `parent_item`,
+block, an update renamed onto the identity another item writes or another update item's
+block leaves (a chain or a swap of titles), a `supersedes` whose target an update item
+moves to another scope — are refused (`constraint`, `same block as items[<j>]` / `same
+category, title and scope as items[<j>]`); a block an earlier item of the batch creates
+cannot be updated in the same batch (its id does not exist yet). A NUL character in a
+field of an update item answers `invalid_body`. A staged batch with an update item is
+run at stage time as the confirm would run it, then rolled back, so items that refuse
+each other get no card. Parents are REST only (`parent_id`, `parent_item`,
 [api.md](api.md#endpoints)), as on `store`. Any refusal — of one item or of the
 batch — writes nothing and answers `isError: true` with the refusal's code. A refusal
 of one item names it, its text behind the prefix `items[<i>]:` (the item's position):

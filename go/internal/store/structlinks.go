@@ -33,6 +33,7 @@ import (
 	"fmt"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -255,22 +256,23 @@ func lockBatchParent(ctx context.Context, tx pgx.Tx, parentID, childScope, child
 }
 
 // parentLinkable is ParentLinkable's check, its read ending in lockClause.
+// The child's scope is part of the read's WHERE, not a comparison after it: a
+// block of another scope is no row here, so a locking read never takes — or
+// waits for — a lock on a block the caller may not see, and the time of the
+// answer says no more than its text does (review of #211).
 func parentLinkable(ctx context.Context, q pgxdb.Rower, lockClause, parentID, childScope, childCategory, childTitle string) error {
 	if !IsFullUUID(parentID) {
 		return ErrLinkScopeViolation
 	}
-	var parentScope, parentCategory, parentTitle string
+	var parentCategory, parentTitle string
 	err := q.QueryRow(ctx,
-		`SELECT scope, category, title FROM context_blocks WHERE id = $1::uuid AND NOT is_archived`+lockClause,
-		parentID).Scan(&parentScope, &parentCategory, &parentTitle)
+		`SELECT category, title FROM context_blocks WHERE id = $1::uuid AND scope = $2 AND NOT is_archived`+lockClause,
+		parentID, childScope).Scan(&parentCategory, &parentTitle)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrLinkScopeViolation
 	}
 	if err != nil {
 		return fmt.Errorf("structural link: parent lookup: %w", err)
-	}
-	if parentScope != childScope {
-		return ErrLinkScopeViolation
 	}
 	if parentCategory == childCategory && parentTitle == childTitle {
 		return ErrLinkScopeViolation
@@ -300,11 +302,16 @@ const parentCycleSQL = `WITH RECURSIVE up(id) AS (
 // of the one-block cycle (a block as its own parent) and a two-step write
 // could close with two (issue #211).
 func LinkBlockParent(ctx context.Context, tx pgx.Tx, childID, parentID, scope string) error {
-	if !IsFullUUID(parentID) {
+	parsed, err := uuid.Parse(parentID)
+	if err != nil || !IsFullUUID(parentID) {
 		return ErrLinkScopeViolation
 	}
+	// PutBlockParent matches the ids against the canonical lowercase form the
+	// database returns (blockScopes): a parent named in capitals is the same
+	// block and links as such.
+	parentID = parsed.String()
 	var cycle bool
-	if err := tx.QueryRow(ctx, parentCycleSQL, parentID, childID).Scan(&cycle); err != nil {
+	if err = tx.QueryRow(ctx, parentCycleSQL, parentID, childID).Scan(&cycle); err != nil {
 		return fmt.Errorf("structural link: parent cycle check: %w", err)
 	}
 	if cycle {

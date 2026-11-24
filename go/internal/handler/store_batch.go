@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -344,6 +345,9 @@ func gateStoreItem(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 // block id. Each refusal carries a class; the single update surfaces answer
 // the same texts uncoded (errcode.go SCOPE).
 func gateUpdateItem(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, ar *auth.AuthResult, u *storeBatchUpdate, reqID string) (string, *writeReject) {
+	if field := updateNULField(u.Data); field != "" {
+		return "", classInvalidBody.reject(field + " " + nulFieldMessage)
+	}
 	if len(u.Fields) == 0 {
 		return "", classMissingFields.reject(nothingToUpdateMsg)
 	}
@@ -367,6 +371,38 @@ func gateUpdateItem(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set,
 		return "", rej
 	}
 	return id, nil
+}
+
+// updateNULField names the first field of an update item's patch whose value
+// carries a NUL character, "" when none does: the refusal manage update's
+// dispatcher gives every action before its first query (issue #519,
+// manageNULField) — the database stores the character neither in text nor in
+// JSON, and the statement would fail as a server fault.
+func updateNULField(d store.UpdateBlockData) string {
+	nul := func(s *string) bool { return s != nil && strings.ContainsRune(*s, 0) }
+	switch {
+	case nul(d.Category):
+		return "category"
+	case nul(d.Title):
+		return "title"
+	case nul(d.Content):
+		return "content"
+	case slices.ContainsFunc(d.Tags, func(t string) bool { return strings.ContainsRune(t, 0) }):
+		return "tags"
+	case carriesNUL(map[string]any(d.Metadata)):
+		return "metadata"
+	case nul(d.Scope):
+		return "scope"
+	case nul(d.Sensitivity):
+		return "sensitivity"
+	case nul(d.Type):
+		return "type"
+	case slices.ContainsFunc(d.Edits, func(e store.ContentEdit) bool { return strings.ContainsRune(e.Old, 0) || nul(e.New) }):
+		return "edits"
+	case carriesNUL(map[string]any(d.MetadataMerge)):
+		return "metadata_merge"
+	}
+	return ""
 }
 
 // storeBatchCanonicalItems is the staged form of the store items of a plan:

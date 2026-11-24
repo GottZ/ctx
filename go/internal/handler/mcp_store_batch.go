@@ -165,25 +165,27 @@ func renderStoreBatch(results []storeBatchItem) string {
 	return sb.String()
 }
 
-// stageBatchSupersedesCheck checks the supersedes declarations of a batch
-// before it is staged, so a card does not promise a declaration its confirm
-// would refuse on today's rows: a batch of one item that declares is checked
-// as a staged store (store.CheckSupersedesDeclarable, no write); any other
-// batch with a declaration through a rolled-back run of the whole batch
-// (store.CheckUpsertBlocks), because its items can refuse a declaration
-// together — one target named twice, two blocks declaring each other, an item
-// written before the declaring one that retypes its target (review of #389)
-// — which a check of one declaration against today's rows does not see. nil =
-// admissible; otherwise the tool's answer.
+// stageBatchSupersedesCheck checks a batch before it is staged, so a card does
+// not promise what its confirm would refuse on today's rows: a batch of one
+// item that declares a supersedes is checked as a staged store
+// (store.CheckSupersedesDeclarable, no write); any other batch with a
+// declaration or an update item through a rolled-back run of the whole batch
+// (store.CheckUpsertBlocks), because its items can refuse each other — one
+// target named twice, two blocks declaring each other, an item written before
+// the declaring one that retypes its target (review of #389), a store item and
+// an update item on one block, a chain of renames, an edit that no longer
+// matches (review of #211) — which a check of one item at a time does not see.
+// nil = admissible; otherwise the tool's answer.
 func stageBatchSupersedesCheck(ctx context.Context, cfg MCPConfig, set *blocktype.Set, ar *auth.AuthResult,
 	plan *storeBatchPlan, reqID string,
 ) *mcp.CallToolResult {
 	declares := slices.ContainsFunc(plan.items, func(e storeBatchEntry) bool { return e.Store != nil && e.Store.Supersedes != "" })
+	updates := slices.ContainsFunc(plan.items, func(e storeBatchEntry) bool { return e.Update != nil })
 	var err error
 	switch {
-	case !declares:
+	case !declares && !updates:
 		return nil
-	case len(plan.items) == 1:
+	case len(plan.items) == 1 && declares:
 		it := plan.items[0].Store
 		err = store.CheckSupersedesDeclarable(ctx, cfg.Pool, it.Category, it.Title, plan.gated[0].WriteScope,
 			store.SupersedesDeclaration{TargetID: it.Supersedes, APIKeyID: ar.ApiKeyID, Types: set})

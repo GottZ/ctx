@@ -317,14 +317,16 @@ func prepareBatch(items []BatchUpsert) (batchPrep, error) {
 // batchHold is what the lock pass of a batch learned about one item: the row
 // it holds (rowID, "" for a store item whose identity has no row yet) and
 // whether that row existed (the pre-read's answer), its no-op comparison, the
-// locked target of a supersedes item, and for an update item the identity its
-// block has after the update and the supersedes targets a scope move locked.
+// locked target of a supersedes item, the identity the item's block has after
+// the batch, and for an update item the identity its block has on the locked
+// row (from) and the supersedes targets a scope move locked.
 type batchHold struct {
 	rowID    string
 	hadRow   bool
 	match    IdenticalContent
 	target   supersedesTarget
 	identity batchIdentity
+	from     batchIdentity
 	targets  []string
 }
 

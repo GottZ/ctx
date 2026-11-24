@@ -161,7 +161,7 @@ func lockBatchUpdate(ctx context.Context, tx pgx.Tx, u *blockUpdate, cur batchId
 			return batchHold{}, fmt.Errorf("store: upsert block batch: compare update target: %w", err)
 		}
 	}
-	h := batchHold{rowID: rowID, hadRow: true, identity: ident}
+	h := batchHold{rowID: rowID, hadRow: true, identity: ident, from: ident}
 	if u.data.Scope != nil {
 		h.identity.scope = *u.data.Scope
 	}
@@ -231,20 +231,50 @@ func writeBatchUpdate(ctx context.Context, tx pgx.Tx, u *blockUpdate, h batchHol
 	return b, nil
 }
 
-// batchIdentityClash refuses the later of two items whose blocks would hold
-// one (category, title, scope) after the batch: a store item's identity, an
-// update item's identity after its rename or move. The unique index would
-// refuse the second write only if the first were written before it; in the
-// other order the store item's upsert would write into the block the update
-// just moved there.
+// batchIdentityClash refuses the later of two items whose blocks meet on one
+// (category, title, scope):
+//
+//   - two items whose blocks would hold it after the batch — a store item's
+//     identity, an update item's identity after its rename or move. The unique
+//     index would refuse the second write only if the first were written
+//     before it; in the other order the store item's upsert would write into
+//     the block the update just moved there;
+//   - an update item that renames or moves its block onto the identity another
+//     update item's block leaves (a chain or a swap of titles). Whether the
+//     unique index lets such a batch through would depend on the order the
+//     batch writes in — the identities' sort order, not the client's — so it
+//     is refused whatever that order is.
+//
+// It also refuses a supersedes declaration whose target an update item of the
+// batch moves to another scope: the move's link sweep would end the very
+// declaration the batch reports (supersedes holds within one scope), so the
+// two items would write one block's supersedes state against each other.
 func batchIdentityClash(items []BatchUpsert, holds []batchHold) error {
-	seen := make(map[batchIdentity]int, len(items))
+	final := make(map[batchIdentity]int, len(items))
 	for i := range items {
 		id := holds[i].identity
-		if first, dup := seen[id]; dup {
+		if first, dup := final[id]; dup {
 			return &BatchItemError{Index: i, Err: &BatchSameBlockError{First: first, Identity: true}}
 		}
-		seen[id] = i
+		final[id] = i
+	}
+	moved := make(map[string]int, len(items))
+	for k, it := range items {
+		from := holds[k].from
+		if it.Update == nil || holds[k].identity == from {
+			continue
+		}
+		if i, taken := final[from]; taken && i != k {
+			return &BatchItemError{Index: max(i, k), Err: &BatchSameBlockError{First: min(i, k), Identity: true}}
+		}
+		if holds[k].identity.scope != from.scope {
+			moved[holds[k].rowID] = k
+		}
+	}
+	for i, h := range holds {
+		if k, ok := moved[h.target.id]; ok && h.target.id != "" {
+			return &BatchItemError{Index: max(i, k), Err: &BatchSameBlockError{First: min(i, k)}}
+		}
 	}
 	return nil
 }

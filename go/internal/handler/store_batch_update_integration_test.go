@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/derived"
@@ -657,5 +658,221 @@ func TestStoreBatchAfterworkFaultIsPerItem(t *testing.T) {
 	rows.Close()
 	if !withRows["sbaw-new"] || !withRows["sbaw-a"] || withRows["sbaw-b"] {
 		t.Fatalf("temporal rows %v; want the faulted item without, the other two with theirs", withRows)
+	}
+}
+
+// mcpCallNoFatal is mcpCall without t (it runs in a goroutine).
+func (f *sbFixture) mcpCallNoFatal(k sbKey, tool string, args map[string]any) (sbAnswer, error) {
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": tool, "arguments": args},
+	})
+	req := httptest.NewRequestWithContext(k.ctx, http.MethodPost, "/mcp", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	rec := httptest.NewRecorder()
+	f.mcp.ServeHTTP(rec, req)
+	var resp struct {
+		Result *struct {
+			IsError bool                    `json:"isError"`
+			Content []struct{ Text string } `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		return sbAnswer{}, fmt.Errorf("decode %q: %w", rec.Body.String(), err)
+	}
+	if resp.Result == nil {
+		return sbAnswer{}, fmt.Errorf("no result in %q", rec.Body.String())
+	}
+	a := sbAnswer{IsError: resp.Result.IsError}
+	for _, c := range resp.Result.Content {
+		a.Text += c.Text
+	}
+	return a, nil
+}
+
+// TestStoreBatchUpdateReviewCases are the cases the review of #211 ran: a
+// chain or a swap of renames is refused whatever the order of the titles, a
+// declaration whose target an update item moves out of the scope is refused,
+// a NUL character in an update item is the caller's 400, a staged batch whose
+// items refuse each other gets no card, and a parent named in capitals is the
+// same block.
+func TestStoreBatchUpdateReviewCases(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newSBFixture(t)
+	refused := func(t *testing.T, k sbKey, body map[string]any, code, text string) {
+		t.Helper()
+		before := f.counts(t, k)
+		status, resp := f.rest(t, k, body)
+		if status < 400 || resp["code"] != code || !strings.HasPrefix(fmt.Sprint(resp["error"]), text) {
+			t.Errorf("status %d body %v; want code %s and text %q", status, resp, code, text)
+		}
+		if after := f.counts(t, k); after != before {
+			t.Errorf("refusal changed the store: before %+v after %+v", before, after)
+		}
+	}
+	for _, titles := range [][3]string{{"sbr-1", "sbr-2", "sbr-3"}, {"sbr-9", "sbr-8", "sbr-7"}} {
+		a := f.seed(t, titles[0], "a body")
+		b := f.seed(t, titles[1], "b body")
+		for _, order := range []string{"ab", "ba"} {
+			t.Run("a chain of renames "+titles[0]+" "+order, func(t *testing.T) {
+				k := f.key(t, false)
+				ua := sbuUpdate(a, "title", titles[1])
+				ub := sbuUpdate(b, "title", titles[2])
+				body := sbItems(ua, ub)
+				if order == "ba" {
+					body = sbItems(ub, ua)
+				}
+				refused(t, k, body, "constraint", "items[1]: same category, title and scope as items[0]")
+			})
+		}
+		t.Run("a swap of titles "+titles[0], func(t *testing.T) {
+			k := f.key(t, false)
+			refused(t, k, sbItems(sbuUpdate(a, "title", titles[1]), sbuUpdate(b, "title", titles[0])),
+				"constraint", "items[1]: same category, title and scope as items[0]")
+		})
+	}
+
+	t.Run("a declaration whose target an update item moves away", func(t *testing.T) {
+		k := f.key(t, false, "sbr-team")
+		x := f.seed(t, "sbr-x", "x body")
+		refused(t, k, sbItems(sbItem("sbr-a", "a body", "supersedes", x), sbuUpdate(x, "scope", "sbr-team")),
+			"constraint", "items[1]: same block as items[0]")
+	})
+
+	t.Run("a NUL character in an update item", func(t *testing.T) {
+		k := f.key(t, false)
+		x := f.seed(t, "sbr-nul", "nul body")
+		refused(t, k, sbItems(sbuUpdate(x, "content", "a\x00b")), "invalid_body", "items[0]: content carries a NUL character")
+		if a := f.mcpCall(t, k, "store_batch", sbItems(sbuUpdate(x, "metadata_merge", map[string]any{"k": "a\x00b"}))); !a.IsError ||
+			a.Code != "invalid_body" || !strings.HasPrefix(a.Text, "items[0]: metadata_merge carries a NUL character") {
+			t.Errorf("MCP: %+v", a)
+		}
+	})
+
+	t.Run("a staged batch whose items refuse each other gets no card", func(t *testing.T) {
+		k := f.key(t, true)
+		x := f.seed(t, "sbr-staged", "staged body")
+		before := f.counts(t, k)
+		a := f.mcpCall(t, k, "store_batch", sbItems(sbItem("sbr-staged", "other body"), sbuUpdate(x, "content", "x2")))
+		if !a.IsError || a.Code != "constraint" || !strings.HasPrefix(a.Text, "items[1]: same block as items[0]") {
+			t.Errorf("stage: %+v; want the constraint refusal and no card", a)
+		}
+		if after := f.counts(t, k); after != before {
+			t.Errorf("the refused stage changed the store: before %+v after %+v", before, after)
+		}
+	})
+
+	t.Run("a parent named in capitals", func(t *testing.T) {
+		k := f.key(t, false)
+		p := f.seed(t, "sbr-caps-parent", "parent body")
+		if status, resp := f.restStoreNoFatal(k, sbItem("sbr-caps-child", "child", "parent_id", strings.ToUpper(p))); status != http.StatusOK {
+			t.Fatalf("/api/store: %d %v", status, resp)
+		}
+		if got := f.parentOf(t, f.idOf(t, "sbr-caps-child")); got != p {
+			t.Fatalf("parent %q, want %q", got, p)
+		}
+	})
+}
+
+// TestStoreBatchParentOfAnotherScopeIsNotWaitedFor: a parent_id that names a
+// block of a scope the item does not write is refused without the batch
+// touching that block — no lock taken on it and none waited for while another
+// transaction holds it, so the time of the refusal says no more than its text.
+func TestStoreBatchParentOfAnotherScopeIsNotWaitedFor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newSBFixture(t)
+	ctx := context.Background()
+	k := f.key(t, false)
+	foreign := f.seedIn(t, "sbr-hidden", "sbr-hidden-block", "hidden body")
+	gate, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gate.Rollback(ctx) }()
+	if _, err := gate.Exec(ctx, `SELECT 1 FROM context_blocks WHERE id = $1 FOR UPDATE`, foreign); err != nil {
+		t.Fatal(err)
+	}
+	actor := f.actor(t, "sbr-foreign-parent")
+	done := make(chan sbRestResult, 1)
+	go func() {
+		on := &sbFixture{pool: actor, cfg: f.cfg, reg: f.reg}
+		status, resp := on.restNoFatal(k, sbItems(sbItem("sbr-child", "child", "parent_id", foreign)))
+		done <- sbRestResult{status, resp}
+	}()
+	if f.waitLockOrDone(t, "sbr-foreign-parent", done) {
+		t.Fatalf("the batch waits for the row of a block outside its scope")
+	}
+	res := sbAwait(t, "batch", done)
+	if res.status != http.StatusUnprocessableEntity || res.body["code"] != "unknown_parent" {
+		t.Fatalf("batch: %d %v; want unknown_parent", res.status, res.body)
+	}
+}
+
+// TestStoreBatchUpdateDriftAfterTheConsume: a staged batch's update item whose
+// block another writer changes after the confirm's drift check and before the
+// batch writes it — the writer holds the row while the confirm's lock pass
+// waits, then commits — refuses the whole batch: the token is spent, the
+// answer names the item and the drift, and nothing of the batch is written.
+func TestStoreBatchUpdateDriftAfterTheConsume(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newSBFixture(t)
+	ctx := context.Background()
+	k := f.key(t, true)
+	a := f.seed(t, "sbx-a", "a body")
+	b := f.seed(t, "sbx-b", "b body")
+	staged := f.mcpCall(t, k, "store_batch", sbItems(sbuUpdate(a, "content", "a staged"), sbuUpdate(b, "content", "b staged")))
+	m := sbHashRe.FindStringSubmatch(staged.Text)
+	if m == nil {
+		t.Fatalf("stage: %+v", staged)
+	}
+	gate, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gate.Rollback(ctx) }()
+	if _, err := gate.Exec(ctx, `UPDATE context_blocks SET tags = '{moved}', updated_at = clock_timestamp() WHERE id = $1`, b); err != nil {
+		t.Fatal(err)
+	}
+	before := f.counts(t, k)
+	done := make(chan sbAnswer, 1)
+	go func() {
+		ans, err := f.mcpCallNoFatal(k, "confirm", map[string]any{"payload_hash": m[1]})
+		if err != nil {
+			ans.Text = err.Error()
+		}
+		done <- ans
+	}()
+	for deadline := time.Now().Add(20 * time.Second); ; {
+		var waiting int
+		if err := f.pool.QueryRow(ctx, `SELECT count(*)::int FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the confirm never waited for the held row")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := gate.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ans := sbAwait(t, "confirm", done)
+	want := "items[1]: confirmed update not executed, the stage token is consumed: block " + b + " changed while this update was confirmed"
+	if !ans.IsError || !strings.HasPrefix(ans.Text, want) {
+		t.Fatalf("confirm: %+v; want %q", ans, want)
+	}
+	after := f.counts(t, k)
+	if f.content(t, a) != "a body" || f.content(t, b) != "b body" || after.openStages != before.openStages-1 || after.writes != before.writes {
+		t.Fatalf("before %+v after %+v, a %q b %q; want nothing written and the token spent", before, after, f.content(t, a), f.content(t, b))
 	}
 }
