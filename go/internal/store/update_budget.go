@@ -13,7 +13,9 @@ import (
 // changes the row is a write of the key's budget (query.rate_limit_write),
 // spent inside the update's transaction as a block batch spends it (issue
 // #519). The transaction locks the row and compares it with what the update
-// writes (changedSQL, the batch's no-op decision); a change is written, then
+// writes (changedSQL, the batch's no-op decision); a change of a key whose
+// budget is already used up is refused there, before the statement, by a
+// count without the lock; otherwise the change is written, then
 // the key's budget lock is taken, the window counted (a *WriteBudgetError
 // rolls the write back) and one 'write' row naming the block booked with the
 // commit — no booking without the write, no write without the booking. An

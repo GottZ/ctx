@@ -30,6 +30,7 @@ func TestDSNConnectsThroughEveryHostSpelling(t *testing.T) {
 		{"127.0.0.1", "127.0.0.1"},
 		{"[::1]", "::1"},
 		{"::1", "::1"},
+		{"localhost,[::1]", "localhost"}, // a list, read host by host
 	} {
 		t.Run(tc.host, func(t *testing.T) {
 			if c, err := net.DialTimeout("tcp", net.JoinHostPort(tc.dial, port), 2*time.Second); err != nil {

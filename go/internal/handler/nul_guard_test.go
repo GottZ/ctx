@@ -218,6 +218,24 @@ func TestNULGuardChunks(t *testing.T) {
 			}
 		}
 	}
+	// A body arrives in reads shorter than the escape (a TCP stream may hand
+	// over single bytes): the pre-filter sees an escape across the edge of
+	// two chunks, and it sees one across more only because every chunk but
+	// the last is filled (fill) — second review of PR #553.
+	for _, at := range []int{12, 40, 200} {
+		for _, declared := range []bool{true, false} {
+			body := `{"content":"` + strings.Repeat("a", at-12) + nulEsc + strings.Repeat("b", 30) + `"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/store", iotest.OneByteReader(strings.NewReader(body)))
+			req.ContentLength = int64(len(body))
+			if !declared {
+				req.ContentLength = -1
+			}
+			status, answer, _, ran := nulGuardServe(t, guard, http.MethodPost, "/api/store", req)
+			if ran || status != http.StatusBadRequest || !strings.Contains(answer, "content "+nulFieldMessage) {
+				t.Errorf("escape at %d read byte by byte (declared %v): want 400 naming content, got ran=%v %d %s", at, declared, ran, status, answer)
+			}
+		}
+	}
 	for _, size := range []int{0, 1, nulChunkMin - 1, nulChunkMin, nulChunkMin + 1, 3*nulChunkMin + 7, nulChunkMax, nulChunkMax + 1, 1 << 20} {
 		for _, declared := range []int{-1, 0, size, size - 1, size + 1} {
 			if declared < -1 || (declared == 0 && size != 0) {

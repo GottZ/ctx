@@ -3329,21 +3329,34 @@ func (c *Config) GatewaySettings() oai.Settings {
 	}
 }
 
-// dbHostPort is CONTEXT_DB_HOST joined with the port as the DSN's host. A
-// value in brackets is a host in the URL's own spelling — an IPv6 address
-// ("[fd00::5]"), one with its zone spelled "%25" ("[fe80::1%25eth0]"), a list
-// of them — and the only spelling an IPv6 host connected with before issue
-// #519: it keeps that reading (the "%25" is the zone's percent; the URL
-// escapes it again), with the port after it. Any other value is the host
-// itself: a name, an IPv4 address, a list of names, a socket directory, or a
-// bare IPv6 address with or without a zone, which net.JoinHostPort puts in
-// brackets (a bracketed value it would bracket twice, which pgx refuses).
+// dbHostPort is CONTEXT_DB_HOST joined with the port as the DSN's host. The
+// value is one host or a comma-separated list, and each host is read by
+// itself (second review of PR #553: a bracketed host after a name put the
+// whole list in brackets, which pgx refuses). A host in brackets is a host in
+// the URL's own spelling — an IPv6 address ("[fd00::5]"), one with its zone
+// spelled "%25" ("[fe80::1%25eth0]") — and the only spelling an IPv6 host
+// connected with before issue #519: it keeps that reading (the "%25" is the
+// zone's percent; the URL escapes it again), with the port after it. A host
+// with exactly one colon carries its own port ("h1:5433" in a list, which
+// connected before #519) and stays as written; an IPv6 address has two colons
+// or more. Any other host is the host itself: a name, an IPv4 address, a
+// socket directory, or a bare IPv6 address with or without a zone, which
+// net.JoinHostPort puts in brackets (a bracketed value it would bracket
+// twice).
 func dbHostPort(host string, port int) string {
 	p := strconv.Itoa(port)
-	if strings.HasPrefix(host, "[") {
-		return strings.ReplaceAll(host, "%25", "%") + ":" + p
+	hosts := strings.Split(host, ",")
+	for i, h := range hosts {
+		switch {
+		case strings.HasPrefix(h, "["):
+			hosts[i] = strings.ReplaceAll(h, "%25", "%") + ":" + p
+		case strings.Count(h, ":") == 1 && !strings.HasPrefix(h, "/"):
+			// host:port as written
+		default:
+			hosts[i] = net.JoinHostPort(h, p)
+		}
 	}
-	return net.JoinHostPort(host, p)
+	return strings.Join(hosts, ",")
 }
 
 // DefaultDBConnectTimeout bounds one connection attempt to the database

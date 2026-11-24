@@ -2292,6 +2292,16 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, u blockUp
 		if err != nil {
 			return err
 		}
+		if charged {
+			// A key whose budget is used up is refused before the statement
+			// (second review of PR #553), by a count without the budget lock:
+			// the statement of an update the count under the lock refuses
+			// anyway would run its triggers and WAL and hold the row for it.
+			// A key with budget left is decided by spend, under the lock.
+			if err := budget.check(ctx, tx, 1); err != nil {
+				return err
+			}
+		}
 		swept, needsReEmbed, err = u.execHeld(ctx, tx, b, held)
 		if errors.Is(err, errUpdateMiss) {
 			return pgxdb.ErrRollback // a miss writes nothing: a rollback, not a commit

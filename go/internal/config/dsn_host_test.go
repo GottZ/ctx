@@ -50,6 +50,14 @@ func TestDSNReadsEveryHostForm(t *testing.T) {
 		{"[fe80::1%25eth0]", "hosts fe80::1%eth0:5432", true}, // the zone as the URL spells it
 		{"h1,h2", "hosts h1:5432,h2:5432", true},
 		{"[fd00::5],[fd00::6]", "hosts fd00::5:5432,fd00::6:5432", true},
+		// A list is read host by host (second review of PR #553): a bracketed
+		// host after a name put the whole list in brackets, and a host with
+		// its own port was read as a host name with a colon in it.
+		{"h1,[fd00::5]", "hosts h1:5432,fd00::5:5432", true},
+		{"localhost,[::1]", "hosts localhost:5432,::1:5432", true},
+		{"h1,[fd00::5],h3", "hosts h1:5432,fd00::5:5432,h3:5432", true},
+		{"h1:5433,h2", "hosts h1:5433,h2:5432", true},
+		{"h1,fd00::5", "hosts h1:5432,fd00::5:5432", false},
 		// The base refused these, or read another address.
 		{"fd00::5", "hosts fd00::5:5432", false},
 		{"::1", "hosts ::1:5432", false},

@@ -523,9 +523,11 @@ func (b WriteBudget) lock(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
-// check refuses n writes that do not fit; the caller holds the budget lock
-// (lock). The count runs after the lock, in a statement of its own, so it
-// sees every booking a batch of this key committed while this one waited. n 0
+// check refuses n writes that do not fit. The caller that decides by it holds
+// the budget lock (lock): the count runs after the lock, in a statement of
+// its own, so it sees every booking a batch of this key committed while this
+// one waited. Without the lock it is only the early refusal of a key whose
+// budget is already used up (runBlockUpdate); spend decides after it. n 0
 // counts nothing and refuses nothing.
 func (b WriteBudget) check(ctx context.Context, tx pgx.Tx, n int) error {
 	if b.Limit <= 0 || n == 0 {

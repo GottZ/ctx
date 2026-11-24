@@ -240,3 +240,47 @@ func TestBudgetedWritesBookWithTheirCommit(t *testing.T) {
 		t.Errorf("%d bookings after two committed writes, want 2", n)
 	}
 }
+
+// TestRefusedSingleUpdateRunsNoStatement (second review of PR #553): with the
+// budget lock as the last lock, an update of a key whose budget is used up
+// ran its whole statement — triggers, WAL, the row lock held through it —
+// before the count refused it and rolled it back. A count without the lock
+// now refuses such an update before its statement; the count under the lock
+// stays the one that decides for a key with budget left. The trigger below
+// fails the statement of the marked update, so the answer tells whether the
+// statement ran. An update that changes nothing still costs nothing and is
+// not refused.
+func TestRefusedSingleUpdateRunsNoStatement(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	key, _, err := store.CreateApiKey(ctx, pool, "budget-refused", "private", nil, store.DefaultTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE FUNCTION zz_statement_ran() RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN IF NEW.content = 'statement ran' THEN RAISE EXCEPTION 'statement ran'; END IF; RETURN NEW; END $$`,
+		`CREATE TRIGGER zz_statement_ran BEFORE UPDATE ON context_blocks
+		 FOR EACH ROW EXECUTE FUNCTION zz_statement_ran()`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	budget := &store.WriteBudget{APIKeyID: key.ID, Limit: 1}
+	scopes := []string{"budget-refused"}
+	a := ubSeed(t, pool, "budget-refused", "a")
+	if _, _, err := store.UpdateBlockBooked(ctx, pool, a, store.UpdateBlockData{Content: ubuPtr("written")}, scopes, budget); err != nil {
+		t.Fatal(err)
+	}
+	var refused *store.WriteBudgetError
+	if _, _, err := store.UpdateBlockBooked(ctx, pool, a, store.UpdateBlockData{Content: ubuPtr("statement ran")}, scopes, budget); !errors.As(err, &refused) {
+		t.Fatalf("update of a key without budget: %v, want the budget's refusal before the statement", err)
+	}
+	if _, _, err := store.UpdateBlockBooked(ctx, pool, a, store.UpdateBlockData{Content: ubuPtr("written")}, scopes, budget); err != nil {
+		t.Errorf("update that changes nothing, key without budget: %v — want it not refused", err)
+	}
+}
