@@ -239,11 +239,12 @@ func TestNULGuardChunks(t *testing.T) {
 }
 
 // TestNULGuardReadsWhatArrives: what readUpTo holds follows the bytes that
-// arrived, whatever length a request declared — at most twice them plus a
-// first chunk; the measure is the capacity of the chunks it returns.
+// arrived, whatever length a request declared — at most twice them, at most
+// one largest chunk (nulChunkMax) more than them, plus a first chunk; the
+// measure is the capacity of the chunks it returns.
 func TestNULGuardReadsWhatArrives(t *testing.T) {
 	const declared = 75 << 20
-	for _, got := range []int{0, 25, nulChunkMin, 100 << 10, 3 << 20} {
+	for _, got := range []int{0, 25, nulChunkMin, 100 << 10, 3 << 20, 5 << 20} {
 		chunks, n, err := readUpTo(io.MultiReader(bytes.NewReader(make([]byte, got)), iotest.ErrReader(io.ErrUnexpectedEOF)), declared, declared)
 		held := 0
 		for _, c := range chunks {
@@ -252,7 +253,7 @@ func TestNULGuardReadsWhatArrives(t *testing.T) {
 		if n != int64(got) || !errors.Is(err, io.ErrUnexpectedEOF) {
 			t.Errorf("%d bytes then an error: read %d, err %v", got, n, err)
 		}
-		if bound := 2*got + nulChunkMin; held > bound {
+		if bound := min(2*got, got+nulChunkMax) + nulChunkMin; held > bound {
 			t.Errorf("%d of %d declared bytes arrived: the guard holds %d, want at most %d", got, declared, held, bound)
 		}
 	}

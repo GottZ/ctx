@@ -162,7 +162,8 @@ type BatchResult struct {
 // writes do not fit is refused with *WriteBudgetError and its writes roll
 // back; a batch that writes nothing is neither counted nor refused) and
 // booked, one 'write' row per written block, with the commit — so a batch is
-// never written without its booking, and never booked without being written. nil books nothing: the confirm of a staged batch, which paid
+// never written without its booking, and never booked without being written.
+// nil books nothing: the confirm of a staged batch, which paid
 // at stage time (ReserveWriteIntents), and a single /api/store with a parent,
 // which books as every single store does.
 //

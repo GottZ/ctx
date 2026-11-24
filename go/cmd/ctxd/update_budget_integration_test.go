@@ -222,10 +222,11 @@ func TestSingleUpdateBooksWrite(t *testing.T) {
 		}
 		defer pool2.Close()
 		f2 := &nulSweepFixture{router: nulSweepInstance(t, context.Background(), pool2), pool: pool2, log: f.log, keys: f.keys}
-		// Hold the rows of the eight writes, so they all reach their
-		// budget step together once they are let go: each takes the key's
-		// budget lock after its row, counts and books under it; without it
-		// all eight would count the same rest.
+		// Hold the key's budget lock, so the eight writes reach their count
+		// together once it is let go: each has locked and written its row
+		// and waits for the lock, which it holds from its count to its
+		// commit; a lock let go before the booking commits, or none, would
+		// let several count the same rest.
 		// The holder and the monitor run on a pool of their own: the
 		// updates hold connections of the router's pool while they wait
 		// (the default pool has max(4, cores) connections — four on a
@@ -239,6 +240,22 @@ func TestSingleUpdateBooksWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer side.Close()
+		// Every booking commits after a pause (a deferred trigger at the
+		// commit), so a writer that let the lock go before its booking
+		// committed would leave the next one counting the same rest —
+		// in every run, not only when the timing falls so.
+		for _, stmt := range []string{
+			`CREATE FUNCTION zz_slow_booking() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.05); RETURN NULL; END $$`,
+			`CREATE CONSTRAINT TRIGGER zz_slow_booking AFTER INSERT ON context_access_log DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION zz_slow_booking()`,
+		} {
+			if _, err := f.pool.Exec(context.Background(), stmt); err != nil {
+				t.Fatal(err)
+			}
+		}
+		defer func() {
+			_, _ = f.pool.Exec(context.Background(), `DROP TRIGGER zz_slow_booking ON context_access_log`)
+			_, _ = f.pool.Exec(context.Background(), `DROP FUNCTION zz_slow_booking()`)
+		}()
 		holder, err := side.Begin(context.Background())
 		if err != nil {
 			t.Fatal(err)
@@ -247,8 +264,7 @@ func TestSingleUpdateBooksWrite(t *testing.T) {
 		// As many writes as each router's pool has connections can wait in
 		// the database at once; the rest wait for a connection.
 		inDB := min(parallel/2, int(f.pool.Config().MaxConns)) + min(parallel/2, int(pool2.Config().MaxConns))
-		raced := ids[updateBudgetLimit-1:]
-		if _, err := holder.Exec(context.Background(), `SELECT 1 FROM context_blocks WHERE id = ANY($1) FOR UPDATE`, raced); err != nil {
+		if _, err := holder.Exec(context.Background(), `SELECT pg_advisory_xact_lock(hashtext('ctx:write-budget'), hashtext($1::text))`, f.keys[k+"#id"]); err != nil {
 			t.Fatal(err)
 		}
 		var wg sync.WaitGroup
@@ -277,7 +293,7 @@ func TestSingleUpdateBooksWrite(t *testing.T) {
 		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 			var waiting int
 			if err := side.QueryRow(context.Background(),
-				`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
+				`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'`).Scan(&waiting); err != nil {
 				t.Fatal(err)
 			}
 			if waiting >= inDB || time.Now().After(deadline) {
