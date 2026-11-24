@@ -122,7 +122,9 @@ layer's provenance (no card is issued for an update the confirm cannot execute);
 `archive` codes `provenance_protected` and, when it stages,
 `rate_limit`; `confirm` codes the claim verdict and the identity collision of a
 confirmed update; the issue tools code
-`reserved_metadata` and the identity collision (`constraint`, issue #275); the read tools and the guard tools never code. Any tool can
+`reserved_metadata` and the identity collision (`constraint`, issue #275); the read tools and the guard tools never code, except for the one class below. Every write tool
+(`store`, `store_batch`, `update`, `archive`, `guard_resolve`, the issue tools) can answer `write_conflict` for a write that lost to concurrent
+writes of its rows and wrote nothing (issue #547; the same call can be sent again), and any tool can
 additionally answer `internal` for a server fault (below).
 
 **Server faults.** A panic while a tool call runs — in its handler or anywhere below it
