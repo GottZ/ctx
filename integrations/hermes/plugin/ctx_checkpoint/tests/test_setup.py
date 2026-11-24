@@ -585,7 +585,20 @@ def test_the_terminal_setup_asks_for_the_grant_and_writes_it(hermes_home, monkey
     # ctx_url, sensitivity, category, chunk_chars, memory features, the grant, the operating mode
     _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", "", "on", ""], secret="ctx-key-abcdef")
 
-    CtxCheckpointMemoryProvider(config={}).post_setup(str(hermes_home), {})
+    CtxCheckpointMemoryProvider(config={}, call_mcp=lambda *args: None).post_setup(str(hermes_home), {})
 
     assert _host_allowlist() == ["ctx"]
     assert "Hermes ends a ctx call the checkpoint gives up on: yes" in capsys.readouterr().out
+
+
+def test_the_terminal_summary_says_when_the_grant_has_no_effect(hermes_home, monkeypatch, capsys):
+    """A Hermes that hands the plugin no call_mcp: the grant is written, and the summary says it
+    does nothing there."""
+    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", "", "on", ""], secret="ctx-key-abcdef")
+
+    CtxCheckpointMemoryProvider(config={}).post_setup(str(hermes_home), {})
+
+    out = capsys.readouterr().out
+    assert _host_allowlist() == ["ctx"]
+    assert "Hermes ends a ctx call the checkpoint gives up on: no" in out
+    assert "offers the plugin no call_mcp" in out

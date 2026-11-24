@@ -934,8 +934,9 @@ class EntryState:
 
     def release(self, ticket: _Ticket, *, error: bool | None, booked: bool = False, now: float = 0.0) -> None:
         """The answer of an admitted call: ``error`` True (an error answer, a refusal, an abandoned
-        call: Hermes counts its timeout), False (an answer; ``booked`` when ctx booked a write), or
-        None (the call was not sent)."""
+        call: Hermes counts its timeout), False (an answer), or None (the call was not sent).
+        ``booked``: the write takes a slot of the window — one ctx booked, and one that failed other
+        than by a refusal (abandoned or cut off, ctx may still book it)."""
         with self._cond:
             if ticket.released:
                 return
@@ -948,8 +949,8 @@ class EntryState:
             elif error is not None:
                 # The errors released before this call was sent were answered before it.
                 self._ended = max(self._ended, ticket.errors_before)
-                if booked:
-                    bisect.insort(self.booked, now)
+            if booked and error is not None:
+                bisect.insort(self.booked, now)
             self._cond.notify_all()
 
     def wait_for_answer(self, timeout: float) -> None:
@@ -958,9 +959,9 @@ class EntryState:
             self._cond.wait(max(0.0, timeout))
 
 
-# Keys: ("mcp", Hermes home, MCP server name, digest of the entry's configuration) and ("rest", base
-# URL, digest of the key) — what Hermes keys an entry's breaker and connection by (the profile's
-# entry name, a new connection when its configuration changes) and what ctx counts writes by.
+# Keys: ("mcp", MCP server name, digest of the entry's connection identity, the profile for an OAuth
+# entry) and ("rest", base URL, digest of the key) — what one Hermes connection with its breaker and
+# RPC lock is (profiles share one when route and credentials match), and what ctx counts writes by.
 _ENTRY_STATES: dict[tuple[str, ...], EntryState] = {}
 _ENTRY_STATES_LOCK = threading.Lock()
 
@@ -1338,8 +1339,9 @@ class ChainWriter:
             try:
                 data = fn(timeout=max(0.5, min(self.api_timeout, remaining)), **kwargs)
             except CtxApiError as exc:
-                run.entry.release(ticket, error=True)
-                if exc.code == "rate_limit" or exc.status == 429:
+                refused = exc.code == "rate_limit" or exc.status == 429
+                run.entry.release(ticket, error=True, booked=write and not refused, now=self.monotonic())
+                if refused:
                     run.rate_limited += 1
                     if retry_refused and not run.granted_refusal_window:
                         run.granted_refusal_window = True
@@ -1374,13 +1376,14 @@ class ChainWriter:
                     detail = redact_error_text(exc, self.secret)[:200]
                     failure = CtxCheckpointError(f"ctx checkpoint {what} failed{code}: {detail}")
             except CtxCheckpointError:
-                run.entry.release(ticket, error=True)
+                run.entry.release(ticket, error=True, booked=write, now=self.monotonic())
                 raise
             except Exception as exc:
-                run.entry.release(ticket, error=True)
+                run.entry.release(ticket, error=True, booked=write, now=self.monotonic())
                 failure = CtxCheckpointError(f"ctx checkpoint {what} failed: {type(exc).__name__}")
             except BaseException:
-                run.entry.release(ticket, error=True)  # never leave the entry with a call in flight
+                # Never leave the entry with a call in flight.
+                run.entry.release(ticket, error=True, booked=write, now=self.monotonic())
                 raise
             else:
                 # An answer (a returned object; an MCP error payload raises above): Hermes counts

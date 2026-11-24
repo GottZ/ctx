@@ -111,6 +111,23 @@ def _negotiate_checkpoint_api(host_api: int) -> int:
 
 # -- Settings ------------------------------------------------------------------------------
 
+# The fields of an mcp_servers entry that make it one connection in Hermes (route and what
+# authenticates or secures it: tools/mcp_tool_registration.py _connection_identity with
+# tools/mcp_schema_cache.py config_fingerprint); the key of the checkpoint's shared state (#299).
+_CONNECTION_IDENTITY_KEYS = (
+    "command",
+    "args",
+    "url",
+    "transport",
+    "tools",
+    "env",
+    "headers",
+    "auth",
+    "client_cert",
+    "client_key",
+    "ssl_verify",
+    "strict_redirect_headers",
+)
 # The plugin id Hermes keys this plugin's entry by (``plugins.entries.<id>``) unless the loading
 # context names another.
 PLUGIN_ID = "ctx_checkpoint"
@@ -590,27 +607,46 @@ def _host_call_mcp(ctx: Any) -> tuple[Callable[..., Any] | None, str]:
     ``register_*`` calls (``plugins/memory/__init__.py`` ``_ProviderCollector.__getattr__``) and keeps
     the plugin's real ``PluginContext`` for them (``_plugin_context()``, built before ``register()``
     runs): ``call_mcp`` is taken from the context itself where it has one, else from that
-    ``PluginContext``. It counts only when it takes a timeout. Never raises."""
-    context = ctx
-    call = getattr(ctx, "call_mcp", None)
-    if not callable(call):
-        make_context = getattr(ctx, "_plugin_context", None)
-        try:
-            context = make_context() if callable(make_context) else None
-        except Exception:
-            context = None
-        call = getattr(context, "call_mcp", None)
-    if not callable(call):
-        return None, ""
+    ``PluginContext``. Only the method of a real ``hermes_cli.plugins.PluginContext`` counts: under
+    ``plugins.isolation: host`` the plugin's context forwards ``call_mcp`` to a collector that has
+    none, and every call would fail. It must take a timeout. Never raises."""
     try:
-        inspect.signature(call).bind("ctx", "search", {}, 1.0)
-    except (TypeError, ValueError):
-        return None, ""
-    try:
-        plugin_id = str(getattr(context, "plugin_id", "") or PLUGIN_ID)
+        from hermes_cli.plugins import PluginContext
     except Exception:
-        plugin_id = PLUGIN_ID
-    return call, plugin_id
+        return None, ""
+    candidates = [ctx]
+    make_context = getattr(ctx, "_plugin_context", None)
+    if callable(make_context):
+        try:
+            candidates.append(make_context())
+        except Exception:
+            logger.debug(
+                "ctx_checkpoint: the plugin context behind the provider collector is not readable", exc_info=True
+            )
+    for context in candidates:
+        call = getattr(context, "call_mcp", None) if isinstance(context, PluginContext) else None
+        if not callable(call):
+            continue
+        try:
+            inspect.signature(call).bind("ctx", "search", {}, 1.0)
+            plugin_id = str(context.plugin_id or PLUGIN_ID)
+        except Exception:
+            logger.debug("ctx_checkpoint: this Hermes' call_mcp takes no timeout; the dispatch is used", exc_info=True)
+            continue
+        return call, plugin_id
+    return None, ""
+
+
+def _registered_tool(name: str) -> bool:
+    """Whether Hermes registered the MCP tool ``name`` (``tools.registry``): what the entry's
+    ``tools.include``/``tools.exclude`` filter left. ``call_mcp`` reaches every tool of a granted
+    server, so the checkpoint sends through it only what the dispatch would reach too."""
+    try:
+        from tools.registry import registry
+
+        return registry.get_entry(name) is not None
+    except Exception:
+        return False
 
 
 def _mcp_grant(config: dict[str, Any], plugin_id: str, server: str) -> bool:
@@ -724,20 +760,23 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         return (self._api_key, *self._profile_keys)
 
     def _entry_key(self) -> tuple[str, ...]:
-        """The MCP server entry the checkpoint writes to (GottZ/ctx#299): the profile, the entry's
-        name — what Hermes keys the entry's circuit breaker and RPC lock by — and a digest of the
-        entry's configuration, because Hermes connects anew (breaker at zero) when that changes and
-        the writes booked against another server or key do not count for this one. Only compared,
-        never logged; the digest is no copy of the key the entry carries."""
+        """The MCP server entry the checkpoint writes to (GottZ/ctx#299): its name and a digest of
+        what makes it one connection in Hermes — route and credentials, the fields Hermes compares
+        before one profile adopts another profile's live connection of the same name
+        (``tools/mcp_tool_registration.py`` ``_connection_identity``: then the two share one breaker
+        and one RPC lock, and with one ctx key one write window). A change of another field (a
+        timeout) keeps the state; a changed route or key is another connection once Hermes
+        reconnects. An OAuth entry is never adopted across profiles: it is keyed by the profile as
+        well. Only compared, never logged; the digest is no copy of the key the entry carries."""
         if self.transport == "rest":
             return super()._entry_key()
         name = self._server_name()
         entry = _configured_server(_effective_config(), name)
-        fingerprint = ""
-        if entry:
-            canonical = json.dumps(entry, sort_keys=True, ensure_ascii=False, default=str)
-            fingerprint = hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()[:32]
-        return ("mcp", str(self._hermes_home), name, fingerprint)
+        identity = {key: entry[key] for key in _CONNECTION_IDENTITY_KEYS if key in entry}
+        canonical = json.dumps(identity, sort_keys=True, ensure_ascii=False, default=str)
+        fingerprint = hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()[:32] if entry else ""
+        oauth = str(entry.get("auth") or "").strip().lower() == "oauth"
+        return ("mcp", name, fingerprint, str(self._hermes_home) if oauth else "")
 
     def _profile_secrets(self) -> tuple[str, ...]:
         """The ctx keys of this profile for the configured server entry (``status.profile_ctx_keys``):
@@ -771,9 +810,12 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
             "on" if self.memory_enabled else "off",
         )
 
-    def _granted_call_mcp(self) -> Callable[..., Any] | None:
-        """Hermes' call_mcp while the grant read before this checkpoint lists the entry, else None."""
-        return self._call_mcp if self._mcp_granted and self.transport != "rest" else None
+    def _granted_call_mcp(self, tool: str) -> Callable[..., Any] | None:
+        """Hermes' call_mcp for ``tool`` while the grant read before this checkpoint lists the entry
+        and Hermes registered the tool (the entry's tool filter), else None."""
+        if not self._mcp_granted or self.transport == "rest" or self._call_mcp is None:
+            return None
+        return self._call_mcp if _registered_tool(mcp_tool_name(self._server_name(), tool)) else None
 
     def _read_mcp_grant(self) -> bool:
         return self._call_mcp is not None and _mcp_grant(_effective_config(), self._plugin_id, self._server_name())
@@ -1217,7 +1259,12 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         print(f"  Memory features: {'on' if settings['memory'] else 'off (checkpoints only)'}")
         print(f"  Operating mode: {'required' if required else 'best effort'}")
         granted = _mcp_grant(_effective_config(), self._plugin_id, name)
-        print(f"  Hermes ends a ctx call the checkpoint gives up on: {'yes' if granted else 'no'}")
+        unused = (
+            " (granted, but this Hermes offers the plugin no call_mcp: no effect)" if self._call_mcp is None else ""
+        )
+        print(f"  Hermes ends a ctx call the checkpoint gives up on: {'yes' if granted and not unused else 'no'}")
+        if granted and unused:
+            print(f"   {unused.strip()}")
         if api_key:
             print(f"  API key saved to .env as {SETUP_API_KEY_ENV}")
         print(f"  `hermes ctx_checkpoint status` (or `hermes mcp test {name}`) checks the connection;")

@@ -358,11 +358,12 @@ the plugin and runs over either transport.
   per-server circuit breaker at the third error answer in a row).
 - One state per server entry (0.17.0, GottZ/ctx#299): the window's writes and the error
   answers in a row are counted per entry for every chain of the process
-  (`checkpoint.EntryState`: the MCP entry by profile, name and a digest of its configuration,
-  REST by base URL and key digest). A call goes out only while the entry's error answers in a
-  row plus the calls in flight stay below `MAX_RATE_REFUSALS`, a write only while fewer than
-  `checkpoint_max_parts` + 2 writes are booked or in flight in the window; any answer ends the
-  run. Two chains side by side share `checkpoint_max_parts` + 2 writes per window and never show
+  (`checkpoint.EntryState`: the MCP entry by name and a digest of its connection identity — route
+  and credentials, as Hermes compares them before profiles share one connection; an OAuth entry by
+  its profile as well — REST by base URL and key digest). A call goes out only while the entry's
+  error answers in a row plus the calls in flight stay below `MAX_RATE_REFUSALS`, a write only
+  while fewer than `checkpoint_max_parts` + 2 writes are booked or in flight in the window; an
+  answer ends the errors released before its call was sent. Two chains side by side share `checkpoint_max_parts` + 2 writes per window and never show
   the entry more error answers in a row than one chain alone; a chain's plan counts the writes
   the entry already holds in the window. Several Hermes processes of one profile share nothing.
 - Idempotent (0.10.0): the checkpoint id is `sha256(root \0 transcript digest)[:16]`, so a

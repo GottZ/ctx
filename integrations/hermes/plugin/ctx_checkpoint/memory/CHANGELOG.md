@@ -17,17 +17,29 @@ it, and with the operator's grant a call the checkpoint gives up on ends in Herm
   gateway, a compaction and its retry) therefore showed the entry up to four error answers in a
   row — Hermes opens its circuit breaker at the third (`_CIRCUIT_BREAKER_THRESHOLD`) and refuses
   every call to the entry for 60 s — and booked `2 × (max_parts + 2)` writes in one window.
-  `checkpoint.EntryState`, one per entry and process (`entry_state`; MCP: the profile, the
-  entry's name and a digest of its configuration — Hermes connects anew when that changes; REST:
-  base URL and key digest), admits a call only while the entry's error answers in a row plus the
-  calls in flight stay below `MAX_RATE_REFUSALS` (2), and a write only while fewer than
-  `max_parts + 2` writes are booked or in flight in the window; any answer ends the run, as in
-  Hermes. At the limit no write goes out; a read still does, alone (every chain starts with the
-  head search, whose answer ends the run). A chain alone behaves as before (one wait, one retry,
-  then it stops). A chain plans the windows the entry's booked writes take together with its own
-  (its deadline grows by them, still never past Hermes' wait), and a chain that waits for writes
-  of another checkpoint before its own fill a window tells the user why. Not covered: several
-  Hermes processes of one profile share nothing; each keeps its own state.
+  `checkpoint.EntryState`, one per entry and process (`entry_state`; MCP: the entry's name and a
+  digest of what makes it one Hermes connection — route and credentials, the fields Hermes
+  compares before one profile of a multiplexed gateway adopts another profile's connection
+  (`_connection_identity`), so two profiles on one connection share one state, a timeout change
+  keeps it, and an OAuth entry, never adopted, is keyed by its profile too; REST: base URL and key
+  digest), admits a call only while the entry's error answers in a row plus the calls in flight
+  stay below `MAX_RATE_REFUSALS` (2), and a write only while fewer than `max_parts + 2` writes are
+  booked or in flight in the window. An answer ends the errors released before its call was sent:
+  answers reach their threads in another order than the entry gave them, and a read answered before
+  a refusal but released after it must not end it (a first version did, and two chains showed three
+  refusals in a row in 2 of 15 runs). At the limit no write goes out; a read still does, alone
+  (every chain starts with the head search, whose answer ends the run). A write that failed other
+  than by a refusal keeps its slot (ctx may still book an abandoned write). A chain alone behaves as
+  before (one wait, one retry, then it stops), except that every error answer of the entry counts:
+  a failed manifest read before a refusal leaves the chain no retry (the three would open the
+  breaker). A chain plans the windows the entry's booked writes take together with its own (its
+  deadline grows by them, still never past Hermes' wait), and a chain that waits for writes of
+  another checkpoint before its own fill a window tells the user why. Not covered: several Hermes
+  processes of one profile share nothing, each keeps its own state; other callers of the entry
+  (recall, the agent's tools, ctx_handover) are not counted; an entry whose route or key changes
+  gets a fresh state at once, while Hermes keeps the old connection (and its count) until it
+  reconnects (`/reload-mcp`); against a ctx server before GottZ/ctx#342 a typed search is one
+  refused answer and its repeat without types one call of the plugin.
 - **Required facts.** They were stored after the chain unpaced and outside its count of error
   answers. They are stored in the chain's run now (`ChainWriter.store_paced`, `ChainReceipt.run`):
   the chain's plan holds their windows, each fact waits for a slot of the entry's window and counts
@@ -43,14 +55,21 @@ it, and with the operator's grant a call the checkpoint gives up on ends in Herm
   `_run_on_mcp_loop`), which releases the lock. A memory provider's `register()` receives Hermes'
   provider collector, which forwards only `register_*` calls: `call_mcp` is taken from the context
   where it has one, else from the `PluginContext` the collector holds for the plugin
-  (`_plugin_context()`). An answer Hermes cut at its 64 KB plugin cap fails the call (the largest
-  head and manifest reads stay far below it). Without the grant, on a Hermes without `call_mcp`
+  (`_plugin_context()`); only the method of a real `hermes_cli.plugins.PluginContext` counts (under
+  `plugins.isolation: host` the plugin's context forwards `call_mcp` to a collector that has none).
+  `call_mcp` reaches every tool of a granted server, so a call goes through it only for a tool
+  Hermes registered for the entry (`tools.registry`: what its `tools.include`/`tools.exclude`
+  filter left); any other goes through the dispatch as before. An answer Hermes cut at its 64 KB
+  plugin cap fails the call (the largest head and manifest reads stay far below it). With the grant
+  a call Hermes gives up on reads `MCP call failed: TimeoutError: …` instead of the plugin's
+  `no answer within …; the call was abandoned`. Without the grant, on a Hermes without `call_mcp`
   and after Hermes refused the grant (`PermissionError`, before any transport work; remembered
   until the provider connects again) the calls go through the dispatch as before. Recall and the
   agent tools are unbounded calls and keep the dispatch.
 - **Setup** offers the grant on every surface ("Let Hermes end a ctx call the checkpoint gives up
   on": the Desktop memory form, the web dashboard form, `hermes memory setup`), writes or removes
-  only this entry in the list, and the terminal setup's summary names it.
+  only this entry in the list, and the terminal setup's summary names it — and says when the
+  loading Hermes hands the plugin no `call_mcp`, so the grant has no effect there.
 
 ## [ctx_checkpoint 0.16.2] — 2026-11-19
 

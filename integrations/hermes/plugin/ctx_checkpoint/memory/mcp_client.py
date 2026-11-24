@@ -69,7 +69,8 @@ the next compaction — waits behind it (GottZ/ctx#299).
 
 A bounded call goes through Hermes' ``PluginContext.call_mcp(server, tool, args, timeout)`` instead
 when the provider hands one over (``host_call``: the operator granted the entry in
-``plugins.entries.ctx_checkpoint.mcp_allowlist``, 0.17.0). Hermes builds that call's handler with
+``plugins.entries.ctx_checkpoint.mcp_allowlist`` and Hermes registered the tool, so the entry's tool
+filter holds as for the dispatch; 0.17.0). Hermes builds that call's handler with
 the caller's timeout (``hermes_cli/plugins_context.py`` ``call_mcp``) and cancels the call on
 its MCP loop when it runs out (``tools/mcp_tool_loop.py`` ``_run_on_mcp_loop``), which releases
 the RPC lock. Its envelope (``{"ok", "result"|"error", …}``) is read as the dispatch's answer; an
@@ -373,15 +374,16 @@ class McpClient:
         timeout: float = 10.0,
         synthesis_timeout: float = 90.0,
         secrets: Callable[[], Iterable[str]] | None = None,
-        host_call: Callable[[], Callable[..., Any] | None] | None = None,
+        host_call: Callable[[str], Callable[..., Any] | None] | None = None,
     ):
         if not _SERVER_NAME_RE.fullmatch(server_name or ""):
             raise ValueError(f"MCP server name {server_name!r} may only contain letters, digits, '_' and '-'")
         self._dispatch = dispatch
         self._server = server_name
-        # Hermes' call_mcp for bounded calls, asked per call: the provider returns it while the
-        # operator's grant lists this entry, else None (see the module docstring). A refusal of the
-        # grant by Hermes sends this client's calls through the dispatch from then on.
+        # Hermes' call_mcp for bounded calls, asked per call with the tool: the provider returns it
+        # while the operator's grant lists this entry and Hermes registered the tool, else None (see
+        # the module docstring). A refusal of the grant by Hermes sends this client's calls through
+        # the dispatch from then on.
         self._host_call = host_call
         self._host_call_refused = False
         # The ctx keys the provider binds (read per error): foreign error texts are redacted with
@@ -484,11 +486,11 @@ class McpClient:
                 return payload, payload["result"]
         return payload, raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
 
-    def _granted_host_call(self) -> Callable[..., Any] | None:
+    def _granted_host_call(self, tool: str) -> Callable[..., Any] | None:
         if self._host_call is None or self._host_call_refused:
             return None
         try:
-            call_mcp = self._host_call()
+            call_mcp = self._host_call(tool)
         except Exception:
             logger.debug("ctx MCP: the grant for Hermes' call_mcp is not readable; the dispatch is used", exc_info=True)
             return None
@@ -498,7 +500,7 @@ class McpClient:
         """A bounded call through Hermes' ``call_mcp`` (see the module docstring) as the dispatch's
         answer, or :data:`_NOT_THROUGH_HOST` when it is not to go that way: no grant, or Hermes refused
         it (``PermissionError``, before any transport work) — then the dispatch takes the call."""
-        call_mcp = self._granted_host_call()
+        call_mcp = self._granted_host_call(tool)
         if call_mcp is None:
             return _NOT_THROUGH_HOST
         host_timeout = max(HOST_CALL_MIN_TIMEOUT_S, float(timeout))

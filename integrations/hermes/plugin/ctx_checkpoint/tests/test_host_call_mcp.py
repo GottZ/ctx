@@ -110,8 +110,8 @@ class HangingSession:
 
 @pytest.fixture
 def hermes_mcp(monkeypatch):
-    """Hermes' MCP loop with one connected server entry ``ctx`` (the stand-in session) and fresh
-    breaker state; the handlers Hermes registers for its tools."""
+    """Hermes' MCP loop with one connected server entry ``ctx`` (the stand-in session), fresh breaker
+    state, and the entry's tools in Hermes' tool registry with the handlers Hermes registers."""
     from tools import mcp_tool, mcp_tool_handlers, mcp_tool_loop
 
     for name in ("_server_error_counts", "_server_breaker_opened_at", "_server_errors_all_application"):
@@ -122,13 +122,18 @@ def hermes_mcp(monkeypatch):
     session = HangingSession(ctx)
     server = types.SimpleNamespace(session=session, _rpc_lock=asyncio.Lock())
     monkeypatch.setitem(mcp_tool._servers, "ctx", server)
-    handlers = {
-        mcp_tool_name("ctx", tool): mcp_tool_handlers._make_tool_handler(
-            "ctx", tool, ENTRY_TOOL_TIMEOUT_S, native_images=True
-        )
-        for tool in TOOLS
-    }
-    yield types.SimpleNamespace(server=server, session=session, ctx=ctx, handlers=handlers)
+    from tools.registry import registry
+
+    names = []
+    for tool in TOOLS:  # as Hermes registers an entry's tools (tools/mcp_tool_registration.py)
+        name = mcp_tool_name("ctx", tool)
+        handler = mcp_tool_handlers._make_tool_handler("ctx", tool, ENTRY_TOOL_TIMEOUT_S, native_images=True)
+        schema = {"name": name, "description": f"ctx {tool}", "parameters": {"type": "object", "properties": {}}}
+        registry.register(name=name, toolset="mcp-ctx", schema=schema, handler=handler)
+        names.append(name)
+    yield types.SimpleNamespace(server=server, session=session, ctx=ctx)
+    for name in names:
+        registry.deregister(name)
     if not loop_was_running:
         mcp_tool_loop._stop_mcp_loop()  # cancels a call still hanging
 
@@ -145,15 +150,13 @@ def _write_config(home: Path, *, granted: bool) -> None:
 
 def _loaded_provider(hermes_mcp, home: Path):
     """The provider as Hermes' memory plugin loader collects it (plugins/memory: register(ctx) with
-    the provider collector), dispatching like the tool registry: to the handler Hermes registered
-    for the tool name."""
+    the provider collector), dispatching through Hermes' tool registry as in production."""
     from plugins.memory import _ProviderCollector
 
     collector = _ProviderCollector("ctx_checkpoint", register_skills=False)
     collector.collect(_MODULE.register)
     provider = collector.provider
     assert isinstance(provider, CtxCheckpointMemoryProvider)
-    provider._dispatch = lambda name, args, **kwargs: hermes_mcp.handlers[name](args)
     provider.initialize("session-lock", platform="cli", hermes_home=str(home))
     return provider
 
@@ -219,18 +222,22 @@ def test_register_takes_call_mcp_from_the_plugin_context_behind_the_provider_col
     assert plugin_id == "ctx_checkpoint"
 
 
-def test_register_takes_call_mcp_from_a_context_that_has_it_and_nothing_else():
+def test_register_takes_call_mcp_only_from_a_real_plugin_context():
+    """A PluginContext handed over directly counts; anything else does not: under
+    plugins.isolation: host the plugin's context forwards call_mcp to a collector that has none."""
+    from unittest.mock import MagicMock
+
+    from hermes_cli.plugins import PluginContext, PluginManifest
+
+    context = PluginContext(PluginManifest(name="ctx_checkpoint_dev", key="ctx_checkpoint_dev"), MagicMock())
+    call, plugin_id = _MODULE._host_call_mcp(context)
+    assert call.__func__ is PluginContext.call_mcp and plugin_id == "ctx_checkpoint_dev"
+
     def call_mcp(server, tool, arguments=None, timeout=30):
         return {"ok": True, "result": ""}
 
-    direct = types.SimpleNamespace(call_mcp=call_mcp, plugin_id="ctx_checkpoint_dev")
-    assert _MODULE._host_call_mcp(direct) == (call_mcp, "ctx_checkpoint_dev")
+    assert _MODULE._host_call_mcp(types.SimpleNamespace(call_mcp=call_mcp)) == (None, "")
     assert _MODULE._host_call_mcp(types.SimpleNamespace()) == (None, "")
-
-    def no_timeout(server, tool, arguments=None):
-        return {"ok": True, "result": ""}
-
-    assert _MODULE._host_call_mcp(types.SimpleNamespace(call_mcp=no_timeout)) == (None, "")
 
     def broken():
         raise RuntimeError("no plugin manager")
@@ -263,6 +270,15 @@ class DispatchDouble:
         return json.dumps({"error": text} if is_error else {"result": text})
 
 
+@pytest.fixture
+def registered(monkeypatch):
+    """The tools Hermes registered for the entry (what its tools filter left): all of them unless
+    a test narrows the set."""
+    names = {mcp_tool_name("ctx", tool) for tool in TOOLS}
+    monkeypatch.setattr(_MODULE, "_registered_tool", lambda name: name in names)
+    return names
+
+
 def _normalized(calls: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
     out = []
     for tool, args in calls:
@@ -288,7 +304,9 @@ def _run_scenario(home: Path, *, granted: bool, call_mcp=None) -> dict:
     return {"receipt": receipt, "error": str(failure.value), "calls": _normalized(double.ctx.calls)}
 
 
-def test_without_the_grant_or_without_call_mcp_or_on_a_refused_grant_the_calls_are_the_same(_isolated_hermes_home):
+def test_without_the_grant_or_without_call_mcp_or_on_a_refused_grant_the_calls_are_the_same(
+    _isolated_hermes_home, registered
+):
     asked: list[tuple] = []
 
     def recorder(server, tool, arguments=None, timeout=30):
@@ -320,7 +338,9 @@ def _envelope(raw: str) -> dict:
     return PluginContext._mcp_envelope(raw)
 
 
-def test_with_the_grant_the_checkpoint_calls_go_through_call_mcp_with_their_own_timeout(_isolated_hermes_home):
+def test_with_the_grant_the_checkpoint_calls_go_through_call_mcp_with_their_own_timeout(
+    _isolated_hermes_home, registered
+):
     _write_config(_isolated_hermes_home, granted=True)
     double = DispatchDouble()
     through_host: list[tuple[str, str, float]] = []
@@ -347,7 +367,7 @@ def test_with_the_grant_the_checkpoint_calls_go_through_call_mcp_with_their_own_
     assert all(t == 1.0 for _server, _tool, t in through_host), through_host
 
 
-def test_with_the_grant_an_answer_hermes_cut_fails_the_call(_isolated_hermes_home):
+def test_with_the_grant_an_answer_hermes_cut_fails_the_call(_isolated_hermes_home, registered):
     _write_config(_isolated_hermes_home, granted=True)
 
     def call_mcp(server, tool, arguments=None, timeout=30):
@@ -357,6 +377,32 @@ def test_with_the_grant_an_answer_hermes_cut_fails_the_call(_isolated_hermes_hom
     provider.initialize("session-cut", platform="cli", hermes_home=str(_isolated_hermes_home))
     with pytest.raises(CtxCheckpointError, match="64 KB"):
         provider.on_pre_compress(_turns("first"), require_checkpoint=True)
+
+
+def test_with_the_grant_a_tool_the_entry_filters_out_still_goes_through_the_dispatch(_isolated_hermes_home, registered):
+    """call_mcp reaches every tool of a granted server; the entry's tools filter decides what Hermes
+    registers. A tool it left out goes through the dispatch, as without the grant ("Unknown tool")."""
+    registered.discard(mcp_tool_name("ctx", "store"))
+    _write_config(_isolated_hermes_home, granted=True)
+    double = DispatchDouble()
+    through_host: list[str] = []
+
+    def call_mcp(server, tool, arguments=None, timeout=30):
+        through_host.append(tool)
+        return _envelope(double.dispatch(mcp_tool_name(server, tool), dict(arguments or {})))
+
+    dispatched: list[str] = []
+
+    def dispatch(name, args, **kwargs):
+        dispatched.append(name.rsplit("__", 1)[-1])
+        return double.dispatch(name, args, **kwargs)
+
+    provider = CtxCheckpointMemoryProvider(dispatch=dispatch, call_mcp=call_mcp)
+    provider.initialize("session-filtered", platform="cli", hermes_home=str(_isolated_hermes_home))
+    provider.on_pre_compress(_turns("first"), require_checkpoint=True)
+
+    assert "store" not in through_host and set(through_host) == {"search"}
+    assert dispatched and set(dispatched) == {"store"}
 
 
 def test_the_largest_head_and_manifest_reads_stay_under_hermes_plugin_cap():

@@ -400,13 +400,86 @@ def test_refusals_on_one_entry_never_stop_a_chain_on_another(clock):
 # -- (v) the key and the threads --------------------------------------------------------------
 
 
-def _write_entry(home: Path, url: str) -> None:
-    (home / "config.yaml").write_text(
-        "mcp_servers:\n"
-        f"  ctx:\n    url: {url}\n"
-        "memory:\n  provider: ctx_checkpoint\n  ctx_checkpoint:\n    mcp_server: ctx\n",
-        encoding="utf-8",
-    )
+def _write_entry(home: Path, url: str, **fields) -> None:
+    entry = {"url": url, **fields}
+    config = {
+        "mcp_servers": {"ctx": entry},
+        "memory": {"provider": "ctx_checkpoint", "ctx_checkpoint": {"mcp_server": "ctx"}},
+    }
+    (home / "config.yaml").write_text(json.dumps(config), encoding="utf-8")  # JSON is YAML
+
+
+def test_a_change_outside_the_connection_identity_keeps_the_state(clock, _isolated_hermes_home):
+    """Hermes keeps the entry's connection, breaker and lock when a timeout changes (only route and
+    credentials make another connection): the next chain still paces against the writes booked."""
+    entry = EntryDouble(clock)
+    _write_entry(_isolated_hermes_home, "https://ctx-a.example/mcp")
+    one = _provider(entry.dispatch, "session-one", chunk_chars=1_000, max_parts=3, budget_s=600)
+    one.on_pre_compress(_transcript(3, "a"), require_checkpoint=True)
+
+    _write_entry(_isolated_hermes_home, "https://ctx-a.example/mcp", timeout=120, connect_timeout=45)
+    slept = len(clock.slept)
+    two = _provider(entry.dispatch, "session-two", chunk_chars=1_000, max_parts=3, budget_s=600)
+    two.on_pre_compress(_transcript(3, "b"), require_checkpoint=True)
+    assert len(clock.slept) == slept + 1, clock.slept
+
+
+def _in_profile(dispatch, session: str, home: Path, **config):
+    home.mkdir(parents=True, exist_ok=True)
+    provider = CtxCheckpointMemoryProvider(config=dict(config), dispatch=dispatch)
+    provider.initialize(session, platform="cli", hermes_home=str(home), warning_callback=lambda message: None)
+    return provider
+
+
+@pytest.mark.parametrize("auth, shared", [(None, True), ("oauth", False)])
+def test_two_profiles_with_one_connection_identity_share_one_state(clock, _isolated_hermes_home, auth, shared):
+    """Under a profile multiplexer a profile adopts another profile's live connection when route and
+    credentials match (tools/mcp_tool_registration.py _same_server_route): one breaker, one RPC lock,
+    one ctx key's window. Keyed by profile, the two counted apart (four errors in a row again). An
+    OAuth connection is never adopted: there each profile keeps its own state."""
+    entry = EntryDouble(clock)
+    _write_entry(_isolated_hermes_home, "https://ctx.example/mcp", **({"auth": auth} if auth else {}))
+    one = _in_profile(entry.dispatch, "s-one", _isolated_hermes_home / "profiles" / "a", chunk_chars=1_000, max_parts=3)
+    two = _in_profile(entry.dispatch, "s-two", _isolated_hermes_home / "profiles" / "b", chunk_chars=1_000, max_parts=3)
+    assert (one._entry_key() == two._entry_key()) is shared
+
+    one.on_pre_compress(_transcript(3, "a"), require_checkpoint=True)
+    slept = len(clock.slept)
+    two.on_pre_compress(_transcript(3, "b"), require_checkpoint=True)
+    assert (len(clock.slept) > slept) is shared, clock.slept
+
+
+def test_an_answer_ends_only_the_errors_released_before_its_call_was_sent():
+    """A read answered before a refusal but released after it (answers reach their threads in
+    another order than the entry gave them) must not end that refusal: else the next writes go out
+    and the entry sees three refusals in a row."""
+    state = _cp.EntryState()
+    read = state.admit(write=False, window_writes=5, now=0.0).ticket
+    write = state.admit(write=True, window_writes=5, now=0.0).ticket
+    assert read is not None and write is not None
+    state.release(write, error=True, now=0.1)  # refused (answered after the read)
+    state.release(read, error=False, now=0.2)  # the read's answer, released late
+    assert state.errors_in_row == 1
+    later = state.admit(write=True, window_writes=5, now=0.3).ticket
+    state.release(later, error=True, now=0.4)
+    assert state.errors_in_row == 2
+    assert state.admit(write=True, window_writes=5, now=0.5).stop
+    # A read sent now was sent after both: its answer ends them.
+    fresh = state.admit(write=False, window_writes=5, now=0.6).ticket
+    state.release(fresh, error=False, now=0.7)
+    assert state.errors_in_row == 0
+
+
+def test_a_write_that_failed_other_than_by_a_refusal_keeps_its_slot():
+    """An abandoned or cut-off write may still be booked by ctx: it counts in the window, a
+    refused one does not."""
+    counted = []
+    for error, booked in ((True, True), (True, False), (False, True), (None, True)):
+        state = _cp.EntryState()
+        ticket = state.admit(write=True, window_writes=5, now=1.0).ticket
+        state.release(ticket, error=error, booked=booked, now=1.0)
+        counted.append(state.writes_in_window(2.0))
+    assert counted == [1, 0, 1, 0]  # a call that was never sent books nothing
 
 
 def test_a_changed_server_entry_starts_with_a_window_of_its_own(clock, _isolated_hermes_home):

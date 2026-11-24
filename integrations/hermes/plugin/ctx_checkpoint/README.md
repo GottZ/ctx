@@ -56,8 +56,11 @@ default), and the next checkpoint's first call fails behind it. With this switch
 setup adds the entry to `plugins.entries.ctx_checkpoint.mcp_allowlist`, and the
 checkpoint's calls go through Hermes' `call_mcp` with their own time limit: Hermes
 cancels a call that runs out and frees the entry. The grant gives the plugin no other
-server than the one it already reaches. Recall and the agent tools keep the dispatch.
-Without the grant, or on a Hermes without `call_mcp`, nothing changes.
+server than the one it already reaches, and the checkpoint sends through `call_mcp`
+only the tools Hermes registered for the entry (its `tools.include`/`tools.exclude`
+filter holds as before). Recall and the agent tools keep the dispatch. Without the
+grant, or on a Hermes that hands the plugin no `call_mcp` (also under
+`plugins.isolation: host`), nothing changes; the terminal setup's summary says so.
 
 **Connection test.** Setup checks that the server answers before it keeps your
 settings: it connects the way Hermes does (`hermes mcp test` runs the same test),
@@ -257,8 +260,9 @@ writers on the same key) waits for a free slot — the first refusal adds one
 minute to the budget — at the latest until just before the deadline, and stops
 at the second refusal in a row: the third would open Hermes' circuit breaker
 for the ctx server. Since 0.17.0 both counts belong to the server entry, not to
-one checkpoint: the checkpoints of one Hermes process (several sessions of a
-gateway, a compaction and its retry) share `max_parts` + 2 writes per minute, and
+one checkpoint: the checkpoints of one Hermes process on one connection (several
+sessions of a gateway, a compaction and its retry, profiles that share the
+connection) share `max_parts` + 2 writes per minute, and
 together they draw no more than two error answers in a row from the entry: after
 two, no checkpoint of the process writes until an answer of the entry ends the run
 (Hermes' breaker resets on it too) — a checkpoint that starts then sends only its
