@@ -189,6 +189,15 @@ func TestEvictWriteLogBatchCostIndependentOfTableSize(t *testing.T) {
 		pool := testdb.SetupTestDB(t)
 		wlInsert(t, pool, inside, "1 hour", nil)
 		out := map[string]cell{}
+		// The snapshot of the cell "custom beside a snapshot": rolled back
+		// when the cell ends, and — should a check of the cell fail — when
+		// measure returns, before the pool's cleanup waits for it.
+		var snap pgx.Tx
+		defer func() {
+			if snap != nil {
+				_ = snap.Rollback(ctx)
+			}
+		}()
 		for _, rpc := range testdb.RandomPageCosts {
 			p := testdb.WithRandomPageCost(t, pool, rpc)
 			for _, mode := range []string{"custom", "generic", "custom beside a snapshot"} {
@@ -212,7 +221,6 @@ func TestEvictWriteLogBatchCostIndependentOfTableSize(t *testing.T) {
 				// visible to it, so no later scan may mark them dead, and a
 				// selection that started at the oldest entry would visit every
 				// row the run deleted before on the heap again.
-				var snap pgx.Tx
 				if mode == "custom beside a snapshot" {
 					var err error
 					if snap, err = pool.Begin(ctx); err != nil {
@@ -267,6 +275,7 @@ func TestEvictWriteLogBatchCostIndependentOfTableSize(t *testing.T) {
 				}
 				if snap != nil {
 					_ = snap.Rollback(ctx)
+					snap = nil
 				}
 				if got := wlCount(t, pool, "created_at < $1", horizon); got != 0 {
 					t.Fatalf("rpc %s %s: %d rows past the horizon left after three batches", rpc, mode, got)

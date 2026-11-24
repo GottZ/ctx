@@ -7,11 +7,13 @@ package store_test
 // chunk, so the chunk lifecycle of the staging store locked the two tables
 // every authentication reads: creating a chunk took SHARE ROW EXCLUSIVE on
 // them, dropping one (the confirm-retention eviction) ACCESS EXCLUSIVE. What
-// the keys carried is code now: a stage reads its key row FOR KEY SHARE
-// (store.StagePendingWrite), the tenant prune deletes the stages of its keys
-// before the keys (store.PruneTenant), every read selects by the caller's key.
+// the keys carried is code now: every writer of a stage reads its key row
+// FOR KEY SHARE first (store.StagePendingWrite, ConsumePendingWrite), the
+// tenant prune deletes its keys and then, in the same transaction, the
+// stages of those keys (store.PruneTenant), every read selects by the
+// caller's key.
 //
-//	go test -tags=integration ./internal/store/ -run 'TestPendingWrite.*AuthTables|TestPendingWriteStageOfAGoneKey|TestPendingWriteStageAndTenantPrune|TestPendingWriteOfADeletedKey|TestHypertablesCarryNoForeignKey' -count=1 -v
+//	go test -tags=integration ./internal/store/ -run 'TestPendingWrite|TestHypertablesCarryNoForeignKey' -count=1 -v
 
 import (
 	"context"
@@ -171,8 +173,8 @@ func TestPendingWriteChunkLifecycleLeavesTheAuthTablesAlone(t *testing.T) {
 			t.Errorf("an authentication beside a reader of %s and the eviction: answered=%v valid=%v", rel, answered, valid)
 		}
 		_ = rtx.Rollback(ctx)
-		if rel == "context_api_keys" && dropped != 1 {
-			t.Errorf("eviction dropped %d chunks, want the aged one", dropped)
+		if dropped != 1 {
+			t.Errorf("eviction beside a reader of %s dropped %d chunks, want the aged one", rel, dropped)
 		}
 		if _, err := pool.Exec(ctx, `
 			INSERT INTO context_pending_writes (api_key_id, scope, op, origin, payload, payload_hash, created_at)
@@ -312,6 +314,11 @@ func TestPendingWriteStageAndTenantPruneAreOrdered(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer pp.Close()
+		// Every exit lets the paused statement go before the pool closes
+		// (the deferred calls run in reverse order).
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(stop.release) }) }
+		defer release()
 		pruneDone := make(chan error, 1)
 		go func() { pruneDone <- store.PruneTenant(ctx, pp, tn.ID, store.AuditStamp{}) }()
 		select {
@@ -321,14 +328,12 @@ func TestPendingWriteStageAndTenantPruneAreOrdered(t *testing.T) {
 		}
 		late, _, err := store.CreateApiKey(ctx, pool, "pw-c-late", "private", nil, tn.ID)
 		if err != nil {
-			close(stop.release)
 			t.Fatal(err)
 		}
 		if _, err := store.StagePendingWrite(ctx, pool, late.ID, "private", "store", "mcp", []byte(`{"op":"store"}`), "late-key", time.Minute); err != nil {
-			close(stop.release)
 			t.Fatal(err)
 		}
-		close(stop.release)
+		release()
 		if err := <-pruneDone; err != nil {
 			t.Fatalf("prune: %v", err)
 		}
@@ -714,6 +719,9 @@ func TestPendingWriteOfADeletedKeyIsUnreachable(t *testing.T) {
 	if _, err := pool.Exec(ctx, `DELETE FROM context_api_keys WHERE id = $1`, gone.ID); err != nil {
 		t.Fatalf("delete the key by hand: %v", err)
 	}
+	if n := pwCount(t, pool, "api_key_id = $1 AND payload_hash = 'same-hash'", gone.ID); n != 1 {
+		t.Fatalf("%d stages of the deleted key, want the one it left: the premise of the test", n)
+	}
 	if answered, valid := pwAuth(t, dsn, plain, 5*time.Second); !answered || valid {
 		t.Fatalf("the deleted key authenticates: answered=%v valid=%v", answered, valid)
 	}
@@ -723,14 +731,18 @@ func TestPendingWriteOfADeletedKeyIsUnreachable(t *testing.T) {
 	if _, err := store.ConsumePendingWrite(ctx, pool, caller.ID, "same-hash"); !errors.Is(err, store.ErrPendingWriteNotFound) {
 		t.Errorf("consume by another key: %v, want ErrPendingWriteNotFound", err)
 	}
-	if _, err := store.StagePendingWrite(ctx, pool, caller.ID, "private", "store", "mcp", []byte(`{"op":"store"}`), "same-hash", time.Hour); err != nil {
+	own, err := store.StagePendingWrite(ctx, pool, caller.ID, "private", "store", "mcp", []byte(`{"op":"store"}`), "same-hash", time.Hour)
+	if err != nil {
 		t.Fatalf("stage of the caller: %v", err)
 	}
 	pw, err := store.ConsumePendingWrite(ctx, pool, caller.ID, "same-hash")
 	if err != nil {
 		t.Fatalf("consume of the caller's own stage: %v", err)
 	}
-	if pw.APIKeyID != caller.ID {
-		t.Errorf("consumed a stage of key %s, want the caller's %s", pw.APIKeyID, caller.ID)
+	if pw.ID != own.ID {
+		t.Errorf("consumed stage %s, want the caller's own %s", pw.ID, own.ID)
+	}
+	if n := pwCount(t, pool, "api_key_id = $1 AND consumed_at IS NULL", gone.ID); n != 1 {
+		t.Errorf("%d open stages of the deleted key, want its one stage untouched", n)
 	}
 }

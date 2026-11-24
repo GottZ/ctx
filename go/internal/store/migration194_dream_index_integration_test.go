@@ -300,6 +300,7 @@ func TestMigration194DreamIndexInlineBuildWriterWait(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer func() { _ = tx.Rollback(ctx) }()
 			if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '3s'`); err != nil {
 				t.Fatal(err)
 			}

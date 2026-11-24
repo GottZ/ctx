@@ -198,8 +198,13 @@ func TestEvictWriteLogMeasure(t *testing.T) {
 					per := min(5, past/(4*store.WriteLogRetentionBatch))
 					for b := 1; b <= per; b++ {
 						c := wlmExplain(t, p, generic, store.WriteLogEvictBatchSQLForTest, horizon, key, store.WriteLogRetentionBatch)
-						if err := pool.QueryRow(ctx, `SELECT min(created_at) FROM context_write_log WHERE created_at < $1`, horizon).Scan(&key); err != nil {
-							t.Fatal(err)
+						// The next keyset, only when a batch of the cell follows:
+						// the cells together may delete every row past the
+						// horizon, and min() of none is NULL.
+						if b < per {
+							if err := pool.QueryRow(ctx, `SELECT min(created_at) FROM context_write_log WHERE created_at < $1`, horizon).Scan(&key); err != nil {
+								t.Fatal(err)
+							}
 						}
 						if b == 1 || b == 2 || b == per {
 							t.Logf("WLM|batch|%d|rpc %s|%s|batch %d|%d buffers|%.1f ms|WAL %d B|%s", n, rpc, mode, b, c.buffers, c.ms, c.wal, c.nodes)
