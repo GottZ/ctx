@@ -250,7 +250,7 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		// Always populated: createdAt is included as meta-anchor even without content times.
-		if _, err := store.RefreshTemporal(bgCtx, h.pool, block.ID, block.Content, block.CreatedAt); err != nil {
+		if _, err := store.RefreshBlockTemporal(bgCtx, h.pool, block); err != nil {
 			slog.Error("store: temporal refresh failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}()

@@ -213,7 +213,7 @@ type supersedesTarget struct {
 // source that locks the target first (id order), or two stores declaring each
 // other, wait instead of deadlocking.
 func UpsertBlockSupersedes(ctx context.Context, pool *pgxpool.Pool, category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string, decl SupersedesDeclaration) (*Block, error) {
-	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName, ExtractDates(content))
+	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName, temporalExtraction(content))
 	var b *Block
 	err := pgxdb.Write(ctx, pool, pgxdb.At("store: upsert block declaring supersedes"), func(tx pgx.Tx) error {
 		if err := LockSupersedesScope(ctx, tx, scope); err != nil {

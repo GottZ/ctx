@@ -302,6 +302,8 @@ const temporalReviewCoversSQL = `SELECT EXISTS (
 // dates of content, only while the block still holds content. The block's
 // content_times is not its part: the write set it in its own statement, from
 // the content it stored (issue #421; UpsertBlock, UpdateBlock, InsertChunk).
+// It extracts the dates of content itself (temporalExtraction); the doors of
+// a write call RefreshBlockTemporal, which takes the dates the write computed.
 //
 // It writes nothing when the rows already hold what it would write: the
 // block holds content, the dream's temporal review wrote the rows for the
@@ -326,17 +328,53 @@ const temporalReviewCoversSQL = `SELECT EXISTS (
 // not the content the dates belong to, and two writes can carry the same
 // updated_at (now() is the transaction start).
 func RefreshTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content string, createdAt time.Time) (applied bool, err error) {
-	times := temporalExtraction(content)
+	return refreshTemporal(ctx, pool, blockID, content, temporalExtraction(content), createdAt)
+}
+
+// RefreshBlockTemporal is the temporal afterwork of the write that returned
+// b: RefreshTemporal of the content that write stored, from the dates the
+// write computed for that content's content_times (UpsertBlock,
+// UpsertBlockSupersedes, UpsertBlocks, UpdateBlock with a content or edits,
+// InsertChunk), without extracting it again (issue #434). The dates travel
+// with the content they are of, and the rows are written only while the
+// block holds that content: the afterwork of an earlier write that runs after
+// a later one writes nothing, as RefreshTemporal's does. A block no write
+// handed its dates to (one a read returned) is refreshed from its content by
+// RefreshTemporal, which extracts.
+func RefreshBlockTemporal(ctx context.Context, pool *pgxpool.Pool, b *Block) (applied bool, err error) {
+	if w := b.written; w != nil {
+		return refreshTemporal(ctx, pool, b.ID, w.content, w.times, b.CreatedAt)
+	}
+	return RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt)
+}
+
+// writtenDates is what a content write hands its temporal afterwork (issue
+// #434): the content it stored, as its statement returned it, and
+// temporalExtraction of those bytes, the dates its statement wrote into
+// content_times.
+type writtenDates struct {
+	content string
+	times   []time.Time
+}
+
+// refreshTemporal is RefreshTemporal with the dates of content given.
+func refreshTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content string, times []time.Time, createdAt time.Time) (bool, error) {
 	anchors := temporalAnchors(times, createdAt)
 	mark := temporalReviewClear(blockID)
 	mark.skipSQL, mark.skipArgs = temporalReviewCoversSQL, []any{blockID, content, anchors, temporalExtractionDigest(anchors)}
 	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt, mark, temporalContentGuardSQL, blockID, content)
 }
 
-// temporalExtraction is the extraction the temporal writers write their rows
-// from and the review records (ExtractDates); a variable only so a test can
-// stand in a different extraction for the same content, as a later release's
-// would be (issue #466 point 8).
+// temporalExtraction is the extraction of the store's temporal writers
+// (ExtractDates): the content writes compute a block's content_times with it
+// (UpsertBlock, UpsertBlockSupersedes, UpsertBlocks, UpdateBlock and its
+// edits, InsertChunk) and hand those dates to their afterwork
+// (RefreshBlockTemporal); the afterwork without them (RefreshTemporal), the
+// backfill and the dream's review record extract with it themselves (the
+// dream's phase 1 calls ExtractDates on its own, validate_temporal.go). A
+// variable only so a test can stand in a different extraction for the same
+// content, as a later release's would be (issue #466 point 8), or count the
+// extractions a write makes (issue #434; SetTemporalExtractionForTest).
 var temporalExtraction = ExtractDates
 
 // backfillTemporalBlock is RefreshTemporal for the backfill, which writes the

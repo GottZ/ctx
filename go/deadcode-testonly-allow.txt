@@ -201,6 +201,7 @@ internal/store/resolve_sources.go	SourceSet.Sources	# wartet: E01-2 C (C2-12) �
 internal/store/resolve_sources.go	SourceSet.UntrustedCount	# wartet: E01-2 C (C2-12) — DB-Hälfte des Gen-1-Vertrags (resolve_sources.go:202), Aufrufer fehlt
 internal/store/resolve_sources.go	SourceSet.readFound	# wartet: E01-2 C (C2-12) — DB-Hälfte des Gen-1-Vertrags (resolve_sources.go:202), Aufrufer fehlt
 internal/store/resolve_sources.go	classifyRest	# wartet: E01-2 C (C2-12) — DB-Hälfte des Gen-1-Vertrags (resolve_sources.go:202), Aufrufer fehlt
+internal/store/temporal_testhook.go	SetTemporalExtractionForTest	# Test-Naht auf temporalExtraction (Issue #466 P8, #434 Zähler je Schreiben); nur mit -tags=integration gebaut, damit die handler-Integrationstests sie erreichen, 0 Prod by design
 internal/store/tenant.go	CreateTenant	# E02-3 A: Pool-Wrapper um CreateTenantTx (Prod-Bootstrap); 16 Aufrufe in 9 Integrationstests
 internal/testalloc/testalloc.go	EveryAllocation	# testalloc: Testhelfer der Allokations-Pins (Frame-gebundene Messung aus dem Speicherprofil statt prozessweitem TotalAlloc, issue #369), 0 Prod by design — wie testdb
 internal/testalloc/testalloc.go	Frame	# testalloc: Testhelfer der Allokations-Pins (Frame-gebundene Messung aus dem Speicherprofil statt prozessweitem TotalAlloc, issue #369), 0 Prod by design — wie testdb

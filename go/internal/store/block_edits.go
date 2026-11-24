@@ -269,7 +269,7 @@ func applyEditsAndDates(content string, edits []ContentEdit) (string, []time.Tim
 	if err != nil {
 		return "", nil, err
 	}
-	return edited, ExtractDates(edited), nil
+	return edited, temporalExtraction(edited), nil
 }
 
 // updateMetadataExpr builds the one assignment of the metadata column an

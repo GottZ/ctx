@@ -90,6 +90,12 @@ type Block struct {
 	Archived    bool              `json:"archived,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
+	// written is what the content write that returned this block hands its
+	// temporal afterwork (RefreshBlockTemporal, issue #434): the content it
+	// stored and the dates it computed from that content for content_times.
+	// nil on a block a read or a write without a content returned;
+	// unexported, so no answer carries it.
+	written *writtenDates
 }
 
 // SensitivityWrite carries the sensitivity intent of one block write.
@@ -907,7 +913,7 @@ func guardInsertPath(ctx context.Context, tx pgx.Tx, writer provenanceIdentity, 
 // validates the name against the registry snapshot (422 on unknown) — this
 // layer trusts its caller like it does for sensitivity levels.
 func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string) (*Block, error) {
-	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName, ExtractDates(content))
+	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName, temporalExtraction(content))
 	var b *Block
 	if err := pgxdb.Write(ctx, pool, pgxdb.At("store: upsert block"), func(tx pgx.Tx) error {
 		var err error
@@ -930,12 +936,16 @@ type upsertStatement struct {
 	writer                 provenanceIdentity
 	badged                 bool
 	category, title, scope string
+	// written is the content the statement stores and its content_times,
+	// handed to the afterwork with the block (issue #434).
+	written writtenDates
 }
 
 // prepareUpsert is the pure half of UpsertBlock (see there for the rules).
-// contentTimes is ExtractDates(content), which the caller computes before it
-// opens the write's transaction: on a large content it takes milliseconds,
-// and inside the transaction it would extend the hold of the rows it locked.
+// contentTimes is temporalExtraction(content), which the caller computes
+// before it opens the write's transaction: on a large content it takes
+// milliseconds, and inside the transaction it would extend the hold of the
+// rows it locked.
 func prepareUpsert(category, title, content string, tags []string, metadata map[string]any, scope string, scopeExplicit bool, sens SensitivityWrite, typeName string, contentTimes []time.Time) upsertStatement {
 	if tags == nil {
 		tags = []string{}
@@ -1055,6 +1065,7 @@ func prepareUpsert(category, title, content string, tags []string, metadata map[
 	return upsertStatement{
 		query: query, args: args, writer: writer, badged: badged,
 		category: category, title: title, scope: scope,
+		written: writtenDates{content: content, times: contentTimes},
 	}
 }
 
@@ -1161,6 +1172,13 @@ func (u upsertStatement) execHeld(ctx context.Context, tx pgx.Tx, hadRow bool) (
 		if err := InvalidateEmbeddingTx(ctx, tx, b.ID); err != nil {
 			return nil, fmt.Errorf("store: upsert block: invalidate embedding: %w", err)
 		}
+	}
+	// The handover names the content as the statement returned it, the bytes
+	// the dates were computed from (the statement stores its argument as it
+	// is), so the afterwork holds one copy of it; were they ever to differ,
+	// the afterwork would extract.
+	if b.Content == u.written.content {
+		b.written = &writtenDates{content: b.Content, times: u.written.times}
 	}
 	return b, nil
 }
@@ -1953,6 +1971,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// slots.
 	contentSent := data.Content != nil || data.Edits != nil
 	var edits *contentEditPlan
+	contentArg := len(args)
 	if contentSent {
 		setClauses = append(setClauses,
 			fmt.Sprintf("content = $%d", argIdx),
@@ -1961,7 +1980,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 			edits = &contentEditPlan{edits: data.Edits, arg: len(args), writeScopes: writeScopes}
 			args = append(args, nil, nil)
 		} else {
-			args = append(args, *data.Content, ExtractDates(*data.Content))
+			args = append(args, *data.Content, temporalExtraction(*data.Content))
 		}
 		argIdx += 2
 	}
@@ -2086,6 +2105,16 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	}
 	if !found {
 		return nil, false, pinnedUpdateMissReason(ctx, pool, id, writeScopes, data.ExpectUpdatedAt != nil)
+	}
+	if contentSent {
+		// The content the statement stored and its content_times, for the
+		// afterwork (issue #434); for edits, the ones the held row resolved.
+		// As in execHeld, the handover names the returned content.
+		content, okContent := args[contentArg].(string)
+		times, okTimes := args[contentArg+1].([]time.Time)
+		if okContent && okTimes && content == b.Content {
+			b.written = &writtenDates{content: b.Content, times: times}
+		}
 	}
 	return b, needsReEmbed, nil
 }

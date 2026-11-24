@@ -78,7 +78,8 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 	// see prepareUpsert).
 	insertCols += ", content_times"
 	selectVals += fmt.Sprintf(", $%d::timestamptz[]", len(args)+1)
-	args = append(args, ExtractDates(content))
+	times := temporalExtraction(content)
+	args = append(args, times)
 	setClauses = append(setClauses, "content_times = EXCLUDED.content_times")
 
 	query := fmt.Sprintf(`INSERT INTO context_blocks (%s)
@@ -104,6 +105,9 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 		// scope) another active block holds collides on the identity index
 		// (issue #275): the caller's input, typed like UpdateBlock's.
 		return nil, fmt.Errorf("store: insert chunk: %w", blockIdentityTaken(err))
+	}
+	if b.Content == content { // the afterwork's dates, as in execHeld (issue #434)
+		b.written = &writtenDates{content: b.Content, times: times}
 	}
 	return b, nil
 }
