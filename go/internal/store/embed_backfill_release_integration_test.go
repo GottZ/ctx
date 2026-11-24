@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
@@ -27,9 +28,40 @@ func TestBackfillReleaseNeverWaitsForAHeldMemo(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
+	relNoWait(t, func(*testing.T, context.Context, *pgxpool.Pool) (string, store.BackfillRelease) {
+		return "private", store.BackfillRelease{Class: store.EmbedFailureOversize, AllTenants: true}
+	})
+}
+
+// TestBackfillReleaseNeverWaitsForAHeldMemoOfATenant: the same for a
+// tenant-admin's release, whose page reads the memos from the tenant's own
+// scopes.
+func TestBackfillReleaseNeverWaitsForAHeldMemoOfATenant(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	relNoWait(t, func(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (string, store.BackfillRelease) {
+		tn, err := store.CreateTenant(ctx, pool, "rel-nw", "rel-nw")
+		if err != nil {
+			t.Fatal(err)
+		}
+		const scope = "rel-nw:data"
+		if _, err := store.AssignTenantScope(ctx, pool, tn.ID, scope, nil); err != nil {
+			t.Fatal(err)
+		}
+		return scope, store.BackfillRelease{Class: store.EmbedFailureOversize, TenantID: tn.ID, Hold: time.Hour}
+	})
+}
+
+// relNoWait parks two issue blocks of the reader's scope, lets a content
+// writer hold the first one's memo, and releases the class as the reader:
+// the release must take the free memo and finish while the writer's
+// transaction is open.
+func relNoWait(t *testing.T, reader func(*testing.T, context.Context, *pgxpool.Pool) (string, store.BackfillRelease)) {
+	t.Helper()
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
-	const scope = "private"
+	scope, rel := reader(t, ctx, pool)
 	writable := []string{scope}
 	ids := make([]string, 2)
 	for i, title := range []string{"rel236 held", "rel236 free"} {
@@ -53,7 +85,7 @@ func TestBackfillReleaseNeverWaitsForAHeldMemo(t *testing.T) {
 	if res, err := store.ReleaseBackfillMemos(ctx, pool, store.BackfillRelease{Class: store.EmbedFailureOversize}); err != nil || res.Counted != 0 {
 		t.Fatalf("zero reader: %+v %v, want counted 0", res, err)
 	}
-	dry, err := store.ReleaseBackfillMemos(ctx, pool, store.BackfillRelease{Class: store.EmbedFailureOversize, AllTenants: true})
+	dry, err := store.ReleaseBackfillMemos(ctx, pool, rel)
 	if err != nil || dry.Counted != 2 {
 		t.Fatalf("dry run: %+v %v, want counted 2", dry, err)
 	}
@@ -78,9 +110,9 @@ func TestBackfillReleaseNeverWaitsForAHeldMemo(t *testing.T) {
 	go func() {
 		// Both memos count: the writer's delete of the held one is not
 		// committed.
-		res, err := store.ReleaseBackfillMemos(ctx, pool, store.BackfillRelease{
-			Class: store.EmbedFailureOversize, AllTenants: true, Confirm: &dry.Counted, AsOf: &dry.AsOf,
-		})
+		confirmed := rel
+		confirmed.Confirm, confirmed.AsOf = &dry.Counted, &dry.AsOf
+		res, err := store.ReleaseBackfillMemos(ctx, pool, confirmed)
 		done <- result{res, err}
 	}()
 	var got result
@@ -102,12 +134,15 @@ func TestBackfillReleaseNeverWaitsForAHeldMemo(t *testing.T) {
 	if err := writer.Commit(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
 		t.Fatalf("writer commit: %v", err)
 	}
+	// What still keeps a block out of the pick: nothing (the writer's
+	// invalidation deleted one memo, the release took the other — deleted
+	// for a server-admin, due for a tenant-admin).
 	var left int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_failures WHERE block_id = ANY($1::uuid[])`,
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_failures WHERE block_id = ANY($1::uuid[]) AND next_attempt_at > now()`,
 		[]string{held, free}).Scan(&left); err != nil {
 		t.Fatal(err)
 	}
 	if left != 0 {
-		t.Errorf("%d memos left, want 0 (the writer's invalidation and the release took one each)", left)
+		t.Errorf("%d memos still park their block, want 0 (the writer's invalidation and the release took one each)", left)
 	}
 }
