@@ -373,17 +373,18 @@ func TestEmbedVerify_Integration(t *testing.T) {
 			t.Errorf("guard above_duplicate = %d, want 0 (random unit vectors are non-duplicates)", rep.Guard.AboveDuplicate)
 		}
 
-		// All four indexes valid in the catalog.
+		// All six indexes valid in the catalog.
 		var valid int
 		if err := pool.QueryRow(ctx,
 			`SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
 			 WHERE c.relname = ANY($1) AND i.indisvalid`,
 			[]string{verifyNextHNSWIndexName, "idx_embedding_pending_next",
-				"idx_dream_pending_next", "idx_guard_pending_type_next"}).Scan(&valid); err != nil {
+				"idx_dream_pending_next", "idx_guard_pending_type_next", "idx_embedding_pending_type_scope_next",
+				"idx_blocks_stratify_covering_next"}).Scan(&valid); err != nil {
 			t.Fatalf("index catalog probe: %v", err)
 		}
-		if valid != 4 {
-			t.Errorf("valid verify indexes = %d, want 4", valid)
+		if valid != 6 {
+			t.Errorf("valid verify indexes = %d, want 6", valid)
 		}
 	})
 

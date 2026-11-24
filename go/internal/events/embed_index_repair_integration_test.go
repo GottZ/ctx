@@ -205,6 +205,14 @@ var repairBreaks = []struct {
 	// (issue #360): the twin of idx_guard_pending_type did not exist then.
 	{"missing_since_182", []string{"idx_guard_pending_type_next"}, indexActionCreated,
 		func(t *testing.T, pool *pgxpool.Pool) { dropIndexT(t, pool, "idx_guard_pending_type_next") }},
+	// A migration whose green verdict was given on a release before 193
+	// (issue #527): the twins of idx_embedding_pending_type_scope and of
+	// idx_blocks_stratify_covering did not exist then.
+	{"missing_since_193", []string{"idx_embedding_pending_type_scope_next", "idx_blocks_stratify_covering_next"}, indexActionCreated,
+		func(t *testing.T, pool *pgxpool.Pool) {
+			dropIndexT(t, pool, "idx_embedding_pending_type_scope_next")
+			dropIndexT(t, pool, "idx_blocks_stratify_covering_next")
+		}},
 }
 
 func TestEmbedIndexRepair_Integration(t *testing.T) {
