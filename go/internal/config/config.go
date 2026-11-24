@@ -30,6 +30,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -3328,6 +3329,23 @@ func (c *Config) GatewaySettings() oai.Settings {
 	}
 }
 
+// dbHostPort is CONTEXT_DB_HOST joined with the port as the DSN's host. A
+// value in brackets is a host in the URL's own spelling — an IPv6 address
+// ("[fd00::5]"), one with its zone spelled "%25" ("[fe80::1%25eth0]"), a list
+// of them — and the only spelling an IPv6 host connected with before issue
+// #519: it keeps that reading (the "%25" is the zone's percent; the URL
+// escapes it again), with the port after it. Any other value is the host
+// itself: a name, an IPv4 address, a list of names, a socket directory, or a
+// bare IPv6 address with or without a zone, which net.JoinHostPort puts in
+// brackets (a bracketed value it would bracket twice, which pgx refuses).
+func dbHostPort(host string, port int) string {
+	p := strconv.Itoa(port)
+	if strings.HasPrefix(host, "[") {
+		return strings.ReplaceAll(host, "%25", "%") + ":" + p
+	}
+	return net.JoinHostPort(host, p)
+}
+
 // DefaultDBConnectTimeout bounds one connection attempt to the database
 // (connect_timeout in the DSN, issue #519): the dial, TLS and the startup
 // and authentication exchange. Without it a database that accepts and never
@@ -3352,12 +3370,12 @@ func (c *Config) DSN() string {
 	// Each value goes into its part of the URL with that part's escape
 	// (issue #519): the userinfo's (a space is %20 — the query string's "+"
 	// read back as a plus), the path's (a "?" in the name no longer cuts the
-	// query), and a host and port joined as an address (a bare IPv6 host in
-	// brackets). sslmode stays as the operator wrote it.
+	// query; the name is read as written, V73), and the host's (dbHostPort).
+	// sslmode stays as the operator wrote it.
 	u := url.URL{
 		Scheme: "postgres",
 		User:   url.UserPassword(c.Server.DBUser, c.Server.DBPass),
-		Host:   net.JoinHostPort(c.Server.DBHost, strconv.Itoa(c.Server.DBPort)),
+		Host:   dbHostPort(c.Server.DBHost, c.Server.DBPort),
 		Path:   "/" + c.Server.DB,
 	}
 	dsn := u.String() + "?sslmode=" + c.Server.DBSSL

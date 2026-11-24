@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -135,6 +136,8 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateWriteLogRetention(c)...)
 	// V70 (#236): embed_backfill.release_hold above 0.
 	issues = append(issues, validateEmbedBackfillReleaseHold(c)...)
+	// V73 (#519): server.db with a percent escape the DSN decoded before.
+	issues = append(issues, validateDBNameEscape(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1733,6 +1736,31 @@ func validateEmbedBackfillReleaseHold(c *Config) []Issue {
 	}
 	return []Issue{{Field: "embed_backfill.release_hold", Severity: SeverityError,
 		Msg: "embed_backfill.release_hold must be > 0 — at 0 a tenant-admin's release loop over blocks that keep not fitting would take a turn of the background arm in every round of the tenants"}}
+}
+
+// dbNameEscapeRe finds a percent escape in a database name (V73).
+var dbNameEscapeRe = regexp.MustCompile(`%[0-9A-Fa-f]{2}`)
+
+// validateDBNameEscape is V73 (issue #519): server.db is the database's name
+// as written. Before #519 the DSN carried the name unescaped, so a percent
+// escape in it was decoded — CONTEXT_DB "my%20db" connected to the database
+// "my db" —; the DSN now escapes it, and "my%20db" names the database
+// "my%20db". A name whose escapes decode is either such a pre-encoded value,
+// which after the upgrade names a database that does not exist, or a name
+// that really carries the text: a warning names both readings and boot goes
+// on — the connection that follows tells which. A name whose escapes do not
+// all decode did not connect before (pgx refused the DSN): nothing to say.
+func validateDBNameEscape(c *Config) []Issue {
+	db := c.Server.DB
+	if !dbNameEscapeRe.MatchString(db) {
+		return nil
+	}
+	decoded, err := url.PathUnescape(db)
+	if err != nil || decoded == db {
+		return nil
+	}
+	return []Issue{{Field: "server.db", Severity: SeverityWarn,
+		Msg: fmt.Sprintf("database name %q is used as written; before issue #519 a percent escape in it was decoded, which named the database %q — if that is the database, set CONTEXT_DB to %q", db, decoded, decoded)}}
 }
 
 // validateDreamDecideTieOdds is V36: dream.decide_tie_odds is an odds RATIO
