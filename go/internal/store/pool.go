@@ -102,6 +102,11 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	// An acquire a request's client gave up on is marked in the request log
 	// as a wait for a connection (issue #453, pgxdb.AcquireWaitTracer).
 	config.ConnConfig.Tracer = pgxdb.AcquireWaitTracer{}
+	// A 55P03 a lock timer left held past a commit is taken by an empty
+	// statement before the connection is handed out again, not by the next
+	// acquirer's statement (issue #519, pgxdb.PrepareAfterLockTimeout).
+	config.PrepareConn = pgxdb.PrepareAfterLockTimeout
+	config.BeforeClose = pgxdb.ForgetLockTimeout
 
 	tunePool(config)
 

@@ -68,3 +68,24 @@ func TestHealthSlowFirstCandidateKeepsTheWholeBudget(t *testing.T) {
 		}
 	}
 }
+
+// TestHealthCandidateAfterAFastFailureGetsTheRest — the other side of the
+// shares: a first candidate that fails at once hands the rest of the budget
+// to the next one at once, which answers after 300 ms of a 400 ms budget and
+// serves the role (a next candidate that waited for the first one's share
+// would have 200 ms left).
+func TestHealthCandidateAfterAFastFailureGetsTheRest(t *testing.T) {
+	setHealthBudget(t, 400*time.Millisecond)
+	freshHealthNotice(t)
+	up := slowBackend(t, 0, nil)
+	next := operatorRow("i519-fastfail-2", slowBackend(t, 300*time.Millisecond, nil), backends.RoleSynthesis)
+	h := roundHandler(brokenPool(t), seededBackends(operatorRow("i519-fastfail-e", up, backends.RoleEmbed, backends.RoleDream),
+		operatorRow("i519-fastfail-1", closedPortHost(t), backends.RoleSynthesis), next))
+	logs := installRejectLogCapture(t)
+	got := askHealth(h, 0)
+	waitHealthRounds(t)
+	if got["chat"] != "ok" {
+		t.Errorf("services %v, want chat=ok — the second candidate answers within what the first left", got)
+	}
+	wantLines(t, logs, backends.RoleSynthesis, next.Name, 0, 0)
+}
