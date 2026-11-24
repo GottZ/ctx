@@ -277,11 +277,32 @@ func jsonNULPath(raw []byte, skip func(string) bool) (string, bool) {
 		return "", false
 	}
 	sc := nulScanner{raw: raw, skip: skip}
-	state := nulExpectValue
-	for state != nulDone {
+	sc.walk()
+	return sc.path, sc.found
+}
+
+// jsonNULKey is jsonNULPath for an object whose own keys are the fields (the
+// data of a manage action): the top-level key under which the first NUL
+// sits, "" when a top-level key carries it itself or raw is no object.
+func jsonNULKey(raw []byte) (key string, found bool) {
+	if bytes.IndexByte(raw, 0) < 0 && !jsonCarriesNUL(raw) {
+		return "", false
+	}
+	sc := nulScanner{raw: raw}
+	sc.walk()
+	if !sc.found {
+		return "", false
+	}
+	if len(sc.at) == 0 || sc.at[0].array {
+		return "", true
+	}
+	return jsonKeyText(sc.at[0].key), true
+}
+
+func (sc *nulScanner) walk() {
+	for state := nulExpectValue; state != nulDone; {
 		state = sc.step(state)
 	}
-	return sc.path, sc.found
 }
 
 type nulState int
@@ -302,6 +323,7 @@ type nulScanner struct {
 	skip  func(string) bool
 	path  string
 	found bool
+	at    []nulFrame // the frames of the NUL found
 }
 
 func (sc *nulScanner) step(state nulState) nulState {
@@ -337,7 +359,7 @@ func (sc *nulScanner) hit(frames []nulFrame) bool {
 	if sc.skip != nil && sc.skip(p) {
 		return false
 	}
-	sc.path, sc.found = p, true
+	sc.path, sc.found, sc.at = p, true, frames
 	return true
 }
 

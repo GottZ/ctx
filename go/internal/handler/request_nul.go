@@ -3,9 +3,12 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"reflect"
 	"slices"
 	"strings"
+
+	"github.com/GottZ/ctx/internal/backends"
 )
 
 // A NUL character (U+0000) in a value of a request is a value the database
@@ -40,8 +43,9 @@ func jsonCarriesNUL(raw []byte) bool {
 }
 
 // manageNULField returns the field of req that carries a NUL character —
-// "data.<key>" for a key of a data object (nulField: the first key, in key
-// order, whose name or value carries one) — or "" when none does. It reads
+// "data.<key>" for a key of a data object (the key the first NUL in the text
+// sits under; the object itself when a key carries it) — or "" when none
+// does. It reads
 // every field of manageRequest by its kind (string, []string,
 // json.RawMessage), so a field added later is checked without an edit here;
 // a field of another kind fails TestManageNULFieldReadsEveryField until it
@@ -61,17 +65,39 @@ func manageNULField(req manageRequest) string {
 				return name
 			}
 		case json.RawMessage:
-			if !jsonCarriesNUL(f) {
-				continue
-			}
-			var keys map[string]json.RawMessage
-			if json.Unmarshal(f, &keys) == nil {
-				if k := nulField(keys); k != "" {
-					return name + "." + k
+			// One pass over the text, no decode (the review of #530: a 1 MB
+			// object of many keys took 57 ms and 233,000 allocations to
+			// name); a key that carries the NUL names its object, so the
+			// answer does not echo the character.
+			if k, found := jsonNULKey(f); found {
+				if k == "" || strings.ContainsRune(k, 0) {
+					return name
 				}
+				return name + "." + k
 			}
-			return name
 		}
 	}
 	return ""
+}
+
+// manageNULFieldForms names the actions whose form shows a refusal next to
+// its field: the web UI's backend and model-alias dialogs read the fields[]
+// of a 422 (ValidateBackend's answer), so a NUL in a key of their data is
+// refused in that form, the field the key — the review of #530 found the
+// dispatcher's 400 text a form error there, no longer a field error.
+var manageNULFieldForms = map[string]bool{
+	"backend-create":     true,
+	"backend-update":     true,
+	"model-alias-create": true,
+	"model-alias-update": true,
+}
+
+// writeManageNULRefusal answers the dispatcher's NUL refusal: 400 naming the
+// field, or for a data key of a form action its 422 field error.
+func writeManageNULRefusal(w http.ResponseWriter, action, field string) {
+	if key, ok := strings.CutPrefix(field, "data."); ok && manageNULFieldForms[action] {
+		writeBackendValidation(w, []backends.FieldError{{Field: key, Message: nulFieldMessage}})
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": field + " " + nulFieldMessage})
 }

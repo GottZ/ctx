@@ -25,9 +25,11 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -3347,15 +3349,18 @@ const DefaultDBConnectTimeout = 10 * time.Second
 // it out then, and pgx reads the variable — as it does an empty one, which
 // counts as unset.
 func (c *Config) DSN() string {
-	dsn := fmt.Sprintf(
-		"postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		url.QueryEscape(c.Server.DBUser),
-		url.QueryEscape(c.Server.DBPass),
-		c.Server.DBHost,
-		c.Server.DBPort,
-		c.Server.DB,
-		c.Server.DBSSL,
-	)
+	// Each value goes into its part of the URL with that part's escape
+	// (issue #519): the userinfo's (a space is %20 — the query string's "+"
+	// read back as a plus), the path's (a "?" in the name no longer cuts the
+	// query), and a host and port joined as an address (a bare IPv6 host in
+	// brackets). sslmode stays as the operator wrote it.
+	u := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(c.Server.DBUser, c.Server.DBPass),
+		Host:   net.JoinHostPort(c.Server.DBHost, strconv.Itoa(c.Server.DBPort)),
+		Path:   "/" + c.Server.DB,
+	}
+	dsn := u.String() + "?sslmode=" + c.Server.DBSSL
 	if os.Getenv("PGCONNECT_TIMEOUT") == "" {
 		dsn += fmt.Sprintf("&connect_timeout=%d", int(DefaultDBConnectTimeout/time.Second))
 	}

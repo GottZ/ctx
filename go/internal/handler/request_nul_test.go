@@ -55,7 +55,7 @@ func TestManageNULField(t *testing.T) {
 		{"types_exclude", manageRequest{TypesExclude: []string{"\x00"}}, "types_exclude"},
 		{"block_roles_exclude", manageRequest{BlockRolesExclude: []string{"\x00"}}, "block_roles_exclude"},
 		{"a data key's value", manageRequest{Data: json.RawMessage(`{"b":"ok","tenant_id":"t\u0000"}`)}, "data.tenant_id"},
-		{"a data key", manageRequest{Data: json.RawMessage(`{"\u0000":"v"}`)}, "data.\x00"},
+		{"a data key", manageRequest{Data: json.RawMessage(`{"\u0000":"v"}`)}, "data"},
 		{"nested in data", manageRequest{Data: json.RawMessage(`{"metadata":{"note":["\u0000"]}}`)}, "data.metadata"},
 		{"data that is no object", manageRequest{Data: json.RawMessage(`["\u0000"]`)}, "data"},
 		{"after", manageRequest{After: json.RawMessage(`{"id":"\u0000"}`)}, "after.id"},

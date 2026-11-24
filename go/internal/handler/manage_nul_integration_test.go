@@ -97,10 +97,16 @@ func TestManageRefusesANULCharacterInEveryAction(t *testing.T) {
 					}
 				}
 				table = append(table, fmt.Sprintf("| %s | %s | %d%s | %s |", action, in.name, status, panicked, strings.Join(lines, "; ")))
-				if status != http.StatusBadRequest || panicked != "" {
-					t.Errorf("%s with %s answered %d%s %v, want 400 — a value the database cannot store is the caller's mistake", action, in.name, status, panicked, resp)
+				// The backend and model-alias forms show it at its field: the
+				// 422 of their validation (the review of #530, point 3).
+				want, msg := http.StatusBadRequest, fmt.Sprint(resp["error"])
+				if manageNULFieldForms[action] && in.name == "NUL in data" {
+					want, msg = http.StatusUnprocessableEntity, fmt.Sprint(resp["fields"])
 				}
-				if msg, _ := resp["error"].(string); !strings.Contains(msg, "NUL") {
+				if status != want || panicked != "" {
+					t.Errorf("%s with %s answered %d%s %v, want %d — a value the database cannot store is the caller's mistake", action, in.name, status, panicked, resp, want)
+				}
+				if !strings.Contains(msg, "NUL") {
 					t.Errorf("%s with %s answered %v, want an error naming the NUL character", action, in.name, resp)
 				}
 				if len(lines) != 0 {

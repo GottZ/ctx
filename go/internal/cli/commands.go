@@ -5,7 +5,9 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -572,6 +574,19 @@ func digestCmd(getClient func() (*Client, error)) *cobra.Command {
 			return fmt.Errorf("--timeout must be 0 (no limit) or positive, got %v", timeout)
 		}
 		return nil
+	}
+	// A call the timeout cut ended the digest with it (the server's run ends
+	// with its client): say so, and which option sets the wait (the review
+	// of #530, issue #519).
+	run := cmd.RunE
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		err := run(c, args)
+		var ne net.Error
+		if err != nil && errors.As(err, &ne) && ne.Timeout() {
+			return fmt.Errorf("the digest did not answer within --timeout %v and ended with the call, so this run wrote no topic map "+
+				"(a longer --timeout, or 0 to wait without end): %w", timeout, err)
+		}
+		return err
 	}
 	return cmd
 }
