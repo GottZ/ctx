@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -15,7 +14,9 @@ import (
 // resolveBatchUpdateTarget resolves an update item's id within the key's
 // writable scopes, as the update tool does (resolveUpdateTargetIn, the same
 // wordings): an unknown id, an ambiguous or too short prefix and a key
-// without a writable scope are the item's unknown_block. A failure of the
+// without a writable scope are the item's unknown_block — an id that cannot
+// name a block (a NUL, invalid UTF-8, a character no id carries) is an
+// unknown id, answered by the store without a query (issue #547). A failure of the
 // resolve itself — its prefix query cut off by a cancelled request or a
 // broken connection — is a fault, not an answer about the id (issue #547,
 // from the bot review of #550): it answers 500 internal with its line, where
@@ -29,7 +30,7 @@ func resolveBatchUpdateTarget(ctx context.Context, pool *pgxpool.Pool, ar *auth.
 		return resolvedID, nil
 	case errors.Is(err, store.ErrAmbiguousID) || len(matches) > 0:
 		return "", classUnknownBlock.reject(fmt.Sprintf("ambiguous id prefix (%d matches) — re-specify with a longer prefix or the full id", len(matches)))
-	case errors.Is(err, store.ErrNoScopes) || strings.Contains(err.Error(), "prefix must be at least"):
+	case errors.Is(err, store.ErrNoScopes) || errors.Is(err, store.ErrIDPrefixTooShort):
 		return "", classUnknownBlock.reject(fmt.Sprintf("cannot resolve block id: %v", err))
 	}
 	logRequestError(ctx, "store batch: resolve update target error", "error", err, "request_id", reqID)

@@ -1496,10 +1496,16 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
 	if IsFullUUID(idOrPrefix) {
+		if idTextUnsendable(idOrPrefix) {
+			return "", nil, nil // names no block (issue #547)
+		}
 		return idOrPrefix, nil, nil
 	}
 	if len(idOrPrefix) < MinIDPrefixLen {
-		return "", nil, fmt.Errorf("store: id prefix must be at least %d characters (got %d)", MinIDPrefixLen, len(idOrPrefix))
+		return "", nil, fmt.Errorf("%w (got %d)", ErrIDPrefixTooShort, len(idOrPrefix))
+	}
+	if idPrefixMatchesNothing(idOrPrefix) {
+		return "", nil, nil // no LIKE wildcard, no unsendable text (issue #547)
 	}
 
 	// Cap candidates at 11: anything ≥10 is too ambiguous to surface usefully,
