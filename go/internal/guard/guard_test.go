@@ -126,10 +126,10 @@ func expectGuardCheckFail(mock pgxmock.PgxPoolIface, id string, sqlErr error) {
 }
 
 // expectApplyDecisionClean matches the UPDATE for clean/needs_review decisions
-// (the else-branch in applyDecision: 7 args).
+// (the else-branch in applyDecision: 7 args, the stamp comes from the database).
 func expectApplyDecisionClean(mock pgxmock.PgxPoolIface) *pgxmock.ExpectedExec {
 	return mock.ExpectExec(`UPDATE context_blocks SET\s+guard_status`).
-		WithArgs(anyArgs(8)...).
+		WithArgs(anyArgs(7)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 }
 
@@ -317,7 +317,7 @@ func TestRunGuardBatch_ApplyDecisionFails_RollsBack(t *testing.T) {
 	expectSavepoint(mock, blockA)
 	expectGuardCheck(mock, blockA)
 	mock.ExpectExec(`UPDATE context_blocks SET\s+guard_status`).
-		WithArgs(anyArgs(8)...).
+		WithArgs(anyArgs(7)...).
 		WillReturnError(errors.New("constraint violation"))
 	expectRollback(mock, blockA)
 

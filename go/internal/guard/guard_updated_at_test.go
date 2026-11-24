@@ -69,7 +69,7 @@ func TestApplyDecision_MarkCheckedLeavesUpdatedAt(t *testing.T) {
 
 			mock.ExpectBegin()
 			mock.ExpectExec(`UPDATE context_blocks SET\s+guard_status`).
-				WithArgs(anyArgs(8)...).
+				WithArgs(anyArgs(7)...).
 				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 			tx, err := mock.Begin(context.Background())
@@ -109,7 +109,7 @@ func TestApplyDecision_AutoArchiveMovesUpdatedAt(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE context_blocks SET\s+is_archived = true`).
-		WithArgs(anyArgs(6)...).
+		WithArgs(anyArgs(5)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	tx, err := mock.Begin(context.Background())
