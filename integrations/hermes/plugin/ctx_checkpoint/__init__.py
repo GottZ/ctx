@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import getpass
 import hashlib
+import json
 import logging
 import re
 import time
@@ -645,6 +646,22 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
 
     def _current_secrets(self) -> tuple[str, ...]:
         return (self._api_key, *self._profile_keys)
+
+    def _entry_key(self) -> tuple[str, ...]:
+        """The MCP server entry the checkpoint writes to (GottZ/ctx#299): the profile, the entry's
+        name — what Hermes keys the entry's circuit breaker and RPC lock by — and a digest of the
+        entry's configuration, because Hermes connects anew (breaker at zero) when that changes and
+        the writes booked against another server or key do not count for this one. Only compared,
+        never logged; the digest is no copy of the key the entry carries."""
+        if self.transport == "rest":
+            return super()._entry_key()
+        name = self._server_name()
+        entry = _configured_server(_effective_config(), name)
+        fingerprint = ""
+        if entry:
+            canonical = json.dumps(entry, sort_keys=True, ensure_ascii=False, default=str)
+            fingerprint = hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()[:32]
+        return ("mcp", str(self._hermes_home), name, fingerprint)
 
     def _profile_secrets(self) -> tuple[str, ...]:
         """The ctx keys of this profile for the configured server entry (``status.profile_ctx_keys``):

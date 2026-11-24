@@ -481,7 +481,9 @@ def test_a_failing_redactor_keeps_an_empty_code_out_of_the_chain_error(home, fai
     writer.secret = (CTX_KEY,)
     writer.api_timeout = 5.0
     writer.monotonic = lambda: 0.0
-    run = types.SimpleNamespace(deadline=60.0, budget_s=60.0)
+    run = types.SimpleNamespace(
+        deadline=60.0, budget_s=60.0, entry=checkpoint.EntryState(), window_writes=5, capped=False
+    )
 
     with pytest.raises(checkpoint.CtxCheckpointError) as raised:
         writer._call("head store", run, lambda **kwargs: {"success": False, "error": "refused"})

@@ -21,6 +21,7 @@ the titles as type ``checkpoint`` (migrations M107 "Compaction source …" / M12
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import importlib
 import json
@@ -28,6 +29,7 @@ import logging
 import math
 import re
 import sys
+import threading
 import time
 import traceback
 from collections.abc import Callable, Iterable
@@ -91,12 +93,17 @@ RATE_WINDOW_S = 60.0
 # Slack on top of a window before a write that waits for it: ctx books a REST write after
 # answering it, a few milliseconds after the client saw the answer.
 RATE_WINDOW_MARGIN_S = 1.0
-# Refused calls in a row before the chain gives up. Hermes opens its per-server circuit breaker
-# after three consecutive error answers of an MCP server and then refuses every call to it for
-# 60 s (tools/mcp_tool.py _CIRCUIT_BREAKER_THRESHOLD, tools/mcp_tool_handlers.py
-# _record_call_outcome counts a tool's own error payload): a third refusal would cut recall, the
-# agent's ctx tools and other sessions' checkpoints of the profile off for a minute.
+# Error answers in a row a ctx server entry may give the chains of this process before they stop
+# (GottZ/ctx#299: counted per entry over all chains, not per chain). Hermes opens its per-server
+# circuit breaker after three consecutive error answers of an MCP server and then refuses every
+# call to it for 60 s (tools/mcp_tool.py _CIRCUIT_BREAKER_THRESHOLD, tools/mcp_tool_handlers.py
+# _record_call_outcome counts a tool's own error payload, and any success resets it): a third
+# would cut recall, the agent's ctx tools and other sessions' checkpoints of the profile off for a
+# minute.
 MAX_RATE_REFUSALS = 2
+# How long (real seconds) a call waits for the answer of another call of the same entry before it
+# looks at its deadline again (EntryState.admit: the answer in flight decides whether it may go).
+ENTRY_WAIT_POLL_S = 0.05
 # Hermes calls on_pre_compress in the compaction worker before the summary call, and its wait for
 # that worker counts from the worker's last progress, which only the summary stream reports
 # (agent/conversation_compression.py _await_worker_within_budget; the window comes from
@@ -831,6 +838,134 @@ def legacy_head_title_for(root_session_id: str) -> str:
     return f"Compaction checkpoint head {_legacy_short_root(root_session_id)}"
 
 
+# -- What the chains of this process share for one server entry (GottZ/ctx#299) ------------
+
+
+@dataclass
+class _Ticket:
+    """One admitted call of an entry (:meth:`EntryState.admit`), released once."""
+
+    write: bool
+    released: bool = False
+
+
+@dataclass(frozen=True)
+class Admission:
+    """The answer of :meth:`EntryState.admit`: a ``ticket`` (send the call, then release it), or
+    why not — ``stop`` (the entry's error answers in a row reached ``MAX_RATE_REFUSALS``: no write
+    goes out), ``resume_at`` (the window's writes are booked: a slot frees then), or neither
+    (another call of the entry is in flight and its answer decides)."""
+
+    ticket: _Ticket | None = None
+    stop: bool = False
+    resume_at: float | None = None
+
+
+class EntryState:
+    """What every chain of this process, and the required facts after one, share for one ctx server
+    entry (GottZ/ctx#299): the error answers in a row the entry gave their calls, the writes ctx
+    booked for them in the current rate window, and their calls in flight. Before, each chain
+    counted its own refusals and writes, so two chains of one process at the write limit showed the
+    entry up to four error answers in a row (Hermes' breaker opens at the third) and booked two
+    windows' worth of writes in one.
+
+    A call is admitted (:meth:`admit`) when the error answers in a row plus the calls in flight stay
+    below ``MAX_RATE_REFUSALS`` — so even if every call in flight is refused, the entry never gives
+    more error answers in a row than one chain alone — and a write only while the entry has fewer
+    than ``window_writes`` writes booked or in flight in the window. At ``MAX_RATE_REFUSALS`` no
+    write goes out; a read still does, alone: every chain starts with one (the head search), and its
+    success ends the run as any success does. Thread-safe; one per entry (:func:`entry_state`). The
+    times are the caller's monotonic clock."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self.errors_in_row = 0
+        self.in_flight = 0
+        self.writes_in_flight = 0
+        self.booked: list[float] = []  # sorted; the writes ctx booked inside the current window
+
+    def _prune(self, now: float) -> None:
+        cut = bisect.bisect_right(self.booked, now - RATE_WINDOW_S)
+        if cut:
+            del self.booked[:cut]
+
+    def writes_in_window(self, now: float) -> int:
+        """Writes booked in the window ending at ``now`` plus the writes in flight."""
+        with self._cond:
+            self._prune(now)
+            return len(self.booked) + self.writes_in_flight
+
+    def slot_free_at(self, now: float) -> float:
+        """When a write slot is free again: when the entry's oldest write in the window ages out,
+        or — none in there — when a whole window has passed (other writers of the key hold it)."""
+        with self._cond:
+            self._prune(now)
+            oldest = self.booked[0] if self.booked else now
+        return oldest + RATE_WINDOW_S + RATE_WINDOW_MARGIN_S
+
+    def admit(self, *, write: bool, window_writes: int, now: float) -> Admission:
+        with self._cond:
+            if write and self.errors_in_row >= MAX_RATE_REFUSALS:
+                return Admission(stop=True)
+            if self.in_flight and self.errors_in_row + self.in_flight >= MAX_RATE_REFUSALS:
+                return Admission()
+            if write:
+                self._prune(now)
+                if len(self.booked) >= window_writes:
+                    return Admission(resume_at=self.booked[0] + RATE_WINDOW_S + RATE_WINDOW_MARGIN_S)
+                if len(self.booked) + self.writes_in_flight >= window_writes:
+                    return Admission()  # the last slots are held by writes in flight
+                self.writes_in_flight += 1
+            self.in_flight += 1
+            return Admission(ticket=_Ticket(write=write))
+
+    def release(self, ticket: _Ticket, *, error: bool | None, booked: bool = False, now: float = 0.0) -> None:
+        """The answer of an admitted call: ``error`` True (an error answer, a refusal, an abandoned
+        call: Hermes counts its timeout), False (an answer; ``booked`` when ctx booked a write), or
+        None (the call was not sent)."""
+        with self._cond:
+            if ticket.released:
+                return
+            ticket.released = True
+            self.in_flight -= 1
+            if ticket.write:
+                self.writes_in_flight -= 1
+            if error:
+                self.errors_in_row += 1
+            elif error is not None:
+                self.errors_in_row = 0
+                if booked:
+                    bisect.insort(self.booked, now)
+            self._cond.notify_all()
+
+    def wait_for_answer(self, timeout: float) -> None:
+        """Wait (at most ``timeout`` real seconds) for an answer of a call in flight."""
+        with self._cond:
+            self._cond.wait(max(0.0, timeout))
+
+
+# Keys: ("mcp", Hermes home, MCP server name, digest of the entry's configuration) and ("rest", base
+# URL, digest of the key) — what Hermes keys an entry's breaker and connection by (the profile's
+# entry name, a new connection when its configuration changes) and what ctx counts writes by.
+_ENTRY_STATES: dict[tuple[str, ...], EntryState] = {}
+_ENTRY_STATES_LOCK = threading.Lock()
+
+
+def entry_state(key: tuple[str, ...]) -> EntryState:
+    """The process-wide state of the server entry ``key`` (created on first use)."""
+    with _ENTRY_STATES_LOCK:
+        state = _ENTRY_STATES.get(key)
+        if state is None:
+            state = _ENTRY_STATES[key] = EntryState()
+        return state
+
+
+def reset_entry_states() -> None:
+    """Forget every entry's state (test isolation: each test starts a fresh process's state)."""
+    with _ENTRY_STATES_LOCK:
+        _ENTRY_STATES.clear()
+
+
 # -- Chain writer ----------------------------------------------------------------------
 
 
@@ -855,6 +990,9 @@ class ChainReceipt:
     reused: int = 0
     windows: int = 1
     deadline: float = 0.0
+    # The chain's run, which the required facts after it continue (#299: its windows, deadline and
+    # notice, against the same entry); None when nothing was written.
+    run: _ChainRun | None = field(default=None, repr=False, compare=False)
 
     def frame(self, read_path: str = "") -> str:
         """Upstream receipt text (< 1000 chars; part IDs deliberately omitted), plus ``read_path``
@@ -994,8 +1132,9 @@ class _ChainRun:
     writes: int = 0
     reused: int = 0
     rate_limited: int = 0
-    # Monotonic times of this chain's writes ctx booked inside the current window.
-    recent: list[float] = field(default_factory=list)
+    # The server entry's state (#299): its error answers in a row and the writes ctx booked in the
+    # current window, for every chain of the process (ChainWriter.entry), or this chain's own.
+    entry: EntryState = field(default_factory=EntryState)
     # The first refusal grants the chain one more window (once per chain): a slot that
     # other writers hold frees a whole window after their writes, which a budget of one
     # window can never reach.
@@ -1026,6 +1165,8 @@ class ChainWriter:
 
     Paced (0.10.0): at most ``max_parts + 2`` writes inside one rate window; a longer chain
     waits for the next window, and its deadline grows by one window for each window it needs.
+    Since 0.17.0 (GottZ/ctx#299) the window and the error answers in a row are the server entry's
+    (``entry``), shared by every chain of the process that writes through it.
     Idempotent: every title derives from the root and the transcript digest, so a retry meets
     the parts an earlier attempt stored — ctx answers those "identical content" without
     booking a write, which is the server's confirmation that title and content match."""
@@ -1045,6 +1186,9 @@ class ChainWriter:
     notify: Callable[[str], None] = lambda message: None
     # The bound ctx key(s), redacted from the transcript parts; never part of the repr.
     secret: str | tuple[str, ...] = field(default="", repr=False)
+    # The process-wide state of the server entry the client writes to (entry_state; the provider
+    # binds it before each checkpoint). None: every chain keeps a state of its own (before 0.17.0).
+    entry: EntryState | None = field(default=None, repr=False)
     _tool_evidence_warned: bool = field(default=False, init=False)
 
     def _notify(self, message: str) -> None:
@@ -1058,17 +1202,6 @@ class ChainWriter:
         return max(1, min(int(self.max_parts), MAX_PARTS_CEILING)) + 2
 
     # -- transport with budget, pacing and rate-limit waits --
-
-    def _prune(self, run: _ChainRun, now: float) -> None:
-        while run.recent and run.recent[0] <= now - RATE_WINDOW_S:
-            run.recent.pop(0)
-
-    def _slot_free_at(self, run: _ChainRun, now: float) -> float:
-        """When a write slot of the key's window is free again: when this chain's oldest write in
-        the window ages out, or — none of its own in there — when the whole window has."""
-        self._prune(run, now)
-        oldest = run.recent[0] if run.recent else now
-        return oldest + RATE_WINDOW_S + RATE_WINDOW_MARGIN_S
 
     @staticmethod
     def _extend(run: _ChainRun, seconds: float) -> None:
@@ -1115,54 +1248,96 @@ class ChainWriter:
             logger.info("%s (before %s)", message, what)
             self._notify(message)
 
-    def _pace(self, what: str, run: _ChainRun) -> None:
-        """Wait before a write while this chain already has ``window_writes`` writes in the window."""
-        now = self.monotonic()
-        self._prune(run, now)
-        if len(run.recent) < run.window_writes:
-            return
-        resume = self._slot_free_at(run, now)
-        if resume >= run.deadline:
-            if run.capped:
-                raise self._host_wait_error(what, run)
-            raise CtxCheckpointError(
-                f"ctx checkpoint budget {run.budget_s:.0f}s exceeded before {what} (paced at "
-                f"{run.window_writes} writes per {RATE_WINDOW_S:.0f}s)"
-            )
-        logger.info("ctx checkpoint paces %s: %.1fs until the next rate window", what, resume - now)
-        self.sleep(resume - now)
+    def _past_deadline(self, what: str, run: _ChainRun, budget_s: float) -> CtxCheckpointError:
+        if run.capped:
+            return self._host_wait_error(what, run)
+        return CtxCheckpointError(f"ctx checkpoint budget {budget_s:.0f}s exceeded before {what}")
+
+    def _admit(self, what: str, run: _ChainRun, *, write: bool) -> _Ticket:
+        """Wait until the server entry admits the call (:meth:`EntryState.admit`, #299): a write
+        that finds the window's writes booked waits for the next window (paced), a call that finds
+        another call of the entry in flight with the run of error answers one short of the limit
+        waits for that answer. Raises when the entry's error answers in a row reached
+        ``MAX_RATE_REFUSALS`` (no write goes out then) or when the deadline comes first."""
+        while True:
+            now = self.monotonic()
+            admission = run.entry.admit(write=write, window_writes=run.window_writes, now=now)
+            if admission.ticket is not None:
+                return admission.ticket
+            if admission.stop:
+                raise CtxCheckpointError(
+                    f"ctx checkpoint rate-limited during {what} (budget {run.budget_s:.0f}s; the server entry gave "
+                    f"this process' checkpoints {MAX_RATE_REFUSALS} error answers in a row)"
+                )
+            if admission.resume_at is not None:
+                if admission.resume_at >= run.deadline:
+                    if run.capped:
+                        raise self._host_wait_error(what, run)
+                    raise CtxCheckpointError(
+                        f"ctx checkpoint budget {run.budget_s:.0f}s exceeded before {what} (paced at "
+                        f"{run.window_writes} writes per {RATE_WINDOW_S:.0f}s)"
+                    )
+                logger.info(
+                    "ctx checkpoint paces %s: %.1fs until the next rate window", what, admission.resume_at - now
+                )
+                if not run.notified:
+                    # Paced before its own writes filled a window: other checkpoints of the process
+                    # hold the entry's window (the notice before a chain's second window covers
+                    # its own writes).
+                    run.notified = True
+                    self._notify(
+                        "ctx checkpoint: other checkpoints of this Hermes process used the writes per minute the "
+                        f"checkpoint takes of ctx's write limit; this one waits about {admission.resume_at - now:.0f}s "
+                        "for the next minute, and the compaction waits for it."
+                    )
+                self.sleep(admission.resume_at - now)
+                continue
+            if now >= run.deadline:
+                raise self._past_deadline(what, run, run.budget_s)
+            run.entry.wait_for_answer(min(ENTRY_WAIT_POLL_S, run.deadline - now))
 
     def _call(
         self,
         what: str,
         run: _ChainRun,
         fn: Callable[..., dict[str, Any]],
+        *,
+        write: bool = False,
+        retry_refused: bool = True,
         **kwargs,
     ) -> dict[str, Any]:
+        """One call within the deadline, admitted by the server entry and counted there: an error
+        answer (or an abandoned call) adds to the entry's run of error answers, an answer ends it,
+        a write ctx booked takes a slot of the entry's window (a confirmed one books none). A
+        refused write waits for a slot and is sent again (``retry_refused``; the required facts
+        stop at their first refusal, as before 0.17.0)."""
         deadline, budget_s = run.deadline, run.budget_s
-        refusals = 0
         while True:
+            if deadline - self.monotonic() <= 0:
+                raise self._past_deadline(what, run, budget_s)
+            ticket = self._admit(what, run, write=write)
             remaining = deadline - self.monotonic()
             if remaining <= 0:
-                if run.capped:
-                    raise self._host_wait_error(what, run)
-                raise CtxCheckpointError(f"ctx checkpoint budget {budget_s:.0f}s exceeded before {what}")
+                run.entry.release(ticket, error=None)
+                raise self._past_deadline(what, run, budget_s)
             failure: CtxCheckpointError | None = None
             try:
                 data = fn(timeout=max(0.5, min(self.api_timeout, remaining)), **kwargs)
             except CtxApiError as exc:
+                run.entry.release(ticket, error=True)
                 if exc.code == "rate_limit" or exc.status == 429:
                     run.rate_limited += 1
-                    refusals += 1
-                    if not run.granted_refusal_window:
+                    if retry_refused and not run.granted_refusal_window:
                         run.granted_refusal_window = True
                         self._extend(run, RATE_WINDOW_S + RATE_WINDOW_MARGIN_S)
                         deadline, budget_s = run.deadline, run.budget_s
                     now = self.monotonic()
                     # Until a slot is free, at the latest until just before the deadline: one
-                    # more try there, never a third refusal in a row.
-                    resume = min(self._slot_free_at(run, now), deadline - RATE_WINDOW_MARGIN_S)
-                    if refusals < MAX_RATE_REFUSALS and resume > now:
+                    # more try there, never more refusals in a row than MAX_RATE_REFUSALS — counted
+                    # over every chain of the entry (#299), and ended by any of their answers.
+                    resume = min(run.entry.slot_free_at(now), deadline - RATE_WINDOW_MARGIN_S)
+                    refused_out = run.entry.errors_in_row >= MAX_RATE_REFUSALS
+                    if retry_refused and not refused_out and resume > now:
                         logger.info(
                             "ctx checkpoint %s rate-limited (the key's write window is full); waiting %.1fs",
                             what,
@@ -1170,9 +1345,13 @@ class ChainWriter:
                         )
                         self.sleep(resume - now)
                         continue
+                    reason = (
+                        "refused twice in a row"
+                        if refused_out
+                        else ("no time left to wait" if retry_refused else "the key's write window is full")
+                    )
                     failure = CtxCheckpointError(
-                        f"ctx checkpoint rate-limited during {what} (budget {budget_s:.0f}s; "
-                        f"{'refused twice in a row' if refusals >= MAX_RATE_REFUSALS else 'no time left to wait'})"
+                        f"ctx checkpoint rate-limited during {what} (budget {budget_s:.0f}s; {reason})"
                     )
                 else:
                     # The code is server text as well (a code outside the closed vocabulary keeps
@@ -1181,9 +1360,19 @@ class ChainWriter:
                     detail = redact_error_text(exc, self.secret)[:200]
                     failure = CtxCheckpointError(f"ctx checkpoint {what} failed{code}: {detail}")
             except CtxCheckpointError:
+                run.entry.release(ticket, error=True)
                 raise
             except Exception as exc:
+                run.entry.release(ticket, error=True)
                 failure = CtxCheckpointError(f"ctx checkpoint {what} failed: {type(exc).__name__}")
+            except BaseException:
+                run.entry.release(ticket, error=True)  # never leave the entry with a call in flight
+                raise
+            else:
+                # An answer (a returned object; an MCP error payload raises above): Hermes counts
+                # it as a success. A store ctx did not confirm booked a write.
+                booked = write and store_action(data) != "noop"
+                run.entry.release(ticket, error=False, booked=booked, now=self.monotonic())
             if failure is not None:
                 # Raised after the handler, not in it: there the error would keep the original (the
                 # server's or the client's text, unredacted) as its implicit ``__context__``, which
@@ -1210,11 +1399,11 @@ class ChainWriter:
         """Stores one block of the chain. ``tags`` are sent as given: the caller resolves them through
         ``tags_for`` once, so a part is stored with exactly the tags its title digest covers (#344)."""
         self._enter_window(what, run)
-        self._pace(what, run)
         data = self._call(
             what,
             run,
             self.client.store,
+            write=True,
             category=self.category,
             title=title,
             content=content,
@@ -1226,14 +1415,29 @@ class ChainWriter:
         block_id = store_block_id(data)
         if not block_id:
             raise CtxCheckpointError(f"ctx checkpoint {what}: store returned no block id")
+        self._count_write(run, data)
+        return block_id
+
+    @staticmethod
+    def _count_write(run: _ChainRun, data: dict[str, Any]) -> None:
         if store_action(data) == "noop":
             # ctx compared title, content (SHA-256), metadata, tags, sensitivity and type with
             # the stored block and booked no write: the block is the one this write would make.
             run.reused += 1
         else:
             run.writes += 1
-            run.recent.append(self.monotonic())
-        return block_id
+
+    def store_paced(self, what: str, run: _ChainRun, **store: Any) -> dict[str, Any]:
+        """One store of the required facts after the chain (GottZ/ctx#299, point 5): in ``run`` —
+        the chain's (``ChainReceipt.run``), whose plan holds the facts' windows, or one of
+        :meth:`new_run` — so it enters the same windows, is paced against the entry's booked
+        writes, counts in its error answers in a row and ends by the run's deadline. A refusal ends
+        it (no wait, no retry: a fact is secondary to the chain, and its claim goes back for a later
+        compaction). ``store`` are the client's store arguments; raises ``CtxCheckpointError``."""
+        self._enter_window(what, run)
+        data = self._call(what, run, self.client.store, write=True, retry_refused=False, **store)
+        self._count_write(run, data)
+        return data
 
     def load_previous_head(
         self,
@@ -1339,6 +1543,45 @@ class ChainWriter:
             )
         return "received-unrendered"
 
+    def new_run(
+        self,
+        *,
+        started: float,
+        deadline: float,
+        budget_s: float,
+        planned_writes: int,
+        wait_limit: float | None = None,
+        host_wait_s: float = 0.0,
+    ) -> _ChainRun:
+        """The bookkeeping of one chain (or of required facts without one): the deadline holds the
+        rate windows ``planned_writes`` need (one is in ``budget_s``; 0.10.0), never past
+        ``wait_limit`` (#299), against the writer's server entry (a state of its own without one)."""
+        window_writes = self._window_writes()
+        entry = self.entry if self.entry is not None else EntryState()
+        # The writes other chains of this process have in the entry's window come first (#299): the
+        # plan holds the windows those and this run's writes need together, as they stand now.
+        load = entry.writes_in_window(started)
+        planned_windows = max(1, -(-(load + int(planned_writes)) // window_writes))
+        # budget_s in the run is the effective one (messages name what the chain really had).
+        run = _ChainRun(
+            deadline=deadline,
+            budget_s=float(budget_s),
+            window_writes=window_writes,
+            planned_writes=int(planned_writes),
+            planned_windows=planned_windows,
+            entry=entry,
+        )
+        if wait_limit is not None:
+            run.wait_limit = float(wait_limit)
+            run.host_wait_s = float(host_wait_s)
+            if run.deadline >= run.wait_limit:
+                # The caller's deadline already ends at the host's wait (or after it).
+                run.deadline = run.wait_limit
+                run.budget_s = max(0.0, run.deadline - started)
+                run.capped = True
+        self._extend(run, (planned_windows - 1) * (RATE_WINDOW_S + RATE_WINDOW_MARGIN_S))
+        return run
+
     def write(
         self,
         messages: list[dict[str, Any]],
@@ -1356,10 +1599,13 @@ class ChainWriter:
         fact_hashes: list[str] | None = None,
         wait_limit: float | None = None,
         host_wait_s: float = 0.0,
+        extra_writes: int = 0,
     ) -> ChainReceipt:
         """Writes the chain. ``wait_limit`` (monotonic, optional) is the latest the chain may run
         to — the host's wait for the compaction (``host_wait_s``) less ``HOST_WAIT_MARGIN_S``,
-        #299: no window and no refusal moves the deadline past it."""
+        #299: no window and no refusal moves the deadline past it. ``extra_writes``: the stores the
+        caller makes in the receipt's ``run`` after the chain (:meth:`store_paced`), planned with
+        the chain's own writes so the deadline holds their windows."""
         started = self.monotonic()
         if deadline is None:
             deadline = started + float(budget_s)
@@ -1401,27 +1647,16 @@ class ChainWriter:
         chunks = split_chunks(rendered, self.chunk_chars, byte_budget)
         # Paced instead of refused (0.10.0): the budget covers one rate window, every further
         # window the part count needs is added to it — up to the host's wait (#299). The receipt
-        # and the notice follow the windows the writes enter (see _enter_window).
-        window_writes = self._window_writes()
-        writes_needed = len(chunks) + 2
-        planned_windows = -(-writes_needed // window_writes)
-        # budget_s in the run is the effective one (messages name what the chain really had).
-        run = _ChainRun(
+        # and the notice follow the windows the writes enter (see _enter_window). The writes the
+        # caller makes in this run after the chain (the required facts, #299) are planned too.
+        run = self.new_run(
+            started=started,
             deadline=deadline,
-            budget_s=float(budget_s),
-            window_writes=window_writes,
-            planned_writes=writes_needed,
-            planned_windows=planned_windows,
+            budget_s=budget_s,
+            planned_writes=len(chunks) + 2 + max(0, int(extra_writes)),
+            wait_limit=wait_limit,
+            host_wait_s=host_wait_s,
         )
-        if wait_limit is not None:
-            run.wait_limit = float(wait_limit)
-            run.host_wait_s = float(host_wait_s)
-            if run.deadline >= run.wait_limit:
-                # The caller's deadline already ends at the host's wait (or after it).
-                run.deadline = run.wait_limit
-                run.budget_s = max(0.0, run.deadline - started)
-                run.capped = True
-        self._extend(run, (planned_windows - 1) * (RATE_WINDOW_S + RATE_WINDOW_MARGIN_S))
 
         now = datetime.now(timezone.utc).isoformat()
         short_root = _short_root(root)
@@ -1591,4 +1826,5 @@ class ChainWriter:
             reused=run.reused,
             windows=run.windows,
             deadline=run.deadline,
+            run=run,
         )
