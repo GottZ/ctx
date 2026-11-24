@@ -383,3 +383,29 @@ func FuzzNeedsTranslation(f *testing.F) {
 		NeedsTranslation(q)
 	})
 }
+
+// TestValidateTranslationDropsAnswersThatKeepCodeTokens: the code-token rule
+// leaves a German question as written when its only evidence sits in a path,
+// an address, a hashtag or a key:value token. The detector before #210 sent
+// such questions to the model, but an answer that keeps the token fails
+// validateTranslation and the original question went on to retrieval, so for
+// those answers the rule saves the call and changes no result. An answer that
+// drops the token passes.
+func TestValidateTranslationDropsAnswersThatKeepCodeTokens(t *testing.T) {
+	for _, c := range []struct{ original, answer string }{
+		{"Größe/Gewicht Paket", "Size/weight package"},
+		{"Prüfung/Abnahme Termin", "Inspection/acceptance date"},
+		{"Datenbank/Konfiguration", "Database/configuration"},
+		{"Hinweis:Datenbank", "Note:Database"},
+		{"#Steuererklärung 2025", "#Tax return 2025"},
+		{"Mail jörg@firma.de", "Mail jorg@firma.de"},
+		{"Wo liegt /home/jörg/Übersicht.md", "Where is /home/jorg/Overview.md"},
+	} {
+		if validateTranslation(c.answer, c.original) {
+			t.Errorf("validateTranslation(%q, %q) = true, want false", c.answer, c.original)
+		}
+	}
+	if !validateTranslation("Size and weight package", "Größe/Gewicht Paket") {
+		t.Error("an answer without the slash should pass")
+	}
+}
