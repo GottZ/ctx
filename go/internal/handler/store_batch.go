@@ -190,13 +190,18 @@ func storeBatchOutcome(results []store.BatchResult, items []storeBatchEntry) []s
 }
 
 // storeBatchFailureReject renders a failed store.UpsertBlocks on the direct
-// path: the budget refusal, an item's refusal (storeBatchRefusal), else the
-// opaque 500 with the cause in the log.
+// path: the budget refusal, an item's refusal (storeBatchRefusal: a write
+// conflict met at an item names it), a write conflict met outside any item
+// (writeConflictReject), else the opaque 500 with the cause in the log.
 func storeBatchFailureReject(ctx context.Context, err error, reqID string) *writeReject {
 	if rej := storeBatchBudgetReject(err); rej != nil {
 		return rej
 	}
 	if rej := storeBatchRefusal(err); rej != nil {
+		return rej
+	}
+	if rej := writeConflictReject(err); rej != nil {
+		// Lost outside any item (the scope locks, the booking): unnamed.
 		return rej
 	}
 	noteToolWrite(ctx, err)

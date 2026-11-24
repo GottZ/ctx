@@ -129,6 +129,10 @@ const confirmIdentityTakenPrefix = "confirmed update not executed, the stage tok
 // token for most changes but not for one that lands in between.
 const confirmSupersedesPrefix = "confirmed store not executed, the stage token is consumed: "
 
+// confirmArchivePrefix leads the refusal of a confirmed archive that lost to
+// concurrent writes (issue #547): the token is spent, the archive is re-staged.
+const confirmArchivePrefix = "confirmed archive not executed, the stage token is consumed: "
+
 // confirmBlobStorePrefix opens the confirmExecRejected wording of a staged
 // blob_store whose execute hit an integrity constraint (blobConstraintError).
 const confirmBlobStorePrefix = "confirmed blob_store not executed, the stage token is consumed: "
@@ -482,6 +486,11 @@ func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 func executeConfirmedArchive(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult, cw store.CanonicalWrite, pendingID string) confirmOutcome {
 	noteToolBlock(ctx, cw.ID)
 	block, err := store.DeleteBlock(ctx, pool, cw.ID, writableBlockScopes(ar))
+	if rej := writeConflictReject(err); rej != nil {
+		// Concurrent writes, nothing archived (issue #547): the caller's
+		// remedy is a new stage, as the prefix says.
+		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmArchivePrefix)}
+	}
 	if err != nil {
 		noteToolWrite(ctx, err)
 		logRequestError(ctx, "confirm: confirmed archive execute failed", "error", err, "write_outcome", writeOutcome(err), "pending_id", pendingID)

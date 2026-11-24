@@ -1061,6 +1061,10 @@ func (h *ManageHandler) handleGuardResolve(w http.ResponseWriter, r *http.Reques
 	// the single-id wire shape below stays byte-identical.
 	if len(resolveData.IDs) > 0 {
 		resolved, skipped, err := store.GuardResolveBatch(ctx, h.pool, resolveData.IDs, resolveData.Resolution, writableBlockScopes(ar))
+		if rej := writeConflictReject(err); rej != nil {
+			writeJSONReject(w, rej)
+			return
+		}
 		if err != nil {
 			logRequestError(ctx, "manage: guard-resolve batch error", "error", err, "write_outcome", writeOutcome(err), "request_id", reqID)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{

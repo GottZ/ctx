@@ -259,21 +259,18 @@ var errSupersedesSourceChanged = errors.New("store: lock supersedes source: the 
 // supersedesSourceAttempts bounds those runs. A fixed bound, not a policy:
 // each repeat needs another commit that moves the same block within the few
 // statements between a scope read and the lock pass after it (or between the
-// scope read and the caller's statement), so a third failure is not
-// contention but a fault, and surfaces as the error — after a rollback of
-// every attempt, nothing written.
+// scope read and the caller's statement). A third failure surfaces — after a
+// rollback of every attempt, nothing written — as ErrWriteConflict: a block
+// moved in a loop by another writer can cause it, and its client may send
+// the write again (issue #547; the handlers answer 409 write_conflict).
 const supersedesSourceAttempts = 3
 
 // writeSupersedesSource is pgxdb.Write for a transaction that starts with
 // lockSupersedesSource: it runs fn again while the lock pass reports
-// errSupersedesSourceChanged, at most supersedesSourceAttempts times.
+// errSupersedesSourceChanged, at most supersedesSourceAttempts times, and
+// answers ErrWriteConflict (wrapping the last miss) after the last.
 func writeSupersedesSource(ctx context.Context, db pgxdb.Beginner, s pgxdb.Stages, fn func(pgx.Tx) error) error {
-	for attempt := 1; ; attempt++ {
-		err := pgxdb.Write(ctx, db, s, fn)
-		if !errors.Is(err, errSupersedesSourceChanged) || attempt >= supersedesSourceAttempts {
-			return err
-		}
-	}
+	return writeSupersedesSourceScopes(ctx, db, s, func(tx pgx.Tx, _ []string) error { return fn(tx) })
 }
 
 // lockSupersedesSource prepares a write that can end the supersedes of a block
