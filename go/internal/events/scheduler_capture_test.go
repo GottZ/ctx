@@ -88,7 +88,7 @@ func captureTestConfig(t *testing.T, backoffMinHours float64) *config.Config {
 		// zero-value fixture would be exactly the retry-immediately config
 		// Validate now rejects. Registry defaults (60s/24h), not wire-active
 		// in these tests.
-		// #236: V69 refuses a zero release hold, the same class again.
+		// #236: V70 refuses a zero release hold, the same class again.
 		EmbedBackfill: config.EmbedBackfillConfig{
 			BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour,
 			ReleaseHold: config.Defaults().EmbedBackfill.ReleaseHold,

@@ -130,7 +130,7 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateWritesBatchMaxItems(c)...)
 	// V68 (#491): project.sync.max_concurrent clamped below the database pool.
 	issues = append(issues, validateProjectSyncMaxConcurrent(c)...)
-	// V69 (#236): embed_backfill.release_hold above 0.
+	// V70 (#236): embed_backfill.release_hold above 0.
 	issues = append(issues, validateEmbedBackfillReleaseHold(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
@@ -1681,7 +1681,7 @@ func validateProjectSyncMaxConcurrent(c *Config) []Issue {
 			n, ceiling, forgeSyncConnsPerRun, gatewayDBPoolConns, n)}}
 }
 
-// validateEmbedBackfillReleaseHold is V69 (issue #236):
+// validateEmbedBackfillReleaseHold is V70 (issue #236):
 // embed_backfill.release_hold must be above 0. It bounds a tenant-admin's
 // repeat of manage embed-backfill-release: an oversize memo released, whose
 // block was parked again, is released by a tenant-admin again only after

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -774,6 +773,13 @@ func (s *releaseSelection) source(cond string, locked bool) string {
 		WHERE ts.tenant_id = ` + s.tenant + `::uuid`
 }
 
+// backfillReleaseHoldCeiling is the longest hold of a tenant reader's repeat
+// when embed_backfill.backoff_cap sets no cap (0): a hundred years. Without
+// it Hold * 2^30 seconds left the range of make_interval (22008) once
+// release_hold passed some 8 590 s, and the tenant-admin's dry run and
+// release of such a memo answered 500.
+const backfillReleaseHoldCeiling = 100 * 365 * 24 * time.Hour
+
 // selection builds r's releaseSelection.
 func (r BackfillRelease) selection() (releaseSelection, error) {
 	if (r.BlockID == "") == (r.Class == "") || r.Limit < 0 || r.Limit > BackfillReleaseMaxLimit ||
@@ -800,8 +806,10 @@ func (r BackfillRelease) selection() (releaseSelection, error) {
 	sel.memo = `f.migration_id IS NULL AND f.next_attempt_at > now() AND ` + sel.memo
 	if !r.AllTenants {
 		capSecs := r.HoldCap.Seconds()
-		if capSecs <= 0 {
-			capSecs = math.MaxFloat64 // no cap: the doubling alone
+		if capSecs <= 0 || capSecs > backfillReleaseHoldCeiling.Seconds() {
+			// No cap (embed_backfill.backoff_cap = 0): the doubling alone,
+			// up to a ceiling make_interval and first_seen + hold can carry.
+			capSecs = backfillReleaseHoldCeiling.Seconds()
 		}
 		hold := `make_interval(secs => least(` + sel.add(r.Hold.Seconds()) + `::float8 * power(2, least(f.attempts, 32) - 2), ` + sel.add(capSecs) + `::float8))`
 		sel.holdEnd = `f.first_seen + ` + hold

@@ -146,3 +146,56 @@ func relNoWait(t *testing.T, reader func(*testing.T, context.Context, *pgxpool.P
 		t.Errorf("%d memos still park their block, want 0 (the writer's invalidation and the release took one each)", left)
 	}
 }
+
+// TestBackfillReleaseHoldWithoutACapStaysInRange: with
+// embed_backfill.backoff_cap = 0 (no cap) the hold of a tenant reader's
+// repeat is the doubling alone. A memo of many attempts under a long
+// release_hold must count as held, not fail the statement: Hold * 2^30
+// seconds is past what make_interval takes (22008).
+func TestBackfillReleaseHoldWithoutACapStaysInRange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	tn, err := store.CreateTenant(ctx, pool, "rel-cap0", "rel-cap0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const scope = "rel-cap0:data"
+	if _, err := store.AssignTenantScope(ctx, pool, tn.ID, scope, nil); err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	if err := i236Tx(t, pool, func(tx pgx.Tx) error {
+		b, err := store.InsertIssueBlock(ctx, tx, store.IssueFields{Scope: scope, Title: "rel236 cap0", Content: "body"}, []string{scope})
+		if err == nil {
+			id = b.ID
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordEmbedFailure(ctx, pool, id, store.EmbedFailureOversize,
+		store.NormalizeEmbedError(store.EmbedFailureOversize, store.OversizeEstimateMessage(9, 1)), time.Minute, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	// A block that failed on the wire many times before it was parked keeps
+	// its attempts on the memo row.
+	if _, err := pool.Exec(ctx, `UPDATE context_embed_failures SET attempts = 40 WHERE block_id = $1::uuid`, id); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []store.BackfillRelease{
+		{Class: store.EmbedFailureOversize, TenantID: tn.ID, Hold: 3 * time.Hour},
+		{BlockID: id, TenantID: tn.ID, Hold: 3 * time.Hour},
+		{Class: store.EmbedFailureOversize, TenantID: tn.ID, Hold: 3 * time.Hour, HoldCap: 1 << 62},
+	} {
+		res, err := store.ReleaseBackfillMemos(ctx, pool, rel)
+		if err != nil {
+			t.Fatalf("dry run without a cap (%+v): %v", rel, err)
+		}
+		if res.Counted != 0 || res.Held != 1 || res.HeldUntil == nil {
+			t.Errorf("dry run without a cap (%+v): %+v, want counted 0, held 1 with an end", rel, res)
+		}
+	}
+}

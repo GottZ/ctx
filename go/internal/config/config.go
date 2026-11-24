@@ -1907,7 +1907,7 @@ type EmbedBackfillConfig struct {
 	// BackoffCap. A first release stays unbounded, and a server-admin's is
 	// never held. Without it a tenant-admin releasing its blocks in a loop
 	// while they kept not fitting held one turn of the background arm in
-	// every round of the tenants for good. Bare seconds; 0 is refused (V69).
+	// every round of the tenants for good. Bare seconds; 0 is refused (V70).
 	ReleaseHold time.Duration `key:"embed_backfill.release_hold" env:"CTX_EMBED_BACKFILL_RELEASE_HOLD" default:"3600" mut:"hot" tenancy:"global-only"`
 }
 

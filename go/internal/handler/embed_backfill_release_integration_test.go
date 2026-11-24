@@ -452,6 +452,7 @@ func TestEmbedBackfillReleasePagesEndWhileBlocksKeepNotFitting(t *testing.T) {
 		t.Fatalf("dry run: %d %s, want counted 2", code, raw)
 	}
 	confirm := dry["confirm_memos"]
+	ended := false
 	for page := 1; page <= 4; page++ {
 		code, body, raw := f.release(t, relServerAdmin, map[string]any{"class": "oversize", "limit": 1, "confirm_memos": confirm, "as_of": dry["as_of"]})
 		if code != http.StatusOK {
@@ -462,9 +463,13 @@ func TestEmbedBackfillReleasePagesEndWhileBlocksKeepNotFitting(t *testing.T) {
 			if page != 2 {
 				t.Errorf("the release ended after %d pages, want 2", page)
 			}
+			ended = true
 			break
 		}
 		confirm = body["confirm_memos"]
+	}
+	if !ended {
+		t.Errorf("the release never answered remaining 0 within 4 pages")
 	}
 	if got := f.calls.Load(); got != 4 {
 		t.Errorf("wire calls = %d, want 4 (one attempt per block after its release)", got)
