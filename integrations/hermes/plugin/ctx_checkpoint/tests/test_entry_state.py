@@ -125,6 +125,7 @@ class EntryDouble:
         self.booked: list[float] = []
         self.book_log: list[float] = []  # every booked write, never pruned
         self.answers: list[str] = []  # "ok" / "error", in the order the entry answered
+        self.log: list[tuple[str, str, str, float]] = []  # (thread, tool, answer, time) of each answer
         self.counter = 0
         self.refused = 0
         # Foreign writers of the same key keep its window full: every store that is not a
@@ -152,6 +153,7 @@ class EntryDouble:
             self.clock.advance(CALL_LATENCY_S)
             answer = getattr(self, f"_{tool}")(args)
             self.answers.append("error" if "error" in answer else "ok")
+            self.log.append((threading.current_thread().name, tool, self.answers[-1], round(self.clock.now, 2)))
         return json.dumps(answer)
 
     def _store(self, args: dict) -> dict:
@@ -264,7 +266,7 @@ def test_two_chains_at_the_write_limit_show_the_entry_no_more_errors_in_a_row_th
     )
 
     assert all(isinstance(o, CtxCheckpointError) and "rate-limited" in str(o) for o in outcomes), outcomes
-    assert entry.max_errors_in_row <= _cp.MAX_RATE_REFUSALS, entry.answers
+    assert entry.max_errors_in_row <= _cp.MAX_RATE_REFUSALS, (entry.log, outcomes)
     assert entry.max_errors_in_row < _host_breaker_threshold()
 
 
@@ -452,10 +454,12 @@ def test_the_state_is_one_per_entry_whoever_asks_for_it():
 
 def test_many_threads_on_one_entry_never_show_it_more_errors_in_a_row_than_allowed():
     """Stress: 16 threads send reads and writes through one entry state; every write the server
-    answers is refused at random, reads always succeed. The answers, in the order the server gave
-    them, never hold more than MAX_RATE_REFUSALS errors in a row, and the writes admitted at one
-    time never exceed the window's share."""
+    answers is refused at random, reads always succeed, and the answers reach their threads in
+    another order than the server gave them. The answers, in the server's order, never hold more
+    than MAX_RATE_REFUSALS errors in a row (a success released after an error it preceded must not
+    end that error), and the writes admitted at one time never exceed the window's share."""
     import random
+    import time
 
     state = _cp.EntryState()
     server_lock = threading.Lock()
@@ -473,18 +477,21 @@ def test_many_threads_on_one_entry_never_show_it_more_errors_in_a_row_than_allow
     def worker(seed: int) -> None:
         rng = random.Random(seed)  # noqa: S311 - a reproducible stress schedule, not a secret
         try:
-            for _ in range(300):
+            for _ in range(500):
                 write = rng.random() < 0.7
                 admission = state.admit(write=write, window_writes=window_writes, now=monotonic())
                 if admission.ticket is None:
+                    time.sleep(0.0002)
                     continue  # stop, pace or wait: the caller would not send now
+                time.sleep(rng.random() * 0.001)  # the way to the server: calls of other threads overlap
                 with server_lock:
                     with clock_lock:
-                        now[0] += 0.001
+                        now[0] += 2.0  # thirty answers per window: the window turns over
                     if write and state.writes_in_window(now[0]) > window_writes:
                         over_share.append(state.writes_in_window(now[0]))
                     refused = write and rng.random() < 0.5
                     answers.append("error" if refused else "ok")
+                time.sleep(rng.random() * 0.001)  # the answer's way back: releases come in another order
                 state.release(admission.ticket, error=refused, booked=write and not refused, now=monotonic())
                 if rng.random() < 0.02:
                     with clock_lock:
@@ -498,7 +505,7 @@ def test_many_threads_on_one_entry_never_show_it_more_errors_in_a_row_than_allow
     for thread in threads:
         thread.join(60)
     assert not errors, errors
-    assert answers.count("error") > 50  # the stress did refuse
+    assert answers.count("error") >= 20, answers.count("error")  # the stress did refuse
     run = best = 0
     for answer in answers:
         run = run + 1 if answer == "error" else 0
@@ -526,22 +533,25 @@ def _fact_turns() -> list[dict]:
 
 
 def test_required_facts_wait_for_the_window_the_chain_left_full(clock):
-    """ctx's limit is the checkpoint's share (max_parts 3: five writes), and the chain used it up.
-    The required facts after it were sent at once and refused — each refusal one more error answer
-    for the entry; now they wait for the next window, within the chain's deadline."""
-    entry = EntryDouble(clock, write_limit=5)
-    provider = _provider(entry.dispatch, "session-facts", chunk_chars=1_000, max_parts=3, memory=True)
+    """ctx's limit is the checkpoint's share (max_parts + 2 writes), and the chain used all of it
+    in one window. The required facts after it were sent at once and refused — each refusal one
+    more error answer for the entry; now they wait for the next window, within the chain's
+    deadline (its plan holds the facts' window)."""
     # The chain's text: user turns only (an assistant turn that closes a turn counts as a fact).
-    chain_turns = [{"role": "user", "content": f"u{i} " + "u" * 900} for i in range(3)]
+    messages = [{"role": "user", "content": f"u{i} " + "u" * 900} for i in range(3)] + _fact_turns()
+    budget = _cp.CTX_CONTENT_MAX_BYTES - len(_cp.part_header().encode("utf-8"))
+    parts = len(_cp.split_chunks(_cp.render_direct_evidence(messages), 1_000, budget))
+    share = parts + 2  # max_parts = parts: the chain's writes are exactly one window's share
+    entry = EntryDouble(clock, write_limit=share)
+    provider = _provider(entry.dispatch, "session-facts", chunk_chars=1_000, max_parts=parts, memory=True)
     started = clock.now
 
-    receipt = provider.on_pre_compress(chain_turns + _fact_turns(), require_checkpoint=True)
+    receipt = provider.on_pre_compress(messages, require_checkpoint=True)
 
     assert "ctx checkpoint head:" in receipt and "not stored" not in receipt, receipt
     assert entry.refused == 0, entry.answers
     assert sorted(b["content"] for b in entry.facts()) == sorted(_FACTS)
-    assert entry.max_booked_in_window() <= 5
-    # The facts are part of the plan: the chain's deadline held the windows they needed, and
-    # no more of them were waited for than the writes need.
-    windows = -(-len(entry.book_log) // 5)
-    assert windows >= 2 and clock.now - started <= (windows - 1) * (WINDOW_S + 1.0) + 5.0
+    assert len(entry.book_log) == share + len(_FACTS)
+    assert entry.max_booked_in_window() <= share
+    # One wait for the next window, no more: the facts follow the chain 61 s later.
+    assert WINDOW_S < clock.now - started <= WINDOW_S + 1.0 + 5.0, clock.now - started

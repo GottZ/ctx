@@ -846,6 +846,8 @@ class _Ticket:
     """One admitted call of an entry (:meth:`EntryState.admit`), released once."""
 
     write: bool
+    # The entry's count of error answers when the call was admitted (EntryState._errors).
+    errors_before: int = 0
     released: bool = False
 
 
@@ -874,15 +876,26 @@ class EntryState:
     more error answers in a row than one chain alone — and a write only while the entry has fewer
     than ``window_writes`` writes booked or in flight in the window. At ``MAX_RATE_REFUSALS`` no
     write goes out; a read still does, alone: every chain starts with one (the head search), and its
-    success ends the run as any success does. Thread-safe; one per entry (:func:`entry_state`). The
-    times are the caller's monotonic clock."""
+    success ends the run as any success does. A success ends only the errors released before it was
+    admitted: an error released while it was in flight may have been answered after it (the order
+    in which the answers come back to their threads is not the order Hermes counted them in), so it
+    stays in the run. Thread-safe; one per entry (:func:`entry_state`). The times are the caller's
+    monotonic clock."""
 
     def __init__(self) -> None:
         self._cond = threading.Condition()
-        self.errors_in_row = 0
+        # Error answers released so far, and how many of them a success has ended: the run of error
+        # answers in a row is the difference.
+        self._errors = 0
+        self._ended = 0
         self.in_flight = 0
         self.writes_in_flight = 0
         self.booked: list[float] = []  # sorted; the writes ctx booked inside the current window
+
+    @property
+    def errors_in_row(self) -> int:
+        """Error answers in a row the entry gave the calls of this process, as far as known."""
+        return self._errors - self._ended
 
     def _prune(self, now: float) -> None:
         cut = bisect.bisect_right(self.booked, now - RATE_WINDOW_S)
@@ -917,7 +930,7 @@ class EntryState:
                     return Admission()  # the last slots are held by writes in flight
                 self.writes_in_flight += 1
             self.in_flight += 1
-            return Admission(ticket=_Ticket(write=write))
+            return Admission(ticket=_Ticket(write=write, errors_before=self._errors))
 
     def release(self, ticket: _Ticket, *, error: bool | None, booked: bool = False, now: float = 0.0) -> None:
         """The answer of an admitted call: ``error`` True (an error answer, a refusal, an abandoned
@@ -931,9 +944,10 @@ class EntryState:
             if ticket.write:
                 self.writes_in_flight -= 1
             if error:
-                self.errors_in_row += 1
+                self._errors += 1
             elif error is not None:
-                self.errors_in_row = 0
+                # The errors released before this call was sent were answered before it.
+                self._ended = max(self._ended, ticket.errors_before)
                 if booked:
                     bisect.insort(self.booked, now)
             self._cond.notify_all()
