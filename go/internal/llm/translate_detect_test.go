@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"math/rand/v2"
 	"strings"
 	"testing"
 )
@@ -290,4 +291,95 @@ func TestNeedsTranslationLongInput(t *testing.T) {
 		strings.Repeat("a", 100*1024)+"ä",
 		strings.Repeat("what was the decision ", 2000)+strings.Repeat("über die Datenbank und das Backup ", 5000),
 	)
+}
+
+// TestNeedsTranslationCodeAndWordEdges pins the edges of the word reader, one
+// input each: a mention or hashtag and a token with a colon between letters
+// are code; a decomposed å (a + combining ring above) is one of the letters;
+// a two-letter word in capitals is an abbreviation (OG is no Danish "og"),
+// and an abbreviation is looked up in no Nordic list; white space beyond
+// ASCII (no-break space, ideographic space) separates tokens, so the path
+// after it is skipped and the German words before it still count.
+func TestNeedsTranslationCodeAndWordEdges(t *testing.T) {
+	checkNeedsTranslation(t, false,
+		"ping @jörg",
+		"#größe",
+		"user:jörg",
+		"OG image size",
+		"AV PA rental",
+	)
+	checkNeedsTranslation(t, true,
+		"pa\u030askefrokost",
+		"Prüfung\u00a0von\u00a0/etc/hosts",
+		"Größe\u3000/tmp/x",
+	)
+}
+
+// TestNeedsTranslationOpenBacktick: a backtick that is never closed skips
+// nothing, and the rest is read as written.
+func TestNeedsTranslationOpenBacktick(t *testing.T) {
+	checkNeedsTranslation(t, true,
+		"`unclosed Größe",
+		"Wie geht das `ohne Ende",
+		"Größe der Datei`",
+	)
+	checkNeedsTranslation(t, false, "`", "a`", "`a", "what is the `status")
+}
+
+// neverPanicInputs are inputs at the edges of the scanner: unpaired backticks
+// and quote marks, cut UTF-8 sequences, NUL bytes, lone combining marks and
+// long runs of one character.
+func neverPanicInputs() []string {
+	return []string{
+		"", "`", "``", "```", "a`", "`a", "`\xc3", "\xc3`",
+		`"`, `""`, `"a`, `a"`, `" "`, "„", "„a", "a“", "«", "»a«", "'", "''", "'a", "a'", "‚", "’",
+		"\xc3", "Gr\xc3", "\xe2\x80", "„\xe2", "\x22\xc3\x22", "\xff\xfe", "'\xc3'", "\xe2\x80\x9e",
+		"\x00", "a\x00b", "\x22\x00\x22", "`\x00`", "\u0308", "\u0308\u0308a", "\u030a",
+		strings.Repeat("ä", 1<<16),
+		strings.Repeat("`", 1<<16) + "a",
+		strings.Repeat("\xc3", 1<<16),
+		`"` + strings.Repeat("a ", 1<<16),
+		strings.Repeat(`"a `, 1<<15),
+		strings.Repeat("„a “", 1<<14),
+		strings.Repeat("'s ", 1<<15),
+	}
+}
+
+// TestNeedsTranslationNeverPanics: the detector runs on every query before
+// retrieval, so a panic would fail the request. It returns on every edge
+// input and on random mixes of the characters the scanner treats specially.
+func TestNeedsTranslationNeverPanics(t *testing.T) {
+	inputs := neverPanicInputs()
+	alphabet := []string{"`", `"`, "'", "„", "“", "”", "«", "»", "‚", "‘", "’", " ", "\u00a0", "\t", "/", ":", ".", "@", "#",
+		"a", "Z", "ä", "Å", "ø", "ß", "ẞ", "\u0308", "\u030a", "\x00", "\xc3", "\xe2\x80", "\xff", "the", "die", "och", "IT", "😀"}
+	rng := rand.New(rand.NewPCG(210, 0))
+	for range 20000 {
+		var b strings.Builder
+		for n := rng.IntN(24); n > 0; n-- {
+			b.WriteString(alphabet[rng.IntN(len(alphabet))])
+		}
+		inputs = append(inputs, b.String())
+	}
+	for _, q := range inputs {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("NeedsTranslation(%.80q) panicked: %v", q, r)
+				}
+			}()
+			NeedsTranslation(q)
+		}()
+	}
+}
+
+// FuzzNeedsTranslation: no input makes the detector panic.
+func FuzzNeedsTranslation(f *testing.F) {
+	for _, q := range neverPanicInputs() {
+		if len(q) < 256 {
+			f.Add(q)
+		}
+	}
+	f.Fuzz(func(_ *testing.T, q string) {
+		NeedsTranslation(q)
+	})
 }
