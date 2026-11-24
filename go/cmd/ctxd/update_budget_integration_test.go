@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -216,10 +218,27 @@ func TestSingleUpdateBooksWrite(t *testing.T) {
 		// budget step together once they are let go: with the key's budget
 		// lock the first holds it while it waits for its row and the others
 		// wait for the lock; without it all eight would count the same rest.
-		holder, err := f.pool.Begin(context.Background())
+		// The holder and the monitor run on a pool of their own: the
+		// updates hold connections of the router's pool while they wait
+		// (the default pool has max(4, cores) connections — four on a
+		// two-core runner), and a monitor query on that pool would wait
+		// for one of them, never release the holder, and let all eight
+		// run into the request timeout.
+		sideCfg := f.pool.Config()
+		sideCfg.MaxConns = 2
+		side, err := pgxpool.NewWithConfig(context.Background(), sideCfg)
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer side.Close()
+		holder, err := side.Begin(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = holder.Rollback(context.Background()) }()
+		// As many updates as the router's pool has connections can wait in
+		// the database at once; the rest wait for a connection.
+		inDB := min(parallel, int(f.pool.Config().MaxConns))
 		raced := ids[updateBudgetLimit-1:]
 		if _, err := holder.Exec(context.Background(), `SELECT 1 FROM context_blocks WHERE id = ANY($1) FOR UPDATE`, raced); err != nil {
 			t.Fatal(err)
@@ -239,11 +258,11 @@ func TestSingleUpdateBooksWrite(t *testing.T) {
 		}
 		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 			var waiting int
-			if err := f.pool.QueryRow(context.Background(),
+			if err := side.QueryRow(context.Background(),
 				`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
 				t.Fatal(err)
 			}
-			if waiting >= parallel || time.Now().After(deadline) {
+			if waiting >= inDB || time.Now().After(deadline) {
 				break
 			}
 		}
