@@ -612,9 +612,9 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 // scope '_global': server-admin-only history of a tenant-admin's grants) — so
 // they are deleted first, in a statement of their own, under the same lock.
 //
-// STAGED WRITES (issue #277): step 7 deletes the staged writes of the
-// tenant's keys (context_pending_writes, which hold block content) before the
-// keys, under the keys' row locks. Their foreign key on context_api_keys
+// STAGED WRITES (issue #277): step 7 deletes the staged writes of the keys
+// it deletes (context_pending_writes, which hold block content), right after
+// them and in the same transaction. Their foreign key on context_api_keys
 // cascaded that until migration 194 dropped it: a key on the hypertable gave
 // every chunk a copy of the key, so creating a chunk locked context_api_keys
 // against every authentication's last_used_at write and dropping one (the
@@ -705,25 +705,30 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 		if _, err := tx.Exec(ctx, `DELETE FROM context_model_consumers WHERE tenant_id = $1::uuid`, tenantID); err != nil {
 			return fmt.Errorf("model consumers: %w", err)
 		}
-		// The staged writes of the tenant's keys, explicitly and under the
-		// keys' row locks (issue #277): since migration 194 no foreign key
-		// cascades a key delete onto context_pending_writes. The lock first —
-		// the lock a stage's key read conflicts with (StagePendingWrite, FOR
-		// KEY SHARE) — so a stage committed while the prune waited is deleted
-		// here, and one that comes after finds its key gone and stages
-		// nothing. The order key rows, then stage rows is the one the cascade
-		// had.
-		if _, err := tx.Exec(ctx,
-			`SELECT 1 FROM context_api_keys WHERE tenant_id = $1::uuid ORDER BY id FOR UPDATE`, tenantID); err != nil {
-			return fmt.Errorf("api keys lock: %w", err)
+		// The keys, then the staged writes of exactly the keys deleted, in a
+		// statement of its own (issue #277): since migration 194 no foreign
+		// key cascades a key delete onto context_pending_writes. The key
+		// delete takes the row lock a stage's key read conflicts with
+		// (StagePendingWrite, FOR KEY SHARE): it waits for a stage that holds
+		// a key and then deletes that key, whose stage the next statement —
+		// a snapshot of its own — sees and deletes; a stage that comes after
+		// finds its key gone and stages nothing. Deleting by the ids the key
+		// delete returned, not by the tenant, also takes the stages of a key
+		// minted while the prune ran. The order key rows, then stage rows is
+		// the one the cascade had.
+		rows, err := tx.Query(ctx, `DELETE FROM context_api_keys WHERE tenant_id = $1::uuid RETURNING id::text`, tenantID)
+		if err != nil {
+			return err
+		}
+		keyIDs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
 		}
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM context_pending_writes WHERE api_key_id IN (SELECT id FROM context_api_keys WHERE tenant_id = $1::uuid)`,
-			tenantID); err != nil {
+			`DELETE FROM context_pending_writes WHERE api_key_id = ANY($1::uuid[])`, keyIDs); err != nil {
 			return fmt.Errorf("pending writes: %w", err)
 		}
-		_, err := tx.Exec(ctx, `DELETE FROM context_api_keys WHERE tenant_id = $1::uuid`, tenantID)
-		return err
+		return nil
 	}); err != nil {
 		return fmt.Errorf("store: prune tenant keys: %w", err)
 	}

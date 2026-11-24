@@ -58,8 +58,9 @@ type PendingWrite struct {
 //
 // A new stage reads its key row FOR KEY SHARE and takes the principal from
 // it; a key row that is gone stages nothing (ErrPendingWriteKeyGone). The
-// re-arm of an open stage needs no key lock: the tenant prune deletes the
-// stages of a key before the key, under the key's row lock (PruneTenant).
+// re-arm of an open stage needs no key lock: the tenant prune deletes a
+// key's stages right after the key, in the same transaction (PruneTenant),
+// and a re-arm it meets there is deleted with the row it updated.
 //
 // q is the pool, or the transaction of a staged block batch that reserves its
 // write budget in the same transaction (issue #211).

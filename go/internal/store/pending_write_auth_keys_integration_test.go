@@ -17,9 +17,11 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/store"
@@ -285,10 +287,78 @@ func TestPendingWriteStageAndTenantPruneAreOrdered(t *testing.T) {
 		}
 	})
 
+	// A key minted and staged while the prune runs, before its key delete:
+	// the key delete takes it, and the stage delete — by the ids the key
+	// delete returned — takes its stage.
+	t.Run("key minted during the prune", func(t *testing.T) {
+		tn, err := store.CreateTenant(ctx, pool, "pw-order-c", "c")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.CreateApiKey(ctx, pool, "pw-c", "private", nil, tn.ID); err != nil {
+			t.Fatal(err)
+		}
+		stop := &pwPauseTracer{part: "DELETE FROM context_api_keys WHERE tenant_id", reached: make(chan struct{}), release: make(chan struct{})}
+		cfg, err := pgxpool.ParseConfig(dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.ConnConfig.Tracer = stop
+		pp, err := pgxpool.NewWithConfig(ctx, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pp.Close()
+		pruneDone := make(chan error, 1)
+		go func() { pruneDone <- store.PruneTenant(ctx, pp, tn.ID, store.AuditStamp{}) }()
+		select {
+		case <-stop.reached:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the prune never reached its key delete")
+		}
+		late, _, err := store.CreateApiKey(ctx, pool, "pw-c-late", "private", nil, tn.ID)
+		if err != nil {
+			close(stop.release)
+			t.Fatal(err)
+		}
+		if _, err := store.StagePendingWrite(ctx, pool, late.ID, "private", "store", "mcp", []byte(`{"op":"store"}`), "late-key", time.Minute); err != nil {
+			close(stop.release)
+			t.Fatal(err)
+		}
+		close(stop.release)
+		if err := <-pruneDone; err != nil {
+			t.Fatalf("prune: %v", err)
+		}
+		if n := pwCount(t, pool, "api_key_id = $1", late.ID); n != 0 {
+			t.Errorf("%d stages of the key minted during the prune left", n)
+		}
+	})
+
 	if n := pwCount(t, pool, "api_key_id = $1", other.ID); n != 1 {
 		t.Errorf("the other tenant's stage: %d rows, want 1 (the prune deletes its own tenant's stages only)", n)
 	}
 }
+
+// pwPauseTracer holds the first statement containing part until release, once
+// reached is closed: a transaction paused between two of its statements.
+type pwPauseTracer struct {
+	part    string
+	reached chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *pwPauseTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, p.part) {
+		p.once.Do(func() {
+			close(p.reached)
+			<-p.release
+		})
+	}
+	return ctx
+}
+
+func (p *pwPauseTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 // TestPendingWriteOfADeletedKeyIsUnreachable: a key deleted by hand (no code
 // path does) leaves its stages, and none of them can be read or consumed:

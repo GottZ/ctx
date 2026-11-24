@@ -153,7 +153,10 @@ func (h *SynthesizeHandler) dailyRouter(ctx context.Context) *dream.Router {
 // window, and the upsert would replace the day's report with one whose
 // decision part is short or empty. It answers the refusal text, or "" when
 // the window lies inside the horizon or no horizon is set (0, the default).
-// A handler without config wiring sets no horizon.
+// A handler without config wiring sets no horizon. The horizon is taken on
+// the application's clock, the janitor's on the database's: a backfill whose
+// window starts within their difference of the horizon passes here while the
+// janitor may have reached its first minutes.
 func (h *SynthesizeHandler) pastWriteLogHorizon(ctx context.Context, windowStart time.Time) string {
 	if h.cfg == nil {
 		return ""
@@ -162,7 +165,7 @@ func (h *SynthesizeHandler) pastWriteLogHorizon(ctx context.Context, windowStart
 	if days <= 0 {
 		return ""
 	}
-	horizon := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+	horizon := time.Now().UTC().AddDate(0, 0, -days)
 	if !windowStart.Before(horizon) {
 		return ""
 	}

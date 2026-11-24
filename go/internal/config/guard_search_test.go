@@ -118,7 +118,8 @@ func TestWritesBatchMaxItemsCeiling(t *testing.T) {
 }
 
 // TestWriteLogRetentionFloor (#277): V69 keeps scheduler.writelog_retention_days
-// at 0 (keep every row, the default) or at least WriteLogRetentionFloorDays —
+// at 0 (keep every row, the default) or between WriteLogRetentionFloorDays and
+// WriteLogRetentionCeilingDays —
 // the daily synthesis report reads the last 24 hours of decisions from the
 // write log. A negative value is V35's report alone.
 func TestWriteLogRetentionFloor(t *testing.T) {
@@ -132,7 +133,10 @@ func TestWriteLogRetentionFloor(t *testing.T) {
 		{WriteLogRetentionFloorDays - 1, SeverityError},
 		{WriteLogRetentionFloorDays, -1},
 		{30, -1},
-		{-1, SeverityError}, // V35
+		{WriteLogRetentionCeilingDays, -1},
+		{WriteLogRetentionCeilingDays + 1, SeverityError},
+		{106752, SeverityError}, // past time.Duration's range in days
+		{-1, SeverityError},     // V35
 	} {
 		c, _ := cfgFrom(t, map[string]string{key: strconv.Itoa(tc.val)})
 		issues := Validate(c)

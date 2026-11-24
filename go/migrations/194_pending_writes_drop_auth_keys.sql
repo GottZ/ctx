@@ -118,10 +118,11 @@
 --   * a stage reads its key row FOR KEY SHARE and takes the principal from it
 --     (store.StagePendingWrite): the row lock the foreign-key check took; a
 --     key that is gone stages nothing;
---   * the tenant prune deletes the staged writes of the tenant's keys before
---     the keys, under their row locks (store.PruneTenant): a stage that held
---     a key while the prune waited is deleted with them, one that comes after
---     finds its key gone;
+--   * the tenant prune deletes the tenant's keys and then, in a statement of
+--     its own, the stages of exactly those keys (store.PruneTenant): the key
+--     delete waits for a stage that holds a key and the next statement sees
+--     that stage, one that comes after finds its key gone, and a key minted
+--     while the prune ran goes with its stages;
 --   * every read of a stage selects by the caller's key id (lookup, consume,
 --     re-arm), and a deleted key does not authenticate.
 -- No other path deletes a key row (a revoke sets active = false; key ids are
@@ -134,12 +135,19 @@
 -- it takes ACCESS EXCLUSIVE on context_pending_writes, every chunk,
 -- context_api_keys and context_principals until the file commits, so every
 -- authentication of every instance waits for the drop. ALTER TABLE takes the
--- hypertable first, as every stage does (its statement names
+-- hypertable first, as a single stage does (its statement names
 -- context_pending_writes before context_api_keys, and the parser locks in
--- that order), so a stage waits for the file before it holds a lock the file
--- waits for; an authentication never locks context_pending_writes. A LOCK
--- TABLE of the referenced tables first would invert that order against a
--- stage in flight. Measured with two authenticating
+-- that order), and as the confirm-retention eviction does; an authentication
+-- never locks context_pending_writes. A staged MCP batch locks in the other
+-- order: its transaction books the write budget (context_access_log, whose
+-- key on context_api_keys reads the key) before it stages. A batch caught
+-- between its booking and its stage closes a cycle with the drop, and
+-- PostgreSQL ends one side after deadlock_timeout (40P01): executed, the
+-- migration was the one aborted after 1.03 s, the boot failed, the next boot
+-- ran through; every authentication waited that second. No order of the file
+-- fits the single stage, the batch and the eviction at once (taking the
+-- referenced tables first would close the cycle with the single stage and
+-- with an eviction that still drops a chunk with the keys). Measured with two authenticating
 -- connections beside it, the drop and the longest authentication: on a host
 -- at load 5, 7 ms at 10 chunks, 14 ms at 25 (the 24 h default of
 -- writes.confirm_retention), 104 ms at 100, 442 ms at 400, 2.7 s at 1 000;
@@ -179,7 +187,11 @@
 -- the tables longer fails the migration with lock_not_available (55P03), the
 -- file rolls back with nothing changed and the boot fails loudly; the next
 -- boot tries again. While the file waits for a lock (at most 3 s per table),
--- the authentications that arrive queue behind it.
+-- the authentications that arrive queue behind it. Part 1 runs in the same
+-- transaction: its SHARE lock on context_blocks is held through these waits,
+-- and a run of the file that fails here (55P03, 40P01) rolls the index build
+-- back with it — block writers then waited for the build and the wait, and
+-- the next boot builds again.
 --
 -- OLDER BINARY. v5.79.0 (the rollback image), run on a database at 194: its
 -- runner leaves version 194 alone; its stage statement reads the key

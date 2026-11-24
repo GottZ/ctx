@@ -1692,19 +1692,28 @@ func validateProjectSyncMaxConcurrent(c *Config) []Issue {
 // window, not policy.
 const WriteLogRetentionFloorDays = 2
 
+// WriteLogRetentionCeilingDays is the longest horizon V69 lets
+// scheduler.writelog_retention_days set: a hundred years, past every row ctx
+// can have written. Above it the horizon leaves the ranges the two clocks
+// compute it in — PostgreSQL's timestamp (the janitor's now() - N days fails
+// with 22008 at 3 000 000 days) — and a value that large reads as a typo of
+// 0 rather than as a horizon.
+const WriteLogRetentionCeilingDays = 36500
+
 // validateWriteLogRetention is V69 (issue #277):
-// scheduler.writelog_retention_days is 0 (keep every row) or at least
-// WriteLogRetentionFloorDays. Fatal like V67: boot aborts for the env value,
-// a settings write answers 422, and a psql-written row is dropped by the
-// reload with a WARN. A negative value is V35's report alone.
+// scheduler.writelog_retention_days is 0 (keep every row) or between
+// WriteLogRetentionFloorDays and WriteLogRetentionCeilingDays. Fatal like
+// V67: boot aborts for the env value, a settings write answers 422, and a
+// psql-written row is dropped by the reload with a WARN. A negative value is
+// V35's report alone.
 func validateWriteLogRetention(c *Config) []Issue {
 	d := c.Scheduler.WriteLogRetentionDays
-	if d <= 0 || d >= WriteLogRetentionFloorDays {
+	if d <= 0 || (d >= WriteLogRetentionFloorDays && d <= WriteLogRetentionCeilingDays) {
 		return nil
 	}
 	return []Issue{{Field: "scheduler.writelog_retention_days", Severity: SeverityError,
-		Msg: fmt.Sprintf("scheduler.writelog_retention_days (%d) must be 0 (keep every row) or at least %d: the daily synthesis report reads the guard and dream decisions of the 24 hours before its run from the write log",
-			d, WriteLogRetentionFloorDays)}}
+		Msg: fmt.Sprintf("scheduler.writelog_retention_days (%d) must be 0 (keep every row) or between %d and %d: the daily synthesis report reads the guard and dream decisions of the 24 hours before its run from the write log, and a longer horizon leaves the range the database computes it in",
+			d, WriteLogRetentionFloorDays, WriteLogRetentionCeilingDays)}}
 }
 
 // validateDreamDecideTieOdds is V36: dream.decide_tie_odds is an odds RATIO

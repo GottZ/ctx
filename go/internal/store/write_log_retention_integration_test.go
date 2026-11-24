@@ -335,10 +335,10 @@ func TestEvictWriteLogSkipsRowsAnotherTransactionHolds(t *testing.T) {
 	if err := otx.QueryRow(ctx, `SELECT now() - interval '2 days'`).Scan(&horizon); err != nil {
 		t.Fatal(err)
 	}
-	var otherN int64
+	var otherSel, otherN int64
 	var otherLast *time.Time
 	bctx, bcancel := context.WithTimeout(ctx, 20*time.Second)
-	err = otx.QueryRow(bctx, store.WriteLogEvictBatchSQLForTest, horizon, time.Time{}, store.WriteLogRetentionBatch).Scan(&otherN, &otherLast)
+	err = otx.QueryRow(bctx, store.WriteLogEvictBatchSQLForTest, horizon, time.Time{}, store.WriteLogRetentionBatch).Scan(&otherSel, &otherN, &otherLast)
 	bcancel()
 	if err != nil {
 		t.Fatalf("held batch beside the block delete: %v — it waited for the delete's rows", err)
@@ -407,10 +407,10 @@ func TestEvictWriteLogHoldsAWriterForOneBatchAtMost(t *testing.T) {
 	if err := btx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
 		t.Fatal(err)
 	}
-	var n int64
+	var sel, n int64
 	var last *time.Time
 	if err := btx.QueryRow(ctx, store.WriteLogEvictBatchSQLForTest,
-		time.Now().Add(-48*time.Hour), time.Time{}, store.WriteLogRetentionBatch).Scan(&n, &last); err != nil {
+		time.Now().Add(-48*time.Hour), time.Time{}, store.WriteLogRetentionBatch).Scan(&sel, &n, &last); err != nil {
 		t.Fatalf("batch: %v", err)
 	}
 	if n != store.WriteLogRetentionBatch {
@@ -448,5 +448,42 @@ func TestEvictWriteLogHoldsAWriterForOneBatchAtMost(t *testing.T) {
 	}
 	if got := wlCount(t, pool, "block_id = $1", inBatch); got != 0 {
 		t.Errorf("%d rows still name the deleted block", got)
+	}
+}
+
+// TestEvictWriteLogGoesOnAfterABatchThatDeletedLessThanItSelected: a batch
+// can lock a row it then does not delete — a row whose update (the SET NULL
+// of a block delete) committed after the statement's snapshot is locked in
+// its new version, which the delete does not see. The run must go on with
+// the next batch: it ends on a batch that selected fewer rows, not on one
+// that deleted fewer. The test makes that row deterministic with a trigger
+// that keeps one row of the first batch from being deleted.
+func TestEvictWriteLogGoesOnAfterABatchThatDeletedLessThanItSelected(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	wlInsert(t, pool, 5, "9 days", nil)
+	if _, err := pool.Exec(ctx, `UPDATE context_write_log SET block_title = 'kept' WHERE ctid = (SELECT ctid FROM context_write_log ORDER BY created_at LIMIT 1)`); err != nil {
+		t.Fatal(err)
+	}
+	wlInsert(t, pool, 2*store.WriteLogRetentionBatch+500, "8 days", nil)
+	wlInsert(t, pool, 10, "1 hour", nil)
+	for _, st := range []string{
+		`CREATE FUNCTION zz_keep_one() RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN IF OLD.block_title = 'kept' THEN RETURN NULL; END IF; RETURN OLD; END $$`,
+		`CREATE TRIGGER zz_keep_one BEFORE DELETE ON context_write_log FOR EACH ROW EXECUTE FUNCTION zz_keep_one()`,
+	} {
+		if _, err := pool.Exec(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := store.EvictWriteLog(ctx, pool, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := int64(5 - 1 + 2*store.WriteLogRetentionBatch + 500); n != want {
+		t.Errorf("deleted %d rows, want %d (every row past the horizon but the kept one)", n, want)
+	}
+	if got := wlCount(t, pool, "created_at < now() - interval '2 days'"); got != 1 {
+		t.Errorf("%d rows past the horizon left, want the kept one: the run stopped after the batch that deleted one row less than it selected", got)
 	}
 }
