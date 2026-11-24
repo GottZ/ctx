@@ -130,6 +130,11 @@ func Validate(c *Config) []Issue {
 	issues = append(issues, validateWritesBatchMaxItems(c)...)
 	// V68 (#491): project.sync.max_concurrent clamped below the database pool.
 	issues = append(issues, validateProjectSyncMaxConcurrent(c)...)
+	// V69 (#277): scheduler.writelog_retention_days is 0 or at least
+	// WriteLogRetentionFloorDays.
+	issues = append(issues, validateWriteLogRetention(c)...)
+	// V70 (#236): embed_backfill.release_hold above 0.
+	issues = append(issues, validateEmbedBackfillReleaseHold(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1677,6 +1682,57 @@ func validateProjectSyncMaxConcurrent(c *Config) []Issue {
 	return []Issue{{Field: "project.sync.max_concurrent", Severity: SeverityWarn,
 		Msg: fmt.Sprintf("project.sync.max_concurrent %d clamped to %d: each running forge sync holds up to %d of the %d database pool connections (a push holds one for as long as the forge takes to answer), so %d syncs could hold the whole pool",
 			n, ceiling, forgeSyncConnsPerRun, gatewayDBPoolConns, n)}}
+}
+
+// WriteLogRetentionFloorDays is the shortest write-log horizon
+// scheduler.writelog_retention_days may set (V69, issue #277). The daily
+// synthesis report counts the guard and dream decisions of the 24 hours
+// before its 03:00 run from context_write_log (dream.fetchDailyDecisions);
+// with a horizon of one day a janitor run shortly before the report would
+// take the start of that window. Two days keep the window whole with a day
+// to spare for a report that runs late. A fixed property of the report's
+// window, not policy.
+const WriteLogRetentionFloorDays = 2
+
+// WriteLogRetentionCeilingDays is the longest horizon V69 lets
+// scheduler.writelog_retention_days set: a hundred years, past every row ctx
+// can have written. Above it the horizon leaves the ranges the two clocks
+// compute it in — PostgreSQL's timestamp (the janitor's now() - N days fails
+// with 22008 at 3 000 000 days) — and a value that large reads as a typo of
+// 0 rather than as a horizon.
+const WriteLogRetentionCeilingDays = 36500
+
+// validateWriteLogRetention is V69 (issue #277):
+// scheduler.writelog_retention_days is 0 (keep every row) or between
+// WriteLogRetentionFloorDays and WriteLogRetentionCeilingDays. Fatal like
+// V67: boot aborts for the env value, a settings write answers 422, and a
+// psql-written row is dropped by the reload with a WARN. A negative value is
+// V35's report alone.
+func validateWriteLogRetention(c *Config) []Issue {
+	d := c.Scheduler.WriteLogRetentionDays
+	if d <= 0 || (d >= WriteLogRetentionFloorDays && d <= WriteLogRetentionCeilingDays) {
+		return nil
+	}
+	return []Issue{{Field: "scheduler.writelog_retention_days", Severity: SeverityError,
+		Msg: fmt.Sprintf("scheduler.writelog_retention_days (%d) must be 0 (keep every row) or between %d and %d: the daily synthesis report reads the guard and dream decisions of the 24 hours before its run from the write log, and a longer horizon leaves the range the database computes it in",
+			d, WriteLogRetentionFloorDays, WriteLogRetentionCeilingDays)}}
+}
+
+// validateEmbedBackfillReleaseHold is V70 (issue #236):
+// embed_backfill.release_hold must be above 0. It bounds a tenant-admin's
+// repeat of manage embed-backfill-release: an oversize memo released, whose
+// block was parked again, is released by a tenant-admin again only after
+// release_hold * 2^(attempts-2). At 0 a tenant-admin that released its blocks
+// in a loop while they kept not fitting would hold one turn of the background
+// arm in every round of the tenants for good — no reading of 0 is safe, so
+// the class is fatal like V21 (boot drops the override, the settings PUT is
+// a 422). The negative half stays V17's (generic duration walk).
+func validateEmbedBackfillReleaseHold(c *Config) []Issue {
+	if c.EmbedBackfill.ReleaseHold != 0 {
+		return nil
+	}
+	return []Issue{{Field: "embed_backfill.release_hold", Severity: SeverityError,
+		Msg: "embed_backfill.release_hold must be > 0 — at 0 a tenant-admin's release loop over blocks that keep not fitting would take a turn of the background arm in every round of the tenants"}}
 }
 
 // validateDreamDecideTieOdds is V36: dream.decide_tie_odds is an odds RATIO

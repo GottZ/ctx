@@ -293,6 +293,11 @@ func TestRegistryStrictSet(t *testing.T) {
 		// A typo'd value silently falling back to 100 would present as the
 		// operator's number while the runtime admitted another.
 		"writes.batch_max_items": true,
+		// #277: the write-log horizon decides which audit rows the janitor
+		// deletes, and its 0 is a switch ("keep every row"). A typo'd value
+		// silently falling back to 0 would present as a configured horizon
+		// while nothing was ever deleted — the llmlog sibling's reason.
+		"scheduler.writelog_retention_days": true,
 		// H12: the context-window fallback is the ONE key that decides whether a
 		// prompt carrying foreign text may be built for a chain member without a
 		// declared window. A typo'd value silently defaulting to 0 would flip the

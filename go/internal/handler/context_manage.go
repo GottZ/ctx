@@ -980,6 +980,10 @@ func (h *ManageHandler) handleGuardStats(w http.ResponseWriter, r *http.Request,
 	// within the caller's read scopes, counted now (issue #341, migration
 	// 181) — the read scopes of the block numbers of this answer.
 	// last_guard_at and write_log_entries stay server-wide, as before.
+	// write_log_entries counts the rows of context_write_log that stand: with
+	// scheduler.writelog_retention_days set (issue #277), the rows inside the
+	// horizon (and those the janitor has not reached yet), not every decision
+	// ever logged.
 	stats, err := store.GetGuardStats(ctx, h.pool, ar.ReadScopes)
 	var (
 		pending    int

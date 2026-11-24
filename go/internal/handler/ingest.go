@@ -365,8 +365,10 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 			return IngestResult{Index: index, Status: "failed", Error: rej.Msg}
 		}
 		if err != nil {
+			// InsertChunk is a labeled bracket since issue #236 (the write and
+			// its invalidation commit together).
 			logRequestError(ctx, "ingest: insert chunk error",
-				"error", err, "index", index, "source_id", chunk.SourceID, "request_id", reqID, "write_outcome", statementOutcome(err))
+				"error", err, "index", index, "source_id", chunk.SourceID, "request_id", reqID, "write_outcome", writeOutcome(err))
 			return IngestResult{Index: index, Status: "failed", Error: "insert chunk failed"}
 		}
 		action = "inserted"

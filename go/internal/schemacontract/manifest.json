@@ -1,9 +1,9 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 193,
-    "migration_count": 81,
-    "migration_chain_sha256": "0d39672c717975de6c5e57b7c25095e2d20b76a491cc5075aa9ffa0af5af73ab",
+    "migration_max": 194,
+    "migration_count": 82,
+    "migration_chain_sha256": "243d2e61ac47eeb343c18f616062c3bffcd92b5d71a2f9dc9cee90fb543939b0",
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -1901,6 +1901,12 @@
         {
           "name": "pending_count",
           "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "write_log_evicted_before",
+          "type": "timestamp with time zone",
           "not_null": false,
           "storage": "p"
         }
@@ -5512,6 +5518,9 @@
     },
     "idx_blocks_checkpoint_root": {
       "def_hash": "a4e43540fd3680ee2e72fc4205e159ff03386b911ef0564f510deaa75fa7bbbd"
+    },
+    "idx_blocks_dream_eligible": {
+      "def_hash": "3fa63b9eba261224570b4569a5588e7db38763a5388c29e783ce2c33ab63b807"
     },
     "idx_blocks_dream_keywords_pending": {
       "def_hash": "96b81ec6793fb5c9a1ad34b52f78213f215af1bbcf93bf108118b0a48b80043e"

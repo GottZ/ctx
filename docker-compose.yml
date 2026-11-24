@@ -312,7 +312,7 @@ services:
       CTX_MAX_SOURCE_RUNES: ${CTX_MAX_SOURCE_RUNES:-}
       CTX_QUERY_TRANSLATE: ${CTX_QUERY_TRANSLATE:-}
 
-      # ── scheduler.* (3) ──
+      # ── scheduler.* (4) ──
       # Scheduler ReadScopes (comma-separated). Background guard/digest/dream
       # operate on these scopes. Default = v1.x backwards-compat. v2.0.0 M045
       # dropped chk_scope, so any scope name is valid (no schema validation).
@@ -323,6 +323,10 @@ services:
       # response bodies (telemetry row survives — Body-NULLing, not a chunk
       # drop; audit stays lossless). 0 = keep bodies forever (no retention).
       CTX_LLMLOG_RETENTION_DAYS: ${CTX_LLMLOG_RETENTION_DAYS:-}
+      # Days the six-hour janitor keeps context_write_log rows (guard and dream
+      # audit) before it deletes them in batches. 0 (default) = keep every row;
+      # otherwise 2 to 36500 (the daily report reads the last 24 h).
+      CTX_WRITELOG_RETENTION_DAYS: ${CTX_WRITELOG_RETENTION_DAYS:-}
       # Seconds between block-counter reconcile passes (stats / guard-stats /
       # list-categories numbers recounted per scope, drift corrected and
       # logged). Default 24h; 0 = off (manage stats-reconcile still works).
@@ -409,13 +413,14 @@ services:
       # ── pool.* (1) ──
       CTX_POOL_CAPABILITY_PROBE_INTERVAL: ${CTX_POOL_CAPABILITY_PROBE_INTERVAL:-}
 
-      # ── embed_backfill.* (6) ──
+      # ── embed_backfill.* (7) ──
       CTX_EMBED_BACKFILL_SYNC_CAP: ${CTX_EMBED_BACKFILL_SYNC_CAP:-}
       CTX_EMBED_BACKFILL_SYNC_BUDGET: ${CTX_EMBED_BACKFILL_SYNC_BUDGET:-}
       CTX_EMBED_BACKFILL_INTERVAL: ${CTX_EMBED_BACKFILL_INTERVAL:-}
       CTX_EMBED_BACKFILL_MAX_TOKENS: ${CTX_EMBED_BACKFILL_MAX_TOKENS:-}
       CTX_EMBED_BACKFILL_BACKOFF_BASE: ${CTX_EMBED_BACKFILL_BACKOFF_BASE:-}
       CTX_EMBED_BACKFILL_BACKOFF_CAP: ${CTX_EMBED_BACKFILL_BACKOFF_CAP:-}
+      CTX_EMBED_BACKFILL_RELEASE_HOLD: ${CTX_EMBED_BACKFILL_RELEASE_HOLD:-}
 
       # ── embed_migration.* (7) ──
       CTX_EMBED_MIGRATION_BATCH_PER_CYCLE: ${CTX_EMBED_MIGRATION_BATCH_PER_CYCLE:-}

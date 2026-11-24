@@ -170,6 +170,7 @@ func TestMigration169_ConcurrentIngestDoesNotFailTheRepair(t *testing.T) {
 		t.Errorf("the restore never waited on the in-flight ingest — the in-flight interleaving was not exercised")
 	}
 
+	m169FinishChain(t, pool) // the post-repair ingests below replace a chunk's text
 	for _, c := range []struct{ name, moved, fresh, src, title string }{
 		{"committed", movedA, freshA, srcA, "m169 race committed old"},
 		{"in flight", movedB, freshB, srcB, "m169 race inflight old"},
