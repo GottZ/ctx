@@ -236,7 +236,8 @@ def test_register_takes_call_mcp_only_from_a_real_plugin_context():
     def call_mcp(server, tool, arguments=None, timeout=30):
         return {"ok": True, "result": ""}
 
-    assert _MODULE._host_call_mcp(types.SimpleNamespace(call_mcp=call_mcp)) == (None, "")
+    forwarding = types.SimpleNamespace(call_mcp=call_mcp, plugin_id="ctx_checkpoint")  # the plugin host's proxy
+    assert _MODULE._host_call_mcp(forwarding) == (None, "")
     assert _MODULE._host_call_mcp(types.SimpleNamespace()) == (None, "")
 
     def broken():
