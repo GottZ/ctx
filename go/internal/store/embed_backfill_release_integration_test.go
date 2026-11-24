@@ -49,6 +49,14 @@ func TestBackfillReleaseNeverWaitsForAHeldMemo(t *testing.T) {
 		}
 	}
 	held, free := ids[0], ids[1]
+	// The zero reader (neither every tenant nor one) reaches nothing.
+	if res, err := store.ReleaseBackfillMemos(ctx, pool, store.BackfillRelease{Class: store.EmbedFailureOversize}); err != nil || res.Counted != 0 {
+		t.Fatalf("zero reader: %+v %v, want counted 0", res, err)
+	}
+	dry, err := store.ReleaseBackfillMemos(ctx, pool, store.BackfillRelease{Class: store.EmbedFailureOversize, AllTenants: true})
+	if err != nil || dry.Counted != 2 {
+		t.Fatalf("dry run: %+v %v, want counted 2", dry, err)
+	}
 
 	// The writer changes the first block's body: its invalidation releases
 	// the memo and holds the memo row to the commit.
@@ -68,9 +76,10 @@ func TestBackfillReleaseNeverWaitsForAHeldMemo(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		counted := int64(2) // both memos, the held one not yet deleted for others
+		// Both memos count: the writer's delete of the held one is not
+		// committed.
 		res, err := store.ReleaseBackfillMemos(ctx, pool, store.BackfillRelease{
-			Class: store.EmbedFailureOversize, AllTenants: true, Confirm: &counted,
+			Class: store.EmbedFailureOversize, AllTenants: true, Confirm: &dry.Counted, AsOf: &dry.AsOf,
 		})
 		done <- result{res, err}
 	}()

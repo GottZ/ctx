@@ -98,7 +98,7 @@ func releaseAll(t *testing.T, pool *pgxpool.Pool, r store.BackfillRelease) store
 	if err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
-	r.Confirm = &dry.Counted
+	r.Confirm, r.AsOf = &dry.Counted, &dry.AsOf
 	res, err := store.ReleaseBackfillMemos(context.Background(), pool, r)
 	if err != nil {
 		t.Fatalf("release: %v", err)
@@ -233,7 +233,7 @@ func TestBackfillReleaseAgainstAWorkingArm(t *testing.T) {
 			relErr = fmt.Errorf("round %d: dry run: %w", round, err)
 			break
 		}
-		res, err := store.ReleaseBackfillMemos(ctx, pool, store.BackfillRelease{Class: store.EmbedFailureWire, AllTenants: true, Confirm: &dry.Counted})
+		res, err := store.ReleaseBackfillMemos(ctx, pool, store.BackfillRelease{Class: store.EmbedFailureWire, AllTenants: true, Confirm: &dry.Counted, AsOf: &dry.AsOf})
 		switch {
 		case errors.Is(err, store.ErrBackfillReleaseConfirmMismatch):
 			mismatched++ // the arm wrote or replaced memos between the two counts

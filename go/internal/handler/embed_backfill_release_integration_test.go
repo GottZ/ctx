@@ -5,7 +5,8 @@
 // title or content. Raising embed_backfill.max_tokens, or moving to an embed
 // backend with a larger context, left it parked until someone ran SQL.
 // `manage embed-backfill-release` drops the regular backfill memos of one
-// block or of one failure class in the caller's range, after a dry run.
+// block or of one failure class (wire, oversize) in the caller's range, after
+// a dry run whose count and as_of every confirmed page sends back.
 //
 // The fixtures go through the production paths: the blocks through
 // store.UpsertBlock, the parks through the query path's backfill
@@ -22,6 +23,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -126,7 +128,7 @@ func (f *relFixture) releaseConfirmed(t *testing.T, ar *auth.AuthResult, data ma
 		t.Errorf("dry run %v: %d %s, want 200 with dry_run true", data, code, raw)
 		return code, body, raw
 	}
-	confirmed := map[string]any{"confirm_memos": body["confirm_memos"]}
+	confirmed := map[string]any{"confirm_memos": body["confirm_memos"], "as_of": body["as_of"]}
 	for k, v := range data {
 		confirmed[k] = v
 	}
@@ -293,20 +295,33 @@ func TestEmbedBackfillReleaseStaysInTheCallersRange(t *testing.T) {
 		t.Fatalf("migration memo: %v", err)
 	}
 
+	// The tenant reads the other tenant's scope through a tenant grant and
+	// one of its blocks through a block grant: neither is the tenant's own.
+	grantedID := relBlock(t, f.pool, foreign, "rel236 granted", long)
+	f.backfill([]string{foreign}, relCfg(50))
+	if _, err := store.CreateTenantGrant(ctx, f.pool, tA, foreign, ""); err != nil {
+		t.Fatalf("tenant grant: %v", err)
+	}
+	if _, err := store.CreateBlockGrant(ctx, f.pool, grantedID, tA, ""); err != nil {
+		t.Fatalf("block grant: %v", err)
+	}
 	tenantAdmin := &auth.AuthResult{IsValid: true, ApiKeyID: "rel-key", HomeScope: own, TenantID: tA, TenantRole: auth.RoleAdmin}
 	member := &auth.AuthResult{IsValid: true, ApiKeyID: "rel-key", HomeScope: own, TenantID: tA, TenantRole: auth.RoleMember}
 
 	if code, _, raw := f.release(t, member, map[string]any{"block_id": ownID}); code != http.StatusForbidden {
 		t.Errorf("member key: %d %s, want 403", code, raw)
 	}
-	c1, _, b1 := f.release(t, tenantAdmin, map[string]any{"block_id": foreignID})
-	c2, _, b2 := f.release(t, tenantAdmin, map[string]any{"block_id": "00000000-0000-4000-8000-000000000236"})
-	if c1 != http.StatusOK || c1 != c2 || b1 != b2 || !strings.Contains(b1, `"counted":0`) {
+	// One answer for both, but for the time of the count.
+	c1, m1, b1 := f.release(t, tenantAdmin, map[string]any{"block_id": foreignID})
+	c2, m2, b2 := f.release(t, tenantAdmin, map[string]any{"block_id": "00000000-0000-4000-8000-000000000236"})
+	delete(m1, "as_of")
+	delete(m2, "as_of")
+	if c1 != http.StatusOK || c1 != c2 || !reflect.DeepEqual(m1, m2) || m1["counted"] != float64(0) {
 		t.Errorf("another tenant's block = %d %s, an unknown block = %d %s — want one identical answer counting 0", c1, b1, c2, b2)
 	}
 	code, body, raw := f.release(t, tenantAdmin, map[string]any{"class": "oversize"})
 	if code != http.StatusOK || body["counted"] != float64(1) {
-		t.Fatalf("tenant-admin dry run of the class: %d %s, want counted 1 (its own block's regular memo)", code, raw)
+		t.Fatalf("tenant-admin dry run of the class: %d %s, want counted 1 (its own block's regular memo, not the granted scope's or the granted block's)", code, raw)
 	}
 	code, body, raw = f.releaseConfirmed(t, tenantAdmin, map[string]any{"class": "oversize"})
 	if code != http.StatusOK || body["released"] != float64(1) {
@@ -315,8 +330,10 @@ func TestEmbedBackfillReleaseStaysInTheCallersRange(t *testing.T) {
 	if ok, _, _, _ := f.memo(t, ownID); ok {
 		t.Errorf("the tenant's own regular memo is still there")
 	}
-	if ok, _, _, _ := f.memo(t, foreignID); !ok {
-		t.Errorf("another tenant's memo was released by a tenant-admin")
+	for _, id := range []string{foreignID, grantedID} {
+		if ok, _, _, _ := f.memo(t, id); !ok {
+			t.Errorf("another tenant's memo (block %s) was released by a tenant-admin", id)
+		}
 	}
 	var migMemos int
 	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_failures WHERE block_id = $1::uuid AND migration_id = $2::uuid`,
@@ -328,8 +345,8 @@ func TestEmbedBackfillReleaseStaysInTheCallersRange(t *testing.T) {
 	}
 	// The server-admin's range is every tenant.
 	code, body, raw = f.releaseConfirmed(t, relServerAdmin, map[string]any{"class": "oversize"})
-	if code != http.StatusOK || body["released"] != float64(1) {
-		t.Errorf("server-admin release of the class: %d %s, want released 1 (the other tenant's)", code, raw)
+	if code != http.StatusOK || body["released"] != float64(2) {
+		t.Errorf("server-admin release of the class: %d %s, want released 2 (the other tenant's)", code, raw)
 	}
 	if ok, _, _, _ := f.memo(t, foreignID); ok {
 		t.Errorf("the server-admin's release left the other tenant's memo")
@@ -369,6 +386,9 @@ func TestEmbedBackfillReleaseConfirmAndPages(t *testing.T) {
 		{},
 		{"block_id": ids[0], "class": "oversize"},
 		{"class": "sensitivity_ineligible"},
+		{"class": "caller_timeout"},
+		{"class": "oversize", "confirm_memos": 3},
+		{"class": "oversize", "as_of": "2026-11-24T00:00:00Z"},
 		{"class": "no-such-class"},
 		{"block_id": "not-a-uuid"},
 		{"class": "oversize", "confirm_memos": -1},
@@ -378,21 +398,108 @@ func TestEmbedBackfillReleaseConfirmAndPages(t *testing.T) {
 			t.Errorf("data %v: %d %s, want 400", bad, code, raw)
 		}
 	}
-	if code, body, raw := f.release(t, relServerAdmin, map[string]any{"class": "oversize", "confirm_memos": 2}); code != http.StatusConflict || body["counted"] != float64(3) {
+	// A limit above the page bound is clamped, not refused.
+	code, dry, raw := f.release(t, relServerAdmin, map[string]any{"class": "oversize", "limit": 5000})
+	if code != http.StatusOK || dry["counted"] != float64(3) || dry["as_of"] == nil {
+		t.Fatalf("dry run with limit 5000: %d %s, want 200 counted 3 with as_of", code, raw)
+	}
+	asOf := dry["as_of"]
+	if code, body, raw := f.release(t, relServerAdmin, map[string]any{"class": "oversize", "confirm_memos": 2, "as_of": asOf}); code != http.StatusConflict || body["counted"] != float64(3) {
 		t.Errorf("confirm of a stale count: %d %s, want 409 with the fresh count 3", code, raw)
 	}
 	if parked() != 3 {
 		t.Fatalf("a refused confirm released memos: %d parked, want 3", parked())
 	}
-	code, body, raw := f.release(t, relServerAdmin, map[string]any{"class": "oversize", "limit": 2, "confirm_memos": 3})
+	code, body, raw := f.release(t, relServerAdmin, map[string]any{"class": "oversize", "limit": 2, "confirm_memos": 3, "as_of": asOf})
 	if code != http.StatusOK || body["released"] != float64(2) || body["remaining"] != float64(1) || body["confirm_memos"] != float64(1) {
 		t.Fatalf("first page: %d %s, want released 2 remaining 1 confirm_memos 1", code, raw)
 	}
-	code, body, raw = f.release(t, relServerAdmin, map[string]any{"class": "oversize", "limit": 2, "confirm_memos": 1})
+	code, body, raw = f.release(t, relServerAdmin, map[string]any{"class": "oversize", "limit": 2, "confirm_memos": 1, "as_of": asOf})
 	if code != http.StatusOK || body["released"] != float64(1) || body["remaining"] != float64(0) {
 		t.Fatalf("second page: %d %s, want released 1 remaining 0", code, raw)
 	}
 	if parked() != 0 {
 		t.Errorf("%d still parked after both pages, want 0", parked())
+	}
+}
+
+// TestEmbedBackfillReleasePagesEndWhileBlocksKeepNotFitting: a released block
+// that still does not fit is parked again with a new memo; the pages of the
+// release are bound to its dry run (as_of), so they do not find it again and
+// the release ends at remaining 0 after one attempt per block.
+func TestEmbedBackfillReleasePagesEndWhileBlocksKeepNotFitting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newRelFixture(t)
+	scopes := []string{"private"}
+	cfg := relCfg(1_000_000)
+	ids := []string{
+		relBlock(t, f.pool, "private", "rel236 refused a", "text a "+relOversizeMarker),
+		relBlock(t, f.pool, "private", "rel236 refused b", "text b "+relOversizeMarker),
+	}
+	for range ids {
+		f.backfill(scopes, cfg)
+	}
+	if got := f.calls.Load(); got != 2 {
+		t.Fatalf("fixture: %d wire calls, want 2 (both refused)", got)
+	}
+	code, dry, raw := f.release(t, relServerAdmin, map[string]any{"class": "oversize"})
+	if code != http.StatusOK || dry["counted"] != float64(2) {
+		t.Fatalf("dry run: %d %s, want counted 2", code, raw)
+	}
+	confirm := dry["confirm_memos"]
+	for page := 1; page <= 4; page++ {
+		code, body, raw := f.release(t, relServerAdmin, map[string]any{"class": "oversize", "limit": 1, "confirm_memos": confirm, "as_of": dry["as_of"]})
+		if code != http.StatusOK {
+			t.Fatalf("page %d: %d %s, want 200 — the re-parked blocks must not come back into the release", page, code, raw)
+		}
+		f.backfill(scopes, cfg) // the released block is attempted and parked again
+		if body["remaining"] == float64(0) {
+			if page != 2 {
+				t.Errorf("the release ended after %d pages, want 2", page)
+			}
+			break
+		}
+		confirm = body["confirm_memos"]
+	}
+	if got := f.calls.Load(); got != 4 {
+		t.Errorf("wire calls = %d, want 4 (one attempt per block after its release)", got)
+	}
+	for _, id := range ids {
+		if ok, class, inf, _ := f.memo(t, id); !ok || class != "oversize" || !inf {
+			t.Errorf("block %s after the release: memo=%v class=%q infinity=%v, want parked again", id, ok, class, inf)
+		}
+	}
+}
+
+// TestEmbedBackfillReleaseLeavesACallerTimeoutMemo: a caller_timeout memo is
+// no park — the arm takes such a block at once, and with the arm off the
+// query path retries it after its hold — so the release does not take it,
+// by block or by class.
+func TestEmbedBackfillReleaseLeavesACallerTimeoutMemo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newRelFixture(t)
+	ctx := context.Background()
+	title, content := "rel236 slow block", "a text the sync budget did not cover"
+	id := relBlock(t, f.pool, "private", title, content)
+	// The query path's memo of a cut embed (handler/query.go).
+	if _, err := store.RecordEmbedFailureIfUnchanged(ctx, f.pool, id, title, content, store.EmbedFailureCallerTimeout,
+		store.NormalizeEmbedError(store.EmbedFailureCallerTimeout, "sync budget"), time.Minute, time.Hour); err != nil {
+		t.Fatalf("caller_timeout memo: %v", err)
+	}
+	if ok, class, _, _ := f.memo(t, id); !ok || class != "caller_timeout" {
+		t.Fatalf("fixture: memo=%v class=%q", ok, class)
+	}
+	if code, body, raw := f.release(t, relServerAdmin, map[string]any{"block_id": id}); code != http.StatusOK || body["counted"] != float64(0) {
+		t.Errorf("release of the block: %d %s, want counted 0", code, raw)
+	}
+	if code, _, raw := f.release(t, relServerAdmin, map[string]any{"class": "caller_timeout"}); code != http.StatusBadRequest {
+		t.Errorf("release of the class caller_timeout: %d %s, want 400", code, raw)
+	}
+	if ok, _, _, _ := f.memo(t, id); !ok {
+		t.Errorf("the caller_timeout memo is gone")
 	}
 }

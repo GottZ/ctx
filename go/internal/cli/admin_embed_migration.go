@@ -49,19 +49,20 @@ func embedBackfillCmd(getClient func() (*Client, error)) *cobra.Command {
 // `manage embed-backfill-release` (issue #236): without --confirm a dry run
 // that counts, with --confirm N the release of one page bound to that count.
 func embedBackfillReleaseCmd(getClient func() (*Client, error)) *cobra.Command {
-	var block, class string
+	var block, class, asOf string
 	var limit int
 	var confirm int64 = -1
 	cmd := &cobra.Command{
 		Use:   "release",
 		Short: "Drop backfill failure memos so the backfill takes the blocks again (dry run without --confirm)",
-		Long: "Drop the regular backfill memos of one block (--block) or of one failure class (--class wire|oversize|caller_timeout)\n" +
+		Long: "Drop the regular backfill memos of one block (--block) or of one failure class (--class wire|oversize)\n" +
 			"in the key's range, so the next backfill pick embeds those blocks when they fit now and parks them again after one\n" +
 			"attempt when they do not — after raising embed_backfill.max_tokens, moving to an embed backend with a larger context,\n" +
-			"or the end of a backend outage. Without --confirm it only counts; --confirm takes the count it printed and releases\n" +
-			"one page (--limit, at most 1000). A re-embed migration's own memos are never touched.",
+			"or the end of a backend outage. Without --confirm it only counts; --confirm and --as-of take the count and the time it\n" +
+			"printed and release one page (--limit, at most 1000) of the memos that were there then. A re-embed migration's own\n" +
+			"memos and caller_timeout memos are never touched.",
 		Example: `  ctx admin embed-backfill release --class oversize
-  ctx admin embed-backfill release --class oversize --confirm 42
+  ctx admin embed-backfill release --class oversize --confirm 42 --as-of 2026-11-24T05:00:00.123456Z
   ctx admin embed-backfill release --block 01a2...`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := getClient()
@@ -81,16 +82,20 @@ func embedBackfillReleaseCmd(getClient func() (*Client, error)) *cobra.Command {
 			if confirm >= 0 {
 				data["confirm_memos"] = confirm
 			}
+			if asOf != "" {
+				data["as_of"] = asOf
+			}
 			resp, _, err := c.Do(http.MethodPost, "/api/manage", map[string]any{"action": "embed-backfill-release", "data": data})
 			if err != nil {
 				return err
 			}
 			var r struct {
-				DryRun       bool  `json:"dry_run"`
-				Counted      int64 `json:"counted"`
-				Released     int64 `json:"released"`
-				Remaining    int64 `json:"remaining"`
-				ConfirmMemos int64 `json:"confirm_memos"`
+				DryRun       bool   `json:"dry_run"`
+				Counted      int64  `json:"counted"`
+				Released     int64  `json:"released"`
+				Remaining    int64  `json:"remaining"`
+				ConfirmMemos int64  `json:"confirm_memos"`
+				AsOf         string `json:"as_of"`
 			}
 			_ = json.Unmarshal(resp, &r)
 			if err := checkEnvelope(resp, envelopeRequired); err != nil {
@@ -105,21 +110,22 @@ func embedBackfillReleaseCmd(getClient func() (*Client, error)) *cobra.Command {
 			}
 			return renderOrJSON(resp, func([]byte) error {
 				if r.DryRun {
-					fmt.Printf("%d memo(s) in range; release them with --confirm %d\n", r.Counted, r.ConfirmMemos)
+					fmt.Printf("%d memo(s) in range; release them with --confirm %d --as-of %s\n", r.Counted, r.ConfirmMemos, r.AsOf)
 					return nil
 				}
 				fmt.Printf("released %d memo(s), %d remaining\n", r.Released, r.Remaining)
 				if r.Remaining > 0 {
-					fmt.Printf("next page: --confirm %d\n", r.ConfirmMemos)
+					fmt.Printf("next page: --confirm %d --as-of %s\n", r.ConfirmMemos, r.AsOf)
 				}
 				return nil
 			})
 		},
 	}
 	cmd.Flags().StringVar(&block, "block", "", "the block whose memo to release")
-	cmd.Flags().StringVar(&class, "class", "", "the failure class to release: wire, oversize or caller_timeout")
+	cmd.Flags().StringVar(&class, "class", "", "the failure class to release: wire or oversize")
 	cmd.Flags().IntVar(&limit, "limit", 0, "page size (default and maximum 1000)")
 	cmd.Flags().Int64Var(&confirm, "confirm", -1, "the count of the dry run (or the remaining count of the page before)")
+	cmd.Flags().StringVar(&asOf, "as-of", "", "the as_of the dry run printed (required with --confirm)")
 	return cmd
 }
 

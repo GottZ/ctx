@@ -69,11 +69,17 @@ const (
 	EmbedFailureCallerTimeout EmbedFailureClass = "caller_timeout"
 )
 
-// regularBackfillClasses are the classes the regular backfill (migration_id
-// IS NULL) writes, in its two paths: wire and oversize (RecordEmbedFailure,
-// RecordEmbedFailureIfUnchanged), caller_timeout (the query path's cut).
+// releasableClasses are the classes of the regular backfill's memos
+// (migration_id IS NULL) that ReleaseBackfillMemos takes: wire (a backoff
+// after a failed wire call) and oversize (the park of a block that did not
+// fit). The third class the regular backfill writes, caller_timeout, is no
+// park: while the background arm runs the arm takes such a block at once
+// (its plain predicate admits the memo), and with the arm off the query path
+// retries it after the hold its attempts give (CallerTimeoutHoldEnd).
+// Deleting it would only hand the block back to the requests' sync budget
+// and restart its attempts, which #240 part 4 keeps an edit from doing.
 // sensitivity_ineligible is a migration's class only, and store is reserved.
-var regularBackfillClasses = []EmbedFailureClass{EmbedFailureWire, EmbedFailureOversize, EmbedFailureCallerTimeout}
+var releasableClasses = []EmbedFailureClass{EmbedFailureWire, EmbedFailureOversize}
 
 // maxLastErrorLen mirrors migration 113's documented last_error contract:
 // normalized, ≤500 chars, never a raw wire error (Embed-TEXT content must
@@ -550,9 +556,9 @@ const EmbedFailureQueryPathExcludedPredicate = `
 const BackfillReleaseMaxLimit = 1000
 
 // ErrBackfillReleaseSelector is a release that does not name exactly one of
-// a block or a class the regular backfill writes, or names a page size out
-// of range.
-var ErrBackfillReleaseSelector = errors.New("store: backfill release: exactly one of a block id or a regular backfill class (wire, oversize, caller_timeout), a limit of 1 to 1000")
+// a block or a releasable class, names a page size out of range, or
+// confirms without the as_of of its dry run.
+var ErrBackfillReleaseSelector = errors.New("store: backfill release: exactly one of a block id or a class (wire, oversize), a limit of 1 to 1000, and a confirm together with the dry run's as_of")
 
 // ErrBackfillReleaseConfirmMismatch is a confirmed release whose fresh count
 // differs from the number it confirms: nothing was deleted.
@@ -565,8 +571,10 @@ var ErrBackfillReleaseConfirmMismatch = errors.New("store: backfill release: the
 // every other caller sets TenantID and reaches only the memos of blocks in
 // the scopes that tenant owns (context_tenant_scopes), so a block of another
 // tenant and a block that does not exist count alike: zero. Confirm nil is a
-// dry run; otherwise the release deletes only when the fresh count equals it.
-// Limit is the page size (0 = BackfillReleaseMaxLimit).
+// dry run, which answers its count and its AsOf; a confirmed release passes
+// both back, and takes only the memos the dry run could count (first_seen
+// not after AsOf), and only when their fresh count equals Confirm. Limit is
+// the page size (0 = BackfillReleaseMaxLimit).
 type BackfillRelease struct {
 	BlockID    string
 	Class      EmbedFailureClass
@@ -574,15 +582,18 @@ type BackfillRelease struct {
 	TenantID   string
 	Limit      int
 	Confirm    *int64
+	AsOf       *time.Time
 }
 
-// BackfillReleaseResult is what a release counted and did. Counted is the
-// number of memos in range when the call counted; Released the number it
-// deleted; Remaining what is left in range after it as far as this call
-// knows (Counted - Released: memos it skipped because another transaction
-// held them, and memos past the page).
+// BackfillReleaseResult is what a release counted and did. AsOf is the time
+// of the dry run's count, which bounds every page of the release; Counted the
+// number of memos in range not written after AsOf, when the call counted;
+// Released the number it deleted; Remaining what is left of them after it
+// (Counted - Released: memos it skipped because another transaction held
+// them, and memos past the page).
 type BackfillReleaseResult struct {
 	DryRun    bool
+	AsOf      time.Time
 	Counted   int64
 	Released  int64
 	Remaining int64
@@ -596,7 +607,16 @@ type BackfillReleaseResult struct {
 // does not. Without it a parked block came back only through a change of its
 // title or content (InvalidateEmbeddingTx); a write that re-sends the same
 // text does not release it (#216). A migration's memos (migration_id set)
-// are that migration's bookkeeping and are never taken.
+// are that migration's bookkeeping and are never taken, and neither is a
+// caller_timeout memo (releasableClasses).
+//
+// The pages of one release are bound to its dry run: a memo whose
+// first_seen is after AsOf (the start of the transaction that wrote it) is
+// neither counted nor deleted. A released block that does not fit is parked
+// again with a new memo, so without the bound every page would find the
+// blocks the pages before it released, and a release paged to remaining 0
+// would not end while blocks keep not fitting; a memo written between a
+// page's count and its delete stays out of that page as well.
 //
 // Locks: memo rows only, and none it would have to wait for — the page is
 // taken FOR UPDATE SKIP LOCKED, so a memo another transaction holds (the
@@ -616,12 +636,18 @@ func ReleaseBackfillMemos(ctx context.Context, pool *pgxpool.Pool, r BackfillRel
 	if !r.AllTenants && r.TenantID == "" {
 		return res, nil // the zero reader reaches nothing
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_failures f WHERE `+where, args...).Scan(&res.Counted); err != nil {
-		return res, fmt.Errorf("store: backfill release: count: %w", err)
-	}
 	if res.DryRun {
+		if err := pool.QueryRow(ctx, `SELECT count(*), now() FROM context_embed_failures f WHERE `+where, args...).Scan(&res.Counted, &res.AsOf); err != nil {
+			return res, fmt.Errorf("store: backfill release: count: %w", err)
+		}
 		res.Remaining = res.Counted
 		return res, nil
+	}
+	res.AsOf = *r.AsOf
+	where += fmt.Sprintf(` AND f.first_seen <= $%d`, len(args)+1)
+	args = append(args, res.AsOf)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_failures f WHERE `+where, args...).Scan(&res.Counted); err != nil {
+		return res, fmt.Errorf("store: backfill release: count: %w", err)
 	}
 	if res.Counted != *r.Confirm {
 		res.Remaining = res.Counted
@@ -651,26 +677,36 @@ func ReleaseBackfillMemos(ctx context.Context, pool *pgxpool.Pool, r BackfillRel
 // arguments: the regular memos of the block or of the class, and for a
 // tenant reader only those of blocks in the tenant's scopes.
 func (r BackfillRelease) where() (string, []any, error) {
-	if (r.BlockID == "") == (r.Class == "") || r.Limit < 0 || r.Limit > BackfillReleaseMaxLimit {
+	if (r.BlockID == "") == (r.Class == "") || r.Limit < 0 || r.Limit > BackfillReleaseMaxLimit ||
+		(r.Confirm != nil) != (r.AsOf != nil) {
 		return "", nil, ErrBackfillReleaseSelector
 	}
 	where := `f.migration_id IS NULL AND `
 	var args []any
 	if r.BlockID != "" {
-		where += `f.block_id = $1::uuid`
-		args = append(args, r.BlockID)
+		where += `f.block_id = $1::uuid AND f.last_class = ANY($2::text[])`
+		args = append(args, r.BlockID, releasableClassNames())
 	} else {
-		if !slices.Contains(regularBackfillClasses, r.Class) {
+		if !slices.Contains(releasableClasses, r.Class) {
 			return "", nil, ErrBackfillReleaseSelector
 		}
 		where += `f.last_class = $1`
 		args = append(args, string(r.Class))
 	}
 	if !r.AllTenants {
-		where += `
-		   AND EXISTS (SELECT 1 FROM context_blocks b JOIN context_tenant_scopes ts ON ts.scope = b.scope
-		                WHERE b.id = f.block_id AND ts.tenant_id = $2::uuid)`
 		args = append(args, r.TenantID)
+		where += fmt.Sprintf(`
+		   AND EXISTS (SELECT 1 FROM context_blocks b JOIN context_tenant_scopes ts ON ts.scope = b.scope
+		                WHERE b.id = f.block_id AND ts.tenant_id = $%d::uuid)`, len(args))
 	}
 	return where, args, nil
+}
+
+// releasableClassNames is releasableClasses as the text[] of a statement.
+func releasableClassNames() []string {
+	out := make([]string, len(releasableClasses))
+	for i, c := range releasableClasses {
+		out[i] = string(c)
+	}
+	return out
 }

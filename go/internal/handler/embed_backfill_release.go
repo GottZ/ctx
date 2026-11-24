@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/store"
@@ -23,9 +24,12 @@ type backfillReleaseSpec struct {
 	// ConfirmMemos absent = dry run; otherwise the counted (or remaining)
 	// number of the call before, re-checked against a fresh count.
 	ConfirmMemos *int64 `json:"confirm_memos"`
+	// AsOf is the dry run's as_of, sent back with every confirmed page: the
+	// release takes only memos that were there when the dry run counted.
+	AsOf *time.Time `json:"as_of"`
 }
 
-const backfillReleaseHelp = "data payload required: exactly one of block_id (a uuid) or class (wire, oversize, caller_timeout); optional limit (the page size, at most 1000), confirm_memos — unknown fields are refused"
+const backfillReleaseHelp = "data payload required: exactly one of block_id (a uuid) or class (wire, oversize); optional limit (the page size, at most 1000), and confirm_memos together with the dry run's as_of — unknown fields are refused"
 
 // handleEmbedBackfillRelease is `manage embed-backfill-release`: it drops the
 // regular backfill memos (context_embed_failures, migration_id IS NULL) of
@@ -35,9 +39,10 @@ const backfillReleaseHelp = "data payload required: exactly one of block_id (a u
 // ended. Tier tierTenantAdmin; the range is the store's reader rule: a
 // server-admin reaches every memo, a tenant-admin the memos of blocks in its
 // own tenant's scopes, so a block of another tenant counts like one that
-// does not exist. Without confirm_memos it is a dry run; a confirmed call
-// deletes at most limit memos and answers what is left, with the number to
-// confirm for the next page.
+// does not exist. Without confirm_memos it is a dry run that answers its
+// count and as_of; a confirmed call sends both back, deletes at most limit
+// of the memos the dry run could count and answers what is left of them,
+// with the number to confirm for the next page.
 func (h *ManageHandler) handleEmbedBackfillRelease(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	ctx := r.Context()
 	var spec backfillReleaseSpec
@@ -56,6 +61,7 @@ func (h *ManageHandler) handleEmbedBackfillRelease(w http.ResponseWriter, r *htt
 		TenantID:   ar.TenantID,
 		Limit:      min(spec.Limit, store.BackfillReleaseMaxLimit),
 		Confirm:    spec.ConfirmMemos,
+		AsOf:       spec.AsOf,
 	})
 	switch {
 	case errors.Is(err, store.ErrBackfillReleaseSelector):
@@ -65,7 +71,7 @@ func (h *ManageHandler) handleEmbedBackfillRelease(w http.ResponseWriter, r *htt
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"action": req.Action, "success": false,
 			"error":   "the memos in range are not the confirmed number — check the count and confirm again",
-			"counted": res.Counted, "confirm_memos": res.Counted,
+			"counted": res.Counted, "confirm_memos": res.Counted, "as_of": res.AsOf,
 		})
 		return
 	case err != nil:
@@ -75,7 +81,7 @@ func (h *ManageHandler) handleEmbedBackfillRelease(w http.ResponseWriter, r *htt
 	}
 	body := map[string]any{
 		"action": req.Action, "success": true, "dry_run": res.DryRun,
-		"counted": res.Counted, "confirm_memos": res.Remaining,
+		"counted": res.Counted, "confirm_memos": res.Remaining, "as_of": res.AsOf,
 	}
 	if !res.DryRun {
 		body["released"] = res.Released

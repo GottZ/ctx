@@ -112,25 +112,26 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 			&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
 			&b.Sensitivity, &b.SensitivitySource, &b.CreatedAt, &b.UpdatedAt, &textChanged,
 		); err != nil {
-			return err
+			if pgxdb.AbsentOrMalformed(err) {
+				return ErrChunkNotWritable
+			}
+			// The arbiter is the chunk slot, so a chunk whose (category,
+			// title, scope) another active block holds collides on the
+			// identity index (issue #275): the caller's input, typed like
+			// UpdateBlock's.
+			return fmt.Errorf("store: insert chunk: %w", blockIdentityTaken(err))
 		}
 		if !textChanged {
 			return nil
 		}
 		if err := InvalidateEmbeddingTx(ctx, tx, b.ID); err != nil {
-			return err
+			return fmt.Errorf("store: insert chunk: %w", err)
 		}
 		dropInvalidatedMarks(b)
 		return nil
 	})
-	if pgxdb.AbsentOrMalformed(err) {
-		return nil, ErrChunkNotWritable
-	}
 	if err != nil {
-		// The arbiter is the chunk slot, so a chunk whose (category, title,
-		// scope) another active block holds collides on the identity index
-		// (issue #275): the caller's input, typed like UpdateBlock's.
-		return nil, fmt.Errorf("store: insert chunk: %w", blockIdentityTaken(err))
+		return nil, err // the begin and the commit carry the label of pgxdb.At
 	}
 	if b.Content == content { // the afterwork's dates, as in execHeld (issue #434)
 		b.written = &writtenDates{content: b.Content, times: times}

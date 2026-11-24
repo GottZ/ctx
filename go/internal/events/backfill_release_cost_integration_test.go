@@ -125,8 +125,11 @@ func TestBackfillReleaseCostInTheNextPick(t *testing.T) {
 		return m
 	}
 	before := measure()
-	counted := int64(n)
-	res, err := store.ReleaseBackfillMemos(ctx, pool, store.BackfillRelease{Class: store.EmbedFailureOversize, TenantID: tT, Confirm: &counted})
+	dry, err := store.ReleaseBackfillMemos(ctx, pool, store.BackfillRelease{Class: store.EmbedFailureOversize, TenantID: tT})
+	if err != nil || dry.Counted != n {
+		t.Fatalf("T's dry run: %+v %v, want %d counted", dry, err, n)
+	}
+	res, err := store.ReleaseBackfillMemos(ctx, pool, store.BackfillRelease{Class: store.EmbedFailureOversize, TenantID: tT, Confirm: &dry.Counted, AsOf: &dry.AsOf})
 	if err != nil || res.Released != n {
 		t.Fatalf("T's release: %+v %v, want %d released", res, err, n)
 	}
