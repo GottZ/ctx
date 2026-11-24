@@ -24,7 +24,8 @@ import (
 var pickIndexes = []string{"idx_embedding_pending_scope_sens", "idx_embedding_pending_sens"}
 
 // optionalAnchors are the canonical indexes of cutoverOptionalIndexes.
-var optionalAnchors = append(append([]string(nil), pickIndexes...), "idx_guard_pending_type")
+var optionalAnchors = append(append([]string(nil), pickIndexes...), "idx_guard_pending_type", "idx_embedding_pending_type_scope",
+	"idx_blocks_stratify_covering")
 
 func TestEmbedCutoverPickIndexes(t *testing.T) {
 	ctx := context.Background()

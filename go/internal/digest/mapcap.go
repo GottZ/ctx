@@ -339,7 +339,11 @@ func (b *mapBuilder) render(date string) mapText {
 }
 
 // renderFull is the map as it was before the cap, byte for byte: categories
-// in byte order, titles in byte order within each.
+// in byte order, titles in byte order within each. Two lines whose titles are
+// byte for byte equal (the same title in two scopes of the window) follow
+// their ids (lineBefore, the key the capped map orders by): before issue #525
+// they kept the order the source query returned them in, through a sort that
+// is not stable, so the database's plan decided it.
 func renderFull(home, date string, rows []mapRow) (string, int) {
 	categories := make(map[string][]mapRow)
 	for _, r := range rows {
@@ -355,7 +359,12 @@ func renderFull(home, date string, rows []mapRow) (string, int) {
 	text := []byte(mapHeader(home, len(rows), len(catNames), date))
 	for _, cat := range catNames {
 		catRows := categories[cat]
-		sort.Slice(catRows, func(i, j int) bool { return catRows[i].title < catRows[j].title })
+		sort.Slice(catRows, func(i, j int) bool {
+			if catRows[i].title != catRows[j].title {
+				return catRows[i].title < catRows[j].title
+			}
+			return catRows[i].id < catRows[j].id
+		})
 		text = append(text, fullCategoryHeader(cat, len(catRows))...)
 		for _, r := range catRows {
 			text = append(text, b.line(r)...)

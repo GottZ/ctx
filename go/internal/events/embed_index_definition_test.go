@@ -11,8 +11,8 @@ import (
 // byte for byte (issue #312).
 func TestIndexProbeStatement_ManagedDDLs(t *testing.T) {
 	all := append(verifyNextIndexes(), struct{ name, ddl string }{migrationPendingIndexName, migrationPendingIndexDDL})
-	if len(all) != 7 {
-		t.Fatalf("managed runtime indexes = %d, want 7 (HNSW twin, five sisters, pending index)", len(all))
+	if len(all) != 9 {
+		t.Fatalf("managed runtime indexes = %d, want 9 (HNSW twin, seven sisters, pending index)", len(all))
 	}
 	for _, ix := range all {
 		got, err := indexProbeStatement(ix.name, ix.ddl, "p_i", "p")

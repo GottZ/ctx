@@ -19,8 +19,10 @@ import (
 const testDate = "2026-11-23"
 
 // uncappedMap is the map as RunDigest rendered it before issue #518, copied
-// from the code of that version (rows in the order the source query returned
-// them). It is the reference the capped builder must match below the cap.
+// from the code of that version, with one change of issue #525: lines whose
+// titles are byte for byte equal follow their ids (that version kept the order
+// the source query returned them in, through a sort that is not stable). It
+// is the reference the capped builder must match below the cap.
 func uncappedMap(homeScope string, rows []mapRow) string {
 	categories := make(map[string][]mapRow)
 	for _, b := range rows {
@@ -36,7 +38,12 @@ func uncappedMap(homeScope string, rows []mapRow) string {
 		homeScope, len(rows), len(catNames), testDate)
 	for _, cat := range catNames {
 		catBlocks := categories[cat]
-		sort.Slice(catBlocks, func(i, j int) bool { return catBlocks[i].title < catBlocks[j].title })
+		sort.Slice(catBlocks, func(i, j int) bool {
+			if catBlocks[i].title != catBlocks[j].title {
+				return catBlocks[i].title < catBlocks[j].title
+			}
+			return catBlocks[i].id < catBlocks[j].id
+		})
 		fmt.Fprintf(&sb, "\n%s (%d)\n", cat, len(catBlocks))
 		for _, b := range catBlocks {
 			idPrefix := b.id
@@ -54,9 +61,9 @@ func uncappedMap(homeScope string, rows []mapRow) string {
 	return sb.String()
 }
 
-// sourceOrder sorts rows as the source query returns them: by category, then
-// title (byte order stands in for the database collation; the builder needs
-// only the grouping by category).
+// sourceOrder sorts rows in one order the source query may return them in:
+// grouped by category, which is all it promises (mapSourceQuery); within a
+// category by title here, while the database leaves that order to its plan.
 func sourceOrder(rows []mapRow) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].category != rows[j].category {
@@ -153,6 +160,70 @@ func TestMapBelowTheCapIsTheUncappedMap(t *testing.T) {
 	want := uncappedMap("private", append([]mapRow(nil), rows...))
 	if got, _ := build("private", maxMapBytes, rows); got.text != want {
 		t.Fatalf("a map of %d bytes (cap %d) was not rendered uncapped", len(want), maxMapBytes)
+	}
+}
+
+// TestMapDoesNotDependOnTheRowOrderWithinACategory (issue #525): the source
+// query promises only that rows arrive grouped by category, so the map must be
+// the same bytes for every order of the rows within a category — titles that
+// are byte for byte equal included (the same title in several scopes of the
+// window), which follow their ids. RED before #525: the full map ordered such
+// lines with a sort that is not stable, so the order the database returned
+// them in decided the map. Checked below the cap (renderFull) and above it
+// (the capped heaps, which order by title and id already).
+func TestMapDoesNotDependOnTheRowOrderWithinACategory(t *testing.T) {
+	r := rand.New(rand.NewPCG(525, 1))
+	var scopes []string
+	for i := 0; i < 40; i++ {
+		scopes = append(scopes, fmt.Sprintf("s%02d", i))
+	}
+	corpus := func(n int, title func(i int) string) []mapRow {
+		rows := make([]mapRow, n)
+		for i := range rows {
+			rows[i] = mapRow{id: testID(r), title: title(i), category: []string{"decisions", "learnings"}[i%2], scope: scopes[i%len(scopes)]}
+		}
+		return rows
+	}
+	shuffledWithinCategories := func(rows []mapRow) []mapRow {
+		out := append([]mapRow(nil), rows...)
+		r.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+		sort.SliceStable(out, func(i, j int) bool { return out[i].category < out[j].category })
+		return out
+	}
+	for _, c := range []struct {
+		name   string
+		budget int
+		rows   []mapRow
+	}{
+		// 80 lines, four titles: 20 byte-equal titles per title and category pair.
+		{"below the cap", maxMapBytes, corpus(160, func(i int) string { return []string{"Übergabe", "deploy", "漢字", "x"}[(i/2)%4] })},
+		// The same shape past a small cap.
+		{"above the cap", 2048, corpus(400, func(i int) string { return []string{"Übergabe", "deploy", "漢字", "x"}[(i/2)%4] })},
+	} {
+		first, _ := build("s00", c.budget, shuffledWithinCategories(c.rows))
+		if c.budget == maxMapBytes && first.truncated {
+			t.Fatalf("%s: fixture is truncated", c.name)
+		}
+		if c.budget != maxMapBytes && !first.truncated {
+			t.Fatalf("%s: fixture is not truncated", c.name)
+		}
+		for trial := 0; trial < 20; trial++ {
+			got, _ := build("s00", c.budget, shuffledWithinCategories(c.rows))
+			if got.text != first.text {
+				t.Fatalf("%s, trial %d: another order of the rows within their categories renders another map:\n--- got ---\n%.800s\n--- first ---\n%.800s", c.name, trial, got.text, first.text)
+			}
+		}
+		// Byte-equal titles follow their ids.
+		lines := strings.Split(first.text, "\n")
+		for i := 1; i < len(lines); i++ {
+			a, b := lines[i-1], lines[i]
+			if !strings.HasPrefix(a, "  ") || !strings.HasPrefix(b, "  ") || len(a) < 11 || len(b) < 11 {
+				continue
+			}
+			if ta, tb := strings.SplitN(a[11:], " [", 2)[0], strings.SplitN(b[11:], " [", 2)[0]; ta == tb && a[2:10] > b[2:10] {
+				t.Fatalf("%s: lines of the title %q are not in id order: %q before %q", c.name, ta, a, b)
+			}
+		}
 	}
 }
 
