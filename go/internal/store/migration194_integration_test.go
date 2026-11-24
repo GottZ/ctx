@@ -86,6 +86,17 @@ func m194Seed(t *testing.T, pool *pgxpool.Pool, keys, chunks int) ([]string, str
 	return plains[:2], m194Fingerprint(t, pool)
 }
 
+// m194Boundary reports whether context_guard_state carries part 2's column.
+func m194Boundary(t *testing.T, pool *pgxpool.Pool) bool {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM information_schema.columns
+		WHERE table_schema = current_schema() AND table_name = 'context_guard_state' AND column_name = 'write_log_evicted_before'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n == 1
+}
+
 func m194Fingerprint(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
 	var s string
@@ -263,6 +274,9 @@ func TestMigration194(t *testing.T) {
 		if got := m194Keys(t, pool); len(got) != 0 {
 			t.Errorf("keys after 194: %v, want none", got)
 		}
+		if !m194Boundary(t, pool) {
+			t.Errorf("context_guard_state.write_log_evicted_before missing after 194")
+		}
 		if got := m194Fingerprint(t, pool); got != fp {
 			t.Errorf("stages changed: %s -> %s", fp, got)
 		}
@@ -312,6 +326,9 @@ func TestMigration194(t *testing.T) {
 		if got := m194Keys(t, pool); strings.Join(got, "|") != strings.Join(wantKeys, "|") {
 			t.Errorf("keys above the threshold: %v, want them kept", got)
 		}
+		if !m194Boundary(t, pool) {
+			t.Errorf("context_guard_state.write_log_evicted_before missing above the chunk threshold (part 2 runs on every path)")
+		}
 		if got := m194Fingerprint(t, pool); got != fp {
 			t.Errorf("stages changed: %s -> %s", fp, got)
 		}
@@ -348,8 +365,8 @@ func TestMigration194(t *testing.T) {
 		if run.took > 10*time.Second {
 			t.Errorf("waited %s, want about the 3 s lock_timeout", run.took)
 		}
-		if got := m194Keys(t, pool); len(got) != 2 {
-			t.Errorf("keys after the failed run: %v, want both kept (rolled back)", got)
+		if got := m194Keys(t, pool); len(got) != 2 || m194Boundary(t, pool) {
+			t.Errorf("keys after the failed run: %v, column of part 2 %v; want both keys kept and no column (rolled back)", got, m194Boundary(t, pool))
 		}
 		if after := m194Apply(t, dsn, body, nil); after.err != nil || len(m194Keys(t, pool)) != 0 {
 			t.Errorf("after the reader ended: err %v, keys %v", after.err, m194Keys(t, pool))
