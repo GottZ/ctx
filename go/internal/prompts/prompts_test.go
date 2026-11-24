@@ -45,7 +45,7 @@ var wantIdentities = []prompts.Identity{
 	{ID: "llm.systemPromptV52", Version: "v5.2", Owner: "github.com/GottZ/ctx/internal/llm"},
 	{ID: "llm.systemPromptV6", Version: "v6", Owner: "github.com/GottZ/ctx/internal/llm"},
 	{ID: "llm.temporalPromptTemplate", Version: "2026-11-21", Owner: "github.com/GottZ/ctx/internal/llm"},
-	{ID: "llm.translationSystemPrompt", Version: "2026-03-28", Owner: "github.com/GottZ/ctx/internal/llm"},
+	{ID: "llm.translationSystemPrompt", Version: "2026-11-24", Owner: "github.com/GottZ/ctx/internal/llm"},
 	{ID: "rrf.rerankSystemPrompt", Version: "2026-08-16", Owner: "github.com/GottZ/ctx/internal/rrf"},
 	{ID: "topiclabel.systemPromptFor", Version: "2026-08-16", Owner: "github.com/GottZ/ctx/internal/topiclabel"},
 }
