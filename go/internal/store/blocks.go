@@ -90,6 +90,12 @@ type Block struct {
 	Archived    bool              `json:"archived,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
+	// written is what the content write that returned this block hands its
+	// temporal afterwork (RefreshBlockTemporal, issue #434): the content it
+	// stored and the dates it computed from that content for content_times.
+	// nil on a block a read or a write without a content returned;
+	// unexported, so no answer carries it.
+	written *writtenDates
 }
 
 // SensitivityWrite carries the sensitivity intent of one block write.
@@ -882,6 +888,9 @@ type upsertStatement struct {
 	writer                 provenanceIdentity
 	badged                 bool
 	category, title, scope string
+	// written is the content the statement stores and its content_times,
+	// handed to the afterwork with the block (issue #434).
+	written writtenDates
 }
 
 // prepareUpsert is the pure half of UpsertBlock (see there for the rules).
@@ -1011,6 +1020,7 @@ func prepareUpsert(category, title, content string, tags []string, metadata map[
 	return upsertStatement{
 		query: query, args: args, writer: writer, badged: badged,
 		category: category, title: title, scope: scope,
+		written: writtenDates{content: content, times: contentTimes},
 	}
 }
 
@@ -1118,6 +1128,8 @@ func (u upsertStatement) execHeld(ctx context.Context, tx pgx.Tx, hadRow bool) (
 			return nil, fmt.Errorf("store: upsert block: invalidate embedding: %w", err)
 		}
 	}
+	w := u.written
+	b.written = &w
 	return b, nil
 }
 
@@ -1909,6 +1921,7 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// slots.
 	contentSent := data.Content != nil || data.Edits != nil
 	var edits *contentEditPlan
+	contentArg := len(args)
 	if contentSent {
 		setClauses = append(setClauses,
 			fmt.Sprintf("content = $%d", argIdx),
@@ -2042,6 +2055,15 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	}
 	if !found {
 		return nil, false, pinnedUpdateMissReason(ctx, pool, id, writeScopes, data.ExpectUpdatedAt != nil)
+	}
+	if contentSent {
+		// The content the statement stored and its content_times, for the
+		// afterwork (issue #434); for edits, the ones the held row resolved.
+		content, okContent := args[contentArg].(string)
+		times, okTimes := args[contentArg+1].([]time.Time)
+		if okContent && okTimes {
+			b.written = &writtenDates{content: content, times: times}
+		}
 	}
 	return b, needsReEmbed, nil
 }

@@ -75,7 +75,8 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 	// see prepareUpsert).
 	insertCols += ", content_times"
 	selectVals += fmt.Sprintf(", $%d::timestamptz[]", len(args)+1)
-	args = append(args, temporalExtraction(content))
+	times := temporalExtraction(content)
+	args = append(args, times)
 	setClauses = append(setClauses, "content_times = EXCLUDED.content_times")
 
 	query := fmt.Sprintf(`INSERT INTO context_blocks (%s)
@@ -102,5 +103,6 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 		// (issue #275): the caller's input, typed like UpdateBlock's.
 		return nil, fmt.Errorf("store: insert chunk: %w", blockIdentityTaken(err))
 	}
+	b.written = &writtenDates{content: content, times: times} // for the afterwork (issue #434)
 	return b, nil
 }

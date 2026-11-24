@@ -473,7 +473,7 @@ func finishStoredBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.S
 	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, b.ID, b.Title, b.Metadata); err != nil {
 		slog.Warn("store batch: auto-classify failed", "error", err, "block_id", b.ID, "request_id", reqID)
 	}
-	if _, err := store.RefreshTemporal(ctx, pool, b.ID, b.Content, b.CreatedAt); err != nil {
+	if _, err := store.RefreshBlockTemporal(ctx, pool, b); err != nil {
 		logRequestError(ctx, "store batch: temporal refresh failed", "error", err, "block_id", b.ID, "request_id", reqID)
 	}
 }
