@@ -1,5 +1,5 @@
 name: ctx_checkpoint
-version: 0.16.2
+version: 0.17.0
 description: "ctx memory provider: durable pre-compaction transcript checkpoints (fail-closed on request), and with memory: true recall, ctx_* agent tools, MEMORY.md/USER.md mirror, fact extraction and session digests — over Hermes' own MCP dispatch, no credentials of its own."
 # The first Hermes whose delegate_task children inherit the provider under
 # compression.checkpoint_required (before, every sub-agent compaction failed closed).
