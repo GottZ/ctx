@@ -262,8 +262,11 @@ func (w *detectWord) add(r rune) {
 	case 'ä', 'ö', 'ü', 'Ä', 'Ö', 'Ü', 'ß', 'å', 'Å', 'æ', 'Æ', 'ø', 'Ø':
 		w.letters = true
 	}
+	if w.long {
+		return
+	}
 	lr := unicode.ToLower(r)
-	if w.long || w.n+utf8.RuneLen(lr) > len(w.buf) {
+	if w.n+utf8.RuneLen(lr) > len(w.buf) {
 		w.long = true
 		return
 	}
