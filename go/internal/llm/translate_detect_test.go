@@ -74,6 +74,97 @@ func TestNeedsTranslationEnglishQuotingGerman(t *testing.T) {
 	)
 }
 
+// TestNeedsTranslationQuotedTextIsMaterial: a quote is what the question asks
+// about, not the language it is asked in. A German or Nordic question that
+// quotes an English error message, mail subject or talk title is translated
+// (the quoted English words are no counterweight), and an English question
+// that quotes a German title stays English (the quoted German words are no
+// evidence). Typographic marks count like the ASCII ones.
+func TestNeedsTranslationQuotedTextIsMaterial(t *testing.T) {
+	checkNeedsTranslation(t, true,
+		`Was bedeutet der Fehler "the server is not responding"?`,
+		`Warum kommt beim Deploy der Fehler "the container is not running"?`,
+		`Wie behebe ich "permission denied: the file is not writable"?`,
+		`Gibt es Neuigkeiten zum Thema "why the build is slow"?`,
+		`Übersicht zu "what is new in the release"`,
+		`Lösung für "the certificate has expired"`,
+		`Kündigung: "your subscription has been cancelled" was nun?`,
+		`Er hat gesagt "this is a breaking change", stimmt das?`,
+		`Was hat der Reviewer mit "this is not what we want" gemeint?`,
+		`Wann kam die Mail "your invoice is ready" von Hetzner?`,
+		`Was steht im Log bei 'the job has been cancelled'?`,
+		`Präsentation "How we scaled Postgres" fertig?`,
+		`Folien für den Talk "Why your database is slow"`,
+		"Was bedeutet der Fehler „the server is not responding“?",
+		"Was bedeutet der Fehler „the server is not responding”?",
+		"Was bedeutet der Fehler “the server is not responding”?",
+		"Was heißt «the build is green» in der Pipeline?",
+		"Was heißt »the build is green« in der Pipeline?",
+		"Wie übersetze ich ‚the best of both worlds‘ hier?",
+		"Vad betyder felet ”the disk is full” på servern?",
+		`Hvad betyder "the build is green" egentlig?`,
+		`Was bedeutet "Schreibschutz"?`,
+	)
+	checkNeedsTranslation(t, false,
+		`Who composed "Der Ring des Nibelungen"?`,
+		`What does "Wer rastet, der rostet, und das ist gut so" mean?`,
+		"Who wrote „Im Westen nichts Neues“ and when?",
+		"Who wrote 'Im Westen nichts Neues' and when?",
+		`What does "Größe" mean in Jörg's notes?`,
+	)
+}
+
+// TestNeedsTranslationQuoteOnly: a question that carries no evidence outside
+// its quotes is read from the quote — a pasted German question in quotes is
+// translated, a pasted English one is not.
+func TestNeedsTranslationQuoteOnly(t *testing.T) {
+	checkNeedsTranslation(t, true,
+		`"Wie richte ich das Backup ein?"`,
+		"„Wie richte ich das Backup ein?“",
+		`"Datenbank"`,
+		`"vad är status för backupen"`,
+		`was heißt "Zuständigkeit"`,
+	)
+	checkNeedsTranslation(t, false,
+		`"what is new in the release"`,
+		`"What was the die roll?"`,
+		`what does "Zuständigkeit" mean`,
+		`"Das Boot" movie review`,
+	)
+}
+
+// TestNeedsTranslationApostrophesAndOpenQuotes: an apostrophe inside or at the
+// end of a word (don't, it's, Jörg's, geht's, users') opens no quote, and a
+// quote mark that is never closed skips nothing — the rest of the question is
+// read as written.
+func TestNeedsTranslationApostrophesAndOpenQuotes(t *testing.T) {
+	checkNeedsTranslation(t, false,
+		"Don't translate this, it's the user's question",
+		"What's the status of Jörg's ticket?",
+		"Where is the users' data and the admins' log?",
+		`What is the "Größe`,
+		"'Twas the night before the release",
+	)
+	checkNeedsTranslation(t, true,
+		"Wie geht's dem Jörg und was macht's Haus?",
+		"Hans' Auto ist größer als Klaus' Rad",
+		"'s Wetter morgen und wie wird es",
+		`"Größe der Datei`,
+		"„Größe der Datei",
+		"'Größe der Datei",
+	)
+	for _, q := range []string{
+		`Was bedeutet der Fehler "the server is not responding`,
+		"Was bedeutet der Fehler „the server is not responding",
+		"Was bedeutet der Fehler 'the server is not responding",
+	} {
+		ev, quoted := scanTranslateEvidence(q)
+		if quoted != (translateEvidence{}) || ev.english != 3 {
+			t.Errorf("scanTranslateEvidence(%q) = %+v, quoted %+v; want the open quote read as text (english 3) and nothing quoted", q, ev, quoted)
+		}
+	}
+}
+
 // TestNeedsTranslationGermanWithEnglishWords: German questions with an
 // English word or phrase, or an abbreviation such as IT or US, stay German.
 // The ambiguous stop words and capitalised nouns count half against the

@@ -200,48 +200,127 @@ const maxDetectWordBytes = 32
 //   - a question with English function words is translated only when its
 //     non-English evidence outnumbers them, a weak word counting half
 //     (2·strong + weak > 2·english; see translateEvidence): "what was the die
-//     roll", a name such as Müller and a short German title quoted in an
-//     English question stay English, "Gibt es Änderungen in the schema?"
-//     stays German;
+//     roll" and a name such as Müller stay English, "Gibt es Änderungen in
+//     the schema?" stays German;
 //   - a question without English function words is translated on one word
 //     with ä ö ü ß å æ ø, one domain term, one Nordic function word, or two
 //     stop words — the rule before #210, which knew no Nordic word and no
 //     å æ ø.
 //
+// A quote ("…", „…“, “…”, «…», ‚…‘, '…') is what the question asks about, not
+// the language it is asked in: an English question is decided on the words
+// outside its quotes (Who directed "Das Boot"?), a German or Nordic one adds
+// the quoted words but not their English (Was bedeutet der Fehler "the server
+// is not responding"?), and a question with nothing outside its quotes is
+// read from them.
+//
 // It allocates nothing and takes time linear in the length of the input.
 func NeedsTranslation(query string) bool {
-	ev := scanTranslateEvidence(query)
+	ev, quoted := scanTranslateEvidence(query)
+	switch {
+	case ev == (translateEvidence{}):
+		ev = quoted
+	case ev.english == 0:
+		ev.strong += quoted.strong
+		ev.weak += quoted.weak
+		ev.stops += quoted.stops
+		ev.signal += quoted.signal
+	}
 	if ev.english > 0 {
 		return 2*ev.strong+ev.weak > 2*ev.english
 	}
 	return ev.signal > 0 || ev.stops >= 2
 }
 
-// scanTranslateEvidence walks the query once. A backtick span (a backtick up
-// to the next one) is code and skipped; the rest is split at white space and
-// at those spans into tokens, a token with a code character is skipped whole
-// (isCodeToken), and the runs of letters of every other token are its words.
-func scanTranslateEvidence(query string) translateEvidence {
-	var ev translateEvidence
+// scanTranslateEvidence walks the query once and returns the evidence of the
+// words outside quotes and that of the quoted words. A backtick span (a
+// backtick up to the next one) is code and skipped; a quote (see opensQuote)
+// is read on its own; the rest is split at white space and at those spans
+// into tokens, a token with a code character is skipped whole (isCodeToken),
+// and the runs of letters of every other token are its words.
+func scanTranslateEvidence(query string) (ev, quoted translateEvidence) {
+	var unclosed [2]bool
+	scanWords(query, &ev, &quoted, &unclosed)
+	return ev, quoted
+}
+
+// scanWords reads text into ev and its quotes into quoted. Inside a quote
+// (quoted == nil) a quote mark is an ordinary character. unclosed records the
+// quote kinds a search found no closing mark for: no later mark of that kind
+// closes either, so each kind is searched to the end at most once and the
+// walk stays linear.
+func scanWords(text string, ev, quoted *translateEvidence, unclosed *[2]bool) {
 	start := 0 // first byte of the current token
-	for i := 0; i < len(query); {
-		if query[i] == '`' {
-			if end := strings.IndexByte(query[i+1:], '`'); end >= 0 {
-				ev.addToken(query[start:i])
+	for i := 0; i < len(text); {
+		if text[i] == '`' {
+			if end := strings.IndexByte(text[i+1:], '`'); end >= 0 {
+				ev.addToken(text[start:i])
 				i += end + 2
 				start = i
 				continue
 			}
 		}
-		r, size := utf8.DecodeRuneInString(query[i:])
+		r, size := utf8.DecodeRuneInString(text[i:])
+		if k := quoteKind(r); quoted != nil && k >= 0 && !unclosed[k] && opensQuote(text, i, size) {
+			if end, endSize := closingQuote(text, i+size, k); end >= 0 {
+				ev.addToken(text[start:i])
+				scanWords(text[i+size:end], quoted, nil, nil)
+				i = end + endSize
+				start = i
+				continue
+			}
+			unclosed[k] = true
+		}
 		if unicode.IsSpace(r) {
-			ev.addToken(query[start:i])
+			ev.addToken(text[start:i])
 			start = i + size
 		}
 		i += size
 	}
-	ev.addToken(query[start:])
-	return ev
+	ev.addToken(text[start:])
+}
+
+// quoteKind is 0 for a double quote mark (" „ “ ” « »), 1 for a single one
+// (' ‚ ‘ ’) and -1 for any other rune. A mark closes a quote opened by any
+// mark of its kind, so „…“, “…”, ”…”, «…», »…«, »…» and „…" (a typographic
+// opening, a keyboard closing) all read as quotes.
+func quoteKind(r rune) int {
+	switch r {
+	case '"', '„', '“', '”', '«', '»':
+		return 0
+	case '\'', '‚', '‘', '’':
+		return 1
+	}
+	return -1
+}
+
+// opensQuote reports whether the quote mark at text[i:i+size] can open a
+// quote: it does not follow a letter or digit and is followed by something
+// other than white space. An apostrophe inside or at the end of a word
+// (don't, Jörg's, users') opens none.
+func opensQuote(text string, i, size int) bool {
+	prev, _ := utf8.DecodeLastRuneInString(text[:i])
+	next, n := utf8.DecodeRuneInString(text[i+size:])
+	return !isWordRune(prev) && n > 0 && !unicode.IsSpace(next)
+}
+
+// closingQuote returns the position and size of the first mark of the kind
+// at or after from that can close a quote: it follows something other than
+// white space and is not followed by a letter or digit (so the apostrophe of
+// it's closes nothing). -1 when there is none.
+func closingQuote(text string, from, kind int) (int, int) {
+	afterSpace := false
+	for j := from; j < len(text); {
+		r, size := utf8.DecodeRuneInString(text[j:])
+		if !afterSpace && quoteKind(r) == kind {
+			if next, _ := utf8.DecodeRuneInString(text[j+size:]); !isWordRune(next) {
+				return j, size
+			}
+		}
+		afterSpace = unicode.IsSpace(r)
+		j += size
+	}
+	return -1, 0
 }
 
 // isCodeToken reports whether a white-space token is a path, an identifier,
