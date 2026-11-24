@@ -750,6 +750,9 @@ func guardStatsCmd(getClient func() (*Client, error)) *cobra.Command {
 			fmt.Printf("  Archived (dup):   %v\n", fmtVal("archived_dups"))
 			fmt.Printf("  Write log:        %v\n", fmtVal("write_log_entries"))
 			fmt.Printf("  Pending:          %v\n", fmtVal("pending_count"))
+			if dv, ok := d["deferred_verdicts"].(map[string]any); ok {
+				fmt.Printf("  Deferred:         %v since start, %v in the last run\n", dv["since_start"], dv["last_run"])
+			}
 
 			if gs, ok := d["dirty_since"]; ok && gs != nil {
 				fmt.Printf("  Dirty since:      %v\n", gs)

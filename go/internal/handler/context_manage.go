@@ -1010,6 +1010,12 @@ func (h *ManageHandler) handleGuardStats(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// deferred_verdicts: the verdicts this process's guard runs left pending
+	// without an error because writing them meant waiting for another
+	// transaction (issue #547, guard.DeferredVerdicts) — since its start and
+	// in its last committed run; per process, like the log lines they replace
+	// as the only trace.
+	deferredSinceStart, deferredLastRun := guard.DeferredVerdicts()
 	resp := map[string]any{
 		"action":            "guard-stats",
 		"success":           true,
@@ -1024,6 +1030,10 @@ func (h *ManageHandler) handleGuardStats(w http.ResponseWriter, r *http.Request,
 		"dirty_since":       dirtySince,
 		"last_guard_at":     stats.LastGuardAt,
 		"pending_count":     pending,
+		"deferred_verdicts": map[string]any{
+			"since_start": deferredSinceStart,
+			"last_run":    deferredLastRun,
+		},
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
