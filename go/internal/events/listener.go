@@ -73,17 +73,20 @@ func (h *WriteHandler) HandleNotification(ctx context.Context, notification *pgc
 		"channel", notification.Channel,
 		"payload", payload,
 	)
-	h.scheduler.NotifyWrite()
 	// C6-B: the same notification arms the distiller, but only for an INSERT —
 	// the source's watermark is created_at, so an UPDATE adds no material a tick
 	// could find. An unparsable payload is NOT an error the connection should
 	// see (pgxlisten treats a returned error as connection-level): guard and
-	// digest were already signalled above, and the arm keeps its idle fallback.
+	// digest are signalled as for a block nobody knows, and the arm keeps its
+	// idle fallback. The id tells the digest its own map's write from the
+	// writes it reads (Scheduler.NotifyBlockWrite, issue #525).
 	var p blockNotifyPayload
 	if err := json.Unmarshal([]byte(notification.Payload), &p); err != nil {
+		h.scheduler.NotifyWrite()
 		slog.Warn("listener: unparsable ctx_block_write payload — distiller not armed", "error", err)
 		return nil
 	}
+	h.scheduler.NotifyBlockWrite(p.ID)
 	if p.Op == "INSERT" {
 		h.scheduler.NotifyBlockInsert(p.ID)
 	}
