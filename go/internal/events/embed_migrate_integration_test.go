@@ -20,7 +20,7 @@
 //     re-scan of the skip prefix.
 //   - Plus: oversize pre-wire skip, HTTP-400 exceed_context_size_error wire
 //     classification, transient-failure backoff, sensitivity_ineligible,
-//     verifying drain, paused idle, ClearEmbedding convergence, runtime
+//     verifying drain, paused idle, content-change convergence, runtime
 //     index lifecycle (CIC / INVALID recovery / terminal drop).
 //
 // Run: `go test -tags=integration ./internal/events/ -run TestEmbedMigrate_Integration -count=1 -v`.
@@ -580,11 +580,12 @@ func TestEmbedMigrate_Integration(t *testing.T) {
 		}
 	})
 
-	// clear_embedding_converges is the Konvergenz-Probe (§4.3): a migrated
-	// block whose content changes (ClearEmbedding) loses BOTH pairs, the
-	// regular backfill refills the old space, and the migration worker
-	// re-migrates it on the next pass.
-	t.Run("clear_embedding_converges", func(t *testing.T) {
+	// content_change_converges is the Konvergenz-Probe (§4.3): a migrated
+	// block whose content changes (InvalidateEmbeddingTx) loses its _next
+	// pair and keeps its serving vector, marked stale; the regular backfill
+	// re-embeds the old space, and the migration worker re-migrates it on
+	// the next pass.
+	t.Run("content_change_converges", func(t *testing.T) {
 		defer resetMigrationFixture(t, pool)
 		seedMigrationRow(t, pool, "running")
 		blockID := seedMigratableBlock(t, pool, "converge", "original content", "internal", time.Hour)
@@ -639,7 +640,7 @@ func TestEmbedMigrate_Integration(t *testing.T) {
 			t.Fatalf("read reconverged block: %v", err)
 		}
 		if !nextSet {
-			t.Errorf("block did not reconverge into the new space after ClearEmbedding + re-backfill")
+			t.Errorf("block did not reconverge into the new space after InvalidateEmbeddingTx + re-backfill")
 		}
 	})
 

@@ -148,7 +148,7 @@ func gamingModeTier(req manageRequest) adminTier {
 	return tierOpen
 }
 
-// manageActions is the dispatch table: 110 actions (89 pre-table + the four model alias actions of W02-04 + the eight model consumer actions of W01-5 + the three gateway limits actions of W06-15 + model-alias-preview of W05-04 + purge of #202 + stats-reconcile of #266 + the three forge conflict actions of #509), alphabetical, one row each.
+// manageActions is the dispatch table: 111 actions (89 pre-table + the four model alias actions of W02-04 + the eight model consumer actions of W01-5 + the three gateway limits actions of W06-15 + model-alias-preview of W05-04 + purge of #202 + stats-reconcile of #266 + the three forge conflict actions of #509 + embed-backfill-release of #236), alphabetical, one row each.
 //
 // The tiers are the pre-table behaviour, action for action — this wave routes
 // differently, it does not re-cut permissions.
@@ -160,7 +160,8 @@ func gamingModeTier(req manageRequest) adminTier {
 // the disable-profile family, the own reads (tenant-quota-get,
 // tenant-usage-get), the own-namespace scope provisioning, the forge family
 // (ownsProject), the model-alias family (store scope predicate + handler
-// field tiers, W02-04) and purge (the store's PurgeQuery reader rule, #202). Every other gated action stays server-admin, because its
+// field tiers, W02-04), purge (the store's PurgeQuery reader rule, #202) and
+// embed-backfill-release (the store's BackfillRelease reader rule, #236). Every other gated action stays server-admin, because its
 // handler carries no tenant filter — admitting a tenant-admin there would be
 // fail-OPEN. tenant-*/tenant-grant-*/block-grant-* are operator actions by
 // nature; the dream/gaming mutations are server-global by design (scheduler
@@ -214,6 +215,7 @@ var manageActions = map[string]manageAction{
 	// eject-mode is the canonical shim surface, gaming-mode its shape-compatible
 	// alias (AM-7) — one handler, two names, one shape-dependent tier rule.
 	"eject-mode":               {tierFn: gamingModeTier, handle: dropAuth((*ManageHandler).handleGamingMode)},
+	"embed-backfill-release":   {tier: tierTenantAdmin, handle: (*ManageHandler).handleEmbedBackfillRelease},
 	"embed-migration-abort":    {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleEmbedMigrationAbort)},
 	"embed-migration-cleanup":  {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleEmbedMigrationCleanup)},
 	"embed-migration-confirm":  {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleEmbedMigrationConfirm)},

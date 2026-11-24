@@ -326,7 +326,7 @@ const unflipEmbedModelMapSQL = `
 //
 // The swap tx additionally re-adds a FRESH, empty embedding_next/
 // embed_model_next pair (documented deviation from the §4.8 SQL sketch,
-// with reason): the RENAME consumes the _next names, but ClearEmbeddingTx —
+// with reason): the RENAME consumes the _next names, but InvalidateEmbeddingTx —
 // on the hot content-update path — and the create/purge validation address
 // embedding_next BY NAME; without the re-add every `manage update` after
 // the cutover would 42703. The §3.2b invariant ("Dual-Spalten-Paar
@@ -765,9 +765,10 @@ func CleanupEmbedMigration(ctx context.Context, db *pgxpool.Pool, migrationID st
 // sweepForeignServingVectors is the Nachlauf-Sweep (§4.8 / §5 Bruchpfad 6):
 // clear every live serving vector whose M109 provenance label is not
 // wantModel — reload-latency window writes and in-flight straddlers that
-// materialized as writes. Full ClearEmbedding semantics, set-based (both
-// pairs nulled + the backfill memos of the cleared blocks deleted) so the
-// sweep stays one statement even in a pathological window.
+// materialized as writes. The content-change invalidation as it was before
+// issue #198 part B (InvalidateEmbeddingTx without the stale-pick indexes),
+// set-based (both pairs nulled + the backfill memos of the cleared blocks
+// deleted) so the sweep stays one statement even in a pathological window.
 func sweepForeignServingVectors(ctx context.Context, db *pgxpool.Pool, wantModel string) (int64, error) {
 	rows, err := db.Query(ctx,
 		`UPDATE context_blocks

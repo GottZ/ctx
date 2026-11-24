@@ -17,6 +17,10 @@
 // InvalidateEmbeddingTx makes every writer fail, and the row must then hold
 // its old text and its vector, unmarked.
 //
+// The chunk re-ingest (InsertChunk) is the last of these writers; its slot's
+// conflict branch replaced the title and the content and kept the vector of
+// the earlier text unmarked.
+//
 //	go test -tags=integration ./internal/store/ -run 'TestBlockTextWritersMarkTheVector|TestInvalidationCommitsWithTheWrite' -count=1 -v
 package store_test
 
@@ -234,6 +238,45 @@ func TestBlockTextWritersMarkTheVector(t *testing.T) {
 		wantMarked(t, "issue renamed by the push", is)
 		wantMarked(t, "comment renamed by the push cascade", cs)
 	})
+
+	// A re-ingest of a chunk slot (InsertChunk's conflict branch) replaces the
+	// title and the content of the row in the slot; it decides from the
+	// statement, as the writers above do.
+	t.Run("chunk re-ingest", func(t *testing.T) {
+		src := i236Source(t, pool, scope)
+		ingest := func(t *testing.T, title, content string, tags []string) *store.Block {
+			t.Helper()
+			b, err := store.InsertChunk(ctx, pool, src, 0, "learnings", title, content, tags, map[string]any{"n": len(tags)}, scope)
+			if err != nil {
+				t.Fatalf("ingest %q: %v", title, err)
+			}
+			return b
+		}
+		b := ingest(t, "i236 chunk", "chunk body", nil)
+		i236Embed(t, pool, b.ID)
+		// The same title and content with new tags and metadata.
+		if again := ingest(t, "i236 chunk", "chunk body", []string{"x"}); again.ID != b.ID {
+			t.Fatalf("re-ingest landed on %s, want the slot's row %s", again.ID, b.ID)
+		}
+		wantKept(t, "chunk re-ingest with the same title and content", i236Read(t, pool, b.ID))
+		ingest(t, "i236 chunk", "chunk body, edited", nil)
+		wantMarked(t, "chunk re-ingest with a new content", i236Read(t, pool, b.ID))
+		i236Embed(t, pool, b.ID)
+		ingest(t, "i236 chunk, retitled", "chunk body, edited", nil)
+		wantMarked(t, "chunk re-ingest with a new title only", i236Read(t, pool, b.ID))
+	})
+}
+
+// i236Source inserts a context_sources row (no store writer of it) in scope.
+func i236Source(t *testing.T, pool *pgxpool.Pool, scope string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO context_sources (file_path, file_hash, scope) VALUES ('/i236/' || gen_random_uuid() || '.md', 'i236', $1) RETURNING id::text`,
+		scope).Scan(&id); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	return id
 }
 
 func TestInvalidationCommitsWithTheWrite(t *testing.T) {
@@ -260,10 +303,15 @@ func TestInvalidationCommitsWithTheWrite(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	i236Embed(t, pool, ub.ID, up.ID, issue.ID)
+	src := i236Source(t, pool, scope)
+	chunk, err := store.InsertChunk(ctx, pool, src, 0, "learnings", "i236 atomic chunk", "before", nil, nil, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i236Embed(t, pool, ub.ID, up.ID, issue.ID, chunk.ID)
 
-	// The memo delete is the last statement of InvalidateEmbeddingTx; a
-	// statement trigger fires even when it deletes no row.
+	// InvalidateEmbeddingTx releases the memo with a DELETE; a statement
+	// trigger fires even when it deletes no row.
 	for _, st := range []string{
 		`CREATE FUNCTION i236_refuse() RETURNS trigger LANGUAGE plpgsql AS $$
 		 BEGIN RAISE EXCEPTION 'i236: memo delete refused'; END $$`,
@@ -297,4 +345,7 @@ func TestInvalidationCommitsWithTheWrite(t *testing.T) {
 		return err
 	})
 	wantUntouched(t, "UpdateIssueBlock", issue.ID, err)
+
+	_, err = store.InsertChunk(ctx, pool, src, 0, "learnings", "i236 atomic chunk", "after", nil, nil, scope)
+	wantUntouched(t, "InsertChunk", chunk.ID, err)
 }

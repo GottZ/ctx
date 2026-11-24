@@ -117,6 +117,17 @@ func m169Ingest(pool *pgxpool.Pool, sourceID, title, content string) (string, er
 	return b.ID, nil
 }
 
+// m169FinishChain runs the migrations after 169 (and 169 itself, which the
+// runner has not recorded: m169Apply runs its file directly; it is
+// idempotent). A post-repair ingest that replaces a chunk's text needs the
+// columns of 173 and 175.
+func m169FinishChain(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	if err := store.RunMigrations(context.Background(), pool); err != nil {
+		t.Fatalf("run the migrations after 169: %v", err)
+	}
+}
+
 // m169Is23505 reports the identity collision of the issue: the 23505 of
 // uq_context_category_title_scope, which InsertChunk returns as
 // *store.BlockIdentityTakenError since issue #275.
@@ -323,6 +334,10 @@ func TestMigration169_ChunkLifecycleRepair(t *testing.T) {
 	}
 
 	// Every repaired slot takes a changed-content ingest again, on its row.
+	// Such an ingest invalidates the row's vector (InvalidateEmbeddingTx,
+	// issue #236), which writes columns of later migrations (173, 175): the
+	// chain is brought to its end first, as a boot after 169 does.
+	m169FinishChain(t, pool)
 	for _, c := range singles {
 		id, err := m169Ingest(pool, c.source, "m169 single "+c.lifecycle, "m169 edited "+c.lifecycle)
 		if err != nil || id != c.id {

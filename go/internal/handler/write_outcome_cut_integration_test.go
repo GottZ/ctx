@@ -862,9 +862,9 @@ func TestWriteOutcomeBrokenCommit(t *testing.T) {
 
 // TestWriteOutcomeCutRemainingPaths — the paths #482 left without
 // write_outcome (issue #483 point 8): their failure line names it, and a cut
-// commit says unknown. manage delete and dream-link-resolve are labeled
-// brackets; guard-resolve of one id, the chunk ingest, the blob delete and
-// the chat's staged writes are one statement; the issue writes run an
+// commit says unknown. manage delete, dream-link-resolve and the chunk ingest
+// (since #236) are labeled brackets; guard-resolve of one id, the blob delete
+// and the chat's staged writes are one statement; the issue writes run an
 // unlabeled bracket; a purge counts what earlier batches removed.
 func TestWriteOutcomeCutRemainingPaths(t *testing.T) {
 	if testing.Short() {

@@ -328,8 +328,8 @@ func distillShardGroupLimit(maxShards int) int {
 // invalidation per batch, is zero here: the insight type is retrieval
 // 'excluded' (blocktype/builtin.go, board decision E-4), and
 // store.RetrievalExcludedTypePredicate takes such a block out of BOTH embed
-// backfill picks. The block is never embedded, so ClearEmbeddingTx has nothing
-// to throw away. That is measured in the wave gate, and it is the whole reason
+// backfill picks. The block is never embedded, so InvalidateEmbeddingTx has no
+// vector to mark. That is measured in the wave gate, and it is the whole reason
 // this arm may keep the durable ordering instead of §4.5.4's fallback (b).
 // WHEN E-4 FLIPS the number stops being zero: at p95 ≈ 89 calls per generation
 // the same ordering costs up to one invalidate/re-embed cycle per batch of one
