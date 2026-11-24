@@ -1,9 +1,9 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 192,
-    "migration_count": 80,
-    "migration_chain_sha256": "4963e9bc5118a3eb209d6dfe58d74f2932b5ad79123fcd4a84a051d65253d4b8",
+    "migration_max": 193,
+    "migration_count": 81,
+    "migration_chain_sha256": "0d39672c717975de6c5e57b7c25095e2d20b76a491cc5075aa9ffa0af5af73ab",
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -5654,6 +5654,9 @@
     },
     "idx_embedding_pending_sens": {
       "def_hash": "83df2fb8d498a4bc7791d2eb4c875119da07bc4e9bfee5b9a319de8e1417e292"
+    },
+    "idx_embedding_pending_type_scope": {
+      "def_hash": "7667d580525e63b710467ccbea0469c041725a4ebcc38d5961d31dafc24a01cb"
     },
     "idx_embedding_stale_scope_sens": {
       "def_hash": "ed7145804a50d341900ad96e84ad908eeb9f8e1c3e9f0142f9ee80d2611afb2e"
