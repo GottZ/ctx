@@ -928,7 +928,30 @@ class CtxMemoryProvider(MemoryProvider):
         and the facts still run — never raises. Required: any chain/fact failure raises
         ``CtxCheckpointError`` (host keeps the uncompressed transcript); success returns a
         non-empty receipt (chain head/manifest IDs + SHA-256, fact block IDs; < 6000 chars).
+
+        The runs this checkpoint registers at its server entry (the chain's, which the required
+        facts continue, or one for the facts alone) end with this call, whichever way it ends
+        (GottZ/ctx#299): their planned writes never hold the entry's windows after it.
         """
+        runs: list[Any] = []
+        try:
+            return self._pre_compress(
+                messages, runs, require_checkpoint=require_checkpoint, tool_evidence=tool_evidence, **kwargs
+            )
+        finally:
+            for run in runs:
+                run.close()
+
+    def _pre_compress(
+        self,
+        messages: list[dict[str, Any]],
+        runs: list[Any],
+        *,
+        require_checkpoint: bool = False,
+        tool_evidence: list[dict[str, Any]] | None = None,
+        **kwargs,
+    ) -> str:
+        """:meth:`on_pre_compress`; every run it registers at the entry is appended to ``runs``."""
         # P5: the host calls on_session_end right after a compaction (commit_memory_session,
         # conversation_compression.py:3733) → that digest is the compaction segment digest.
         self._compaction_pending = True
@@ -1007,6 +1030,7 @@ class CtxMemoryProvider(MemoryProvider):
                     host_wait_s=host_wait or 0.0,
                     # The required facts are stored in the chain's run after it (#299): planned with it.
                     extra_writes=len(facts) if require_checkpoint else 0,
+                    runs=runs,
                 )
             except CtxCheckpointError as exc:
                 self._last_chain_error = exc
@@ -1087,6 +1111,7 @@ class CtxMemoryProvider(MemoryProvider):
                     wait_limit=wait_limit,
                     host_wait_s=host_wait or 0.0,
                 )
+                runs.append(run)
             facts_text = self._checkpoint_facts_sync(
                 _PacedFactStore(self._chain(), run),
                 facts,
@@ -1167,8 +1192,10 @@ class CtxMemoryProvider(MemoryProvider):
         wait_limit: float | None = None,
         host_wait_s: float = 0.0,
         extra_writes: int = 0,
+        runs: list[Any] | None = None,
     ) -> str:
-        """Synchronous chain write; raises ``CtxCheckpointError``. Returns the upstream receipt frame."""
+        """Synchronous chain write; raises ``CtxCheckpointError``. Returns the upstream receipt frame.
+        A run the chain leaves open for the required facts (``extra_writes``) goes to ``runs``."""
         root = self._checkpoint_root()
         host_api = self._probe_host_api()
         receipt = self._chain().write(
@@ -1188,6 +1215,8 @@ class CtxMemoryProvider(MemoryProvider):
             host_wait_s=host_wait_s,
             extra_writes=extra_writes,
         )
+        if runs is not None and getattr(receipt, "run", None) is not None:
+            runs.append(receipt.run)
         self._last_manifest_by_root[root] = receipt.manifest_id
         self._last_chain_receipt = receipt
         logger.info(

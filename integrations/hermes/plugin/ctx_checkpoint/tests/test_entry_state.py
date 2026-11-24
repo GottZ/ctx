@@ -17,6 +17,7 @@ only while every chain sleeps, so two chains interleave the way they would in on
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 import sys
 import threading
@@ -124,6 +125,7 @@ class EntryDouble:
         self.blocks: dict[tuple[str, str], dict] = {}
         self.booked: list[float] = []
         self.book_log: list[float] = []  # every booked write, never pruned
+        self.booked_writes: list[tuple[dict, float]] = []  # (store arguments, time) of each booked write
         self.answers: list[str] = []  # "ok" / "error", in the order the entry answered
         self.log: list[tuple[str, str, str, float]] = []  # (thread, tool, answer, time) of each answer
         self.counter = 0
@@ -179,6 +181,7 @@ class EntryDouble:
             return {"error": f"Rate limit exceeded: max {self.write_limit} writes per 60 seconds"}
         self.booked.append(now)
         self.book_log.append(now)
+        self.booked_writes.append((dict(args), now))
         if stored is None:
             self.counter += 1
             stored = {"id": f"019f7000-0000-7000-8000-{self.counter:012d}"}
@@ -463,7 +466,7 @@ def test_an_answer_ends_only_the_errors_released_before_its_call_was_sent():
     later = state.admit(write=True, window_writes=5, now=0.3).ticket
     state.release(later, error=True, now=0.4)
     assert state.errors_in_row == 2
-    assert state.admit(write=True, window_writes=5, now=0.5).stop
+    assert state.admit(write=True, window_writes=5, now=0.5).probe
     # A read sent now was sent after both: its answer ends them.
     fresh = state.admit(write=False, window_writes=5, now=0.6).ticket
     state.release(fresh, error=False, now=0.7)
@@ -628,3 +631,472 @@ def test_required_facts_wait_for_the_window_the_chain_left_full(clock):
     assert entry.max_booked_in_window() <= share
     # One wait for the next window, no more: the facts follow the chain 61 s later.
     assert WINDOW_S < clock.now - started <= WINDOW_S + 1.0 + 5.0, clock.now - started
+
+
+def test_a_refused_fact_takes_no_slot_of_the_window(clock):
+    """A refusal is not booked by ctx: after a refused required fact the next checkpoint of the
+    process finds every slot the chain before left (max_parts 3: five writes per window)."""
+    entry = EntryDouble(clock)
+    entry.refuse = lambda args: args["category"] == "learnings"
+    one = _provider(entry.dispatch, "session-one", chunk_chars=1_000, max_parts=3, budget_s=600, memory=True)
+    two = _provider(entry.dispatch, "session-two", chunk_chars=1_000, max_parts=3, budget_s=600)
+    first = [{"role": "user", "content": "u0 " + "u" * 300}, *_fact_turns()[:2]]  # one part, one fact
+
+    receipt = one.on_pre_compress(first, require_checkpoint=True)
+    assert "ctx checkpoint head:" in receipt and "not stored" in receipt, receipt
+    assert entry.refused == 1 and len(entry.book_log) == 3
+    two.on_pre_compress([{"role": "user", "content": "v0 " + "v" * 300}], require_checkpoint=True)
+
+    window = entry.book_log[0] + WINDOW_S
+    assert sum(1 for t in entry.book_log if t < window) == 5, entry.book_log
+
+
+# -- round 1 of #299: chains side by side are served in the order they started ------------------
+
+
+def _with_host_wait(monkeypatch, seconds: float = 300.0) -> float:
+    """Hermes' wait for a compaction to make progress (its default is 300 s); the chain may use it
+    less HOST_WAIT_MARGIN_S."""
+    monkeypatch.setattr(_MODULE, "_host_compaction_wait_s", lambda: seconds, raising=False)
+    return seconds - _cp.HOST_WAIT_MARGIN_S
+
+
+def _side_by_side(clock, entry, chains: int, n_messages: int, *, stagger: float = 1.0, **config):
+    """``chains`` checkpoints of one process, the k-th starting ``k * stagger`` seconds after the
+    first (so the order they start in is fixed). Returns (outcomes, start times, end times, providers)."""
+    config = {"chunk_chars": 1_000, "budget_s": 60, **config}
+    providers = [_provider(entry.dispatch, f"session-{i}", **config) for i in range(chains)]
+    origin = clock.now
+    started = [0.0] * chains
+    ended = [0.0] * chains
+
+    def job(i: int):
+        def run():
+            clock.sleep(i * stagger)
+            started[i] = clock.now
+            try:
+                return providers[i].on_pre_compress(_transcript(n_messages, f"c{i}x"), require_checkpoint=True)
+            finally:
+                ended[i] = clock.now
+
+        return run
+
+    outcomes = clock.run_together(*[job(i) for i in range(chains)], timeout=300.0)
+    return outcomes, [s - origin for s in started], [e - origin for e in ended], providers
+
+
+def _booked_for(entry, tag: str, session: str) -> list[float]:
+    """When ctx booked the writes of one checkpoint: its parts carry its transcript (``tag``), its
+    manifest and head its session."""
+    return [
+        t
+        for args, t in entry.booked_writes
+        if tag in args["content"] or (args.get("metadata") or {}).get("root_session_id") == session
+    ]
+
+
+def _writes_of(entry, chain: int) -> list[float]:
+    """The booked writes of the ``chain``-th checkpoint of ``_side_by_side``."""
+    return _booked_for(entry, f"c{chain}x", f"session-{chain}")
+
+
+def _completed(outcomes) -> list[int]:
+    return [i for i, o in enumerate(outcomes) if isinstance(o, str) and "ctx checkpoint head:" in o]
+
+
+@pytest.mark.parametrize(
+    "chains, n_messages, max_parts",
+    [
+        (2, 8, 3),  # 2 x 10 writes, five per window: four windows
+        (12, 6, None),  # 12 x 8 writes, 82 per window: two windows
+        (4, 20, None),  # 4 x 22
+        (20, 6, None),  # 20 x 8
+    ],
+)
+def test_chains_whose_writes_fit_the_host_wait_together_all_complete(clock, monkeypatch, chains, n_messages, max_parts):
+    """Each chain planned its windows from the writes booked when it started; the writes the
+    chains beside it would make were not in the plan, and every chain whose next slot came after
+    its deadline stopped: with max_parts 3 two chains of ten writes both failed, with the defaults
+    four of twelve chains of eight writes. The plan holds the planned writes of the chains that
+    started before now, so all of them end within Hermes' wait."""
+    limit = _with_host_wait(monkeypatch)
+    entry = EntryDouble(clock)
+    config = {"max_parts": max_parts} if max_parts else {}
+    window_writes = (max_parts or _cp.DEFAULT_MAX_PARTS) + 2
+
+    outcomes, _started, ended, providers = _side_by_side(clock, entry, chains, n_messages, **config)
+
+    assert _completed(outcomes) == list(range(chains)), [str(o)[:120] for o in outcomes]
+    assert max(ended) <= limit, ended
+    assert entry.max_booked_in_window() <= window_writes
+    assert entry.max_errors_in_row == 0
+    assert all(p._chain().entry.planned_runs == 0 for p in providers)
+
+
+def test_without_a_host_wait_the_deadline_holds_the_windows_of_the_chains_before(clock):
+    """No wait of the host bounds them: three chains of ten writes at five per window need six
+    windows together, and the last one's deadline holds them (its own budget is one window)."""
+    entry = EntryDouble(clock)
+    outcomes, _started, ended, providers = _side_by_side(clock, entry, 3, 8, max_parts=3)
+
+    assert _completed(outcomes) == [0, 1, 2], [str(o)[:120] for o in outcomes]
+    assert entry.max_booked_in_window() <= 5
+    assert ended[2] > 5 * WINDOW_S  # the sixth window
+    assert providers[2]._last_chain_receipt.deadline >= providers[2]._last_chain_receipt.duration_s
+
+
+def test_the_chains_are_served_in_the_order_they_started(clock):
+    """Five chains of ten writes at five per window: every chain's writes come after all writes of
+    the chain that started before it, and they end in the order they started. Before, the slots
+    went to whichever thread came first."""
+    entry = EntryDouble(clock)
+    outcomes, started, ended, _providers = _side_by_side(clock, entry, 5, 8, max_parts=3)
+
+    assert _completed(outcomes) == [0, 1, 2, 3, 4], [str(o)[:120] for o in outcomes]
+    writes = [_writes_of(entry, i) for i in range(5)]
+    assert all(len(w) == 10 for w in writes), [len(w) for w in writes]
+    for before, after in itertools.pairwise(writes):
+        assert max(before) < min(after), (max(before), min(after))
+    assert ended == sorted(ended) and started == sorted(started)
+
+
+@pytest.mark.parametrize("chains, n_messages, complete", [(3, 8, 2), (10, 20, 1)])
+def test_chains_that_do_not_fit_the_host_wait_together_stop_early_and_the_first_ones_complete(
+    clock, monkeypatch, chains, n_messages, complete
+):
+    """Three chains of ten writes at five per window need six windows, and Hermes waits for five:
+    the two that started first complete, the third stops at once — before its first write, with
+    the reason — instead of every chain failing at its deadline. Its next attempt goes through."""
+    limit = _with_host_wait(monkeypatch)
+    entry = EntryDouble(clock)
+
+    outcomes, started, ended, providers = _side_by_side(clock, entry, chains, n_messages, max_parts=3)
+
+    assert _completed(outcomes) == list(range(complete)), [str(o)[:120] for o in outcomes]
+    for i in range(complete, chains):
+        stopped = outcomes[i]
+        assert isinstance(stopped, CtxCheckpointError), stopped
+        assert "other checkpoints of this Hermes process started first" in str(stopped)
+        assert "Hermes' wait of 300s" in str(stopped) and "next attempt continues" in str(stopped)
+        assert ended[i] - started[i] < 5.0, (i, started[i], ended[i])  # early, not at its deadline
+        assert _writes_of(entry, i) == []
+    assert max(ended) <= limit
+    assert entry.max_booked_in_window() <= 5 and entry.max_errors_in_row == 0
+    assert providers[0]._chain().entry.planned_runs == 0
+
+    # The next attempt of a stopped one, once the others are done, completes.
+    again = providers[complete].on_pre_compress(_transcript(n_messages, f"c{complete}x"), require_checkpoint=True)
+    assert "ctx checkpoint head:" in again
+
+
+def test_a_chain_too_long_for_the_host_wait_behind_another_keeps_what_it_saved(clock, monkeypatch):
+    """A chain that cannot end within Hermes' wait even alone (30 writes, five per window) waits for
+    the short chain that started before it, saves the parts that fit and stops; its next attempt
+    has ctx confirm those parts and writes the rest."""
+    _with_host_wait(monkeypatch)
+    entry = EntryDouble(clock)
+    short = _provider(entry.dispatch, "session-short", chunk_chars=1_000, max_parts=3, budget_s=60)
+    long_ = _provider(entry.dispatch, "session-long", chunk_chars=1_000, max_parts=3, budget_s=60)
+    long_messages = _transcript(28, "l")
+
+    def later():
+        clock.sleep(1.0)
+        return long_.on_pre_compress(long_messages, require_checkpoint=True)
+
+    outcomes = clock.run_together(lambda: short.on_pre_compress(_transcript(3, "s"), require_checkpoint=True), later)
+
+    assert "ctx checkpoint head:" in outcomes[0]
+    assert isinstance(outcomes[1], CtxCheckpointError) and "Hermes waits 300s" in str(outcomes[1]), outcomes[1]
+    saved = len(_booked_for(entry, "llllllllll", "session-long"))
+    assert saved == 20, saved  # windows two to five
+
+    receipt_text = long_.on_pre_compress(long_messages, require_checkpoint=True)
+    assert "ctx checkpoint head:" in receipt_text
+    receipt = long_._last_chain_receipt
+    assert receipt.reused == saved and receipt.writes == 30 - saved
+
+
+def test_a_refused_write_keeps_its_run_s_place_in_the_order(clock):
+    """ctx refuses the first chain's first write once (other writers of the key): that write is
+    still to come, so the chain that started after it writes nothing before the first one is done."""
+    entry = EntryDouble(clock)
+    left = {"refusals": 1}
+
+    def refuse(args: dict) -> bool:
+        if left["refusals"] and "c0x" in args["content"]:
+            left["refusals"] -= 1
+            return True
+        return False
+
+    entry.refuse = refuse
+    outcomes, _started, _ended, providers = _side_by_side(clock, entry, 2, 3, max_parts=3, budget_s=600)
+
+    assert _completed(outcomes) == [0, 1], [str(o)[:120] for o in outcomes]
+    assert entry.refused == 1
+    assert max(_writes_of(entry, 0)) < min(_writes_of(entry, 1))
+    assert providers[0]._chain().entry.planned_runs == 0
+
+
+@pytest.mark.parametrize("chains", [3, 5])
+def test_more_chains_at_the_write_limit_still_show_the_entry_no_more_than_two_errors_in_a_row(clock, chains):
+    entry = EntryDouble(clock, write_limit=3)
+    entry.keep_full = True
+
+    outcomes, _started, _ended, providers = _side_by_side(clock, entry, chains, 4, stagger=0.0, budget_s=600)
+
+    assert all(isinstance(o, CtxCheckpointError) and "rate-limited" in str(o) for o in outcomes), outcomes
+    assert entry.max_errors_in_row <= _cp.MAX_RATE_REFUSALS < _host_breaker_threshold(), entry.log
+    assert providers[0]._chain().entry.planned_runs == 0
+
+
+def test_a_call_of_a_later_chain_gives_way_to_a_waiting_call_of_an_earlier_one():
+    """At the limit of calls in flight the next free place goes to the run that started first."""
+    state = _cp.EntryState()
+    early, _ = state.register(5, lambda: 100.0, now=0.0, window_writes=5)
+    late, _ = state.register(5, lambda: 100.0, now=0.0, window_writes=5)
+    first = state.admit(write=False, window_writes=5, now=0.0, reservation=late).ticket
+    second = state.admit(write=False, window_writes=5, now=0.0, reservation=late).ticket
+    assert first is not None and second is not None
+    assert state.admit(write=False, window_writes=5, now=0.1, reservation=early).ticket is None  # waits
+    state.release(first, error=False, now=0.2)
+
+    assert state.admit(write=False, window_writes=5, now=0.3, reservation=late).ticket is None  # gives way
+    assert state.admit(write=False, window_writes=5, now=0.3, reservation=early).ticket is not None
+
+
+def _with_foreign_writes(entry, count: int) -> None:
+    """Other writers of the key (another Hermes process, the memory mirror) booked ``count`` writes
+    in ctx's window just now; they age out of it after 60 s."""
+    entry.booked.extend([entry.clock.now] * count)
+
+
+def test_refusals_of_two_chains_in_a_row_stop_neither_of_them(clock, monkeypatch):
+    """Other writers hold 90 of ctx's 100 writes when two chains of twenty writes start. Each chain
+    is refused once, so the entry has given two error answers in a row; the shared count stopped
+    both — one at once ("refused twice in a row" after its own first refusal), the other when it
+    woke for the next window. Before a write at that limit a chain now sends one read alone; its
+    answer ends the run, the writes go on in the next window, and both complete."""
+    _with_host_wait(monkeypatch)
+    entry = EntryDouble(clock)
+    _with_foreign_writes(entry, 90)
+
+    outcomes, _started, _ended, providers = _side_by_side(clock, entry, 2, 18, stagger=0.0)
+
+    assert _completed(outcomes) == [0, 1], [str(o)[:160] for o in outcomes]
+    assert entry.refused >= 2
+    assert entry.max_errors_in_row <= _cp.MAX_RATE_REFUSALS, entry.log
+    assert providers[0]._chain().entry.planned_runs == 0
+
+
+def test_a_chain_waiting_behind_a_refused_one_follows_its_delay_within_the_host_wait(clock, monkeypatch):
+    """Other writers hold 97 of ctx's 100: the first chain (five writes, five per window) is refused
+    after three and gets one more window; the second planned its deadline behind the first one's
+    plan without that window and stopped at it, although Hermes' wait would have held it."""
+    limit = _with_host_wait(monkeypatch)
+    entry = EntryDouble(clock)
+    _with_foreign_writes(entry, 97)
+
+    outcomes, _started, ended, _providers = _side_by_side(clock, entry, 2, 3, max_parts=3)
+
+    assert _completed(outcomes) == [0, 1], [str(o)[:160] for o in outcomes]
+    assert entry.refused >= 1
+    assert max(ended) <= limit
+    assert entry.max_errors_in_row <= _cp.MAX_RATE_REFUSALS
+
+
+def test_a_chain_after_one_that_cannot_finish_counts_only_what_that_one_can_still_send(clock, monkeypatch):
+    """A chain of 40 writes at five per window cannot end within Hermes' wait and stops at its
+    deadline; a chain of ten writes that starts 100 s later counted all of its outstanding writes,
+    found its own turn behind its own limit and stopped at once, although the windows after the
+    long chain's deadline were free for it."""
+    _with_host_wait(monkeypatch)
+    entry = EntryDouble(clock)
+    long_ = _provider(entry.dispatch, "session-long", chunk_chars=1_000, max_parts=3, budget_s=60)
+    short = _provider(entry.dispatch, "session-short", chunk_chars=1_000, max_parts=3, budget_s=60)
+
+    def later():
+        clock.sleep(100.0)
+        return short.on_pre_compress(_transcript(8, "s"), require_checkpoint=True)
+
+    outcomes = clock.run_together(lambda: long_.on_pre_compress(_transcript(38, "l"), require_checkpoint=True), later)
+
+    assert isinstance(outcomes[0], CtxCheckpointError) and "Hermes waits 300s" in str(outcomes[0]), outcomes[0]
+    assert isinstance(outcomes[1], str) and "ctx checkpoint head:" in outcomes[1], outcomes[1]
+    assert entry.max_booked_in_window() <= 5
+
+
+def test_a_run_plans_its_deadline_behind_the_planned_writes_of_the_runs_before_it():
+    """The plan of a run that starts while another one has fifteen writes planned (five per window)
+    holds the three windows those take before its own: its deadline is four windows out."""
+    writer = _cp.ChainWriter(client=None, max_parts=3)
+    writer.entry = _cp.EntryState()
+    first = writer.new_run(started=0.0, deadline=60.0, budget_s=60.0, planned_writes=15)
+    second = writer.new_run(started=0.0, deadline=60.0, budget_s=60.0, planned_writes=5)
+
+    assert first.deadline == 60.0 + 2 * (WINDOW_S + 1.0)
+    assert second.planned_windows == 4
+    assert second.deadline == 60.0 + 3 * (WINDOW_S + 1.0)
+    first.close()
+    third = writer.new_run(started=0.0, deadline=60.0, budget_s=60.0, planned_writes=5)
+    assert third.planned_windows == 2  # behind the second one only
+
+
+# -- M1: a call that raises leaves nothing at the entry ------------------------------------------
+
+
+@pytest.mark.parametrize("exc_type", [RuntimeError, MemoryError, KeyboardInterrupt, SystemExit])
+def test_a_call_that_raises_in_the_dispatch_leaves_the_entry_free_for_the_next_checkpoint(clock, exc_type):
+    """The dispatch raises on the chain's first write (inside the bounded call). The entry must end
+    with no call in flight, no planned writes of the failed chain, the failure counted as one
+    error answer and the write's slot kept (ctx may have booked it); the next checkpoint of the
+    process runs through. RuntimeError and MemoryError reach the writer as dispatch failures,
+    KeyboardInterrupt and SystemExit as themselves."""
+    entry = EntryDouble(clock)
+    left = {"raise": 1}
+
+    def dispatch(name: str, args: dict, **kwargs) -> str:
+        if name.endswith("__store") and left["raise"]:
+            left["raise"] = 0
+            raise exc_type("raised inside the call")
+        return entry.dispatch(name, args, **kwargs)
+
+    one = _provider(dispatch, "session-one", chunk_chars=1_000, max_parts=3, budget_s=600)
+    with pytest.raises(CtxCheckpointError if issubclass(exc_type, Exception) else exc_type):
+        one.on_pre_compress(_transcript(3, "a"), require_checkpoint=True)
+    state = one._chain().entry
+    assert (state.in_flight, state.writes_in_flight, state.planned_runs) == (0, 0, 0)
+    assert state.errors_in_row == 1
+    assert state.writes_in_window(clock.now) == 1
+
+    two = _provider(dispatch, "session-two", chunk_chars=1_000, max_parts=3, budget_s=600)
+    assert "ctx checkpoint head:" in two.on_pre_compress(_transcript(3, "b"), require_checkpoint=True)
+    assert (state.in_flight, state.writes_in_flight, state.planned_runs, state.errors_in_row) == (0, 0, 0, 0)
+
+
+def test_a_failed_chain_leaves_no_planned_writes_for_the_next_one(clock):
+    """A chain stopped by ctx's refusals ends its run: the next checkpoint plans one window, as on
+    an entry nobody used, and does not wait for writes that will never be sent."""
+    entry = EntryDouble(clock, write_limit=3)
+    entry.keep_full = True
+    one = _provider(entry.dispatch, "session-one", chunk_chars=1_000, max_parts=3, budget_s=60)
+    with pytest.raises(CtxCheckpointError, match="refused twice in a row"):
+        one.on_pre_compress(_transcript(20, "a"), require_checkpoint=True)
+    entry.keep_full, entry.write_limit = False, 100
+    slept = len(clock.slept)
+
+    two = _provider(entry.dispatch, "session-two", chunk_chars=1_000, max_parts=3, budget_s=60)
+    started = clock.now
+    two.on_pre_compress(_transcript(3, "b"), require_checkpoint=True)
+
+    assert len(clock.slept) == slept
+    assert two._last_chain_receipt.deadline == started + 60.0
+    assert two._chain().entry.planned_runs == 0
+
+
+# -- L2: a read at the limit ------------------------------------------------------------------------
+
+
+def test_a_read_sent_at_the_limit_that_fails_ends_its_chain(clock):
+    """After two error answers in a row no write goes out, but a read still does, alone: it is how
+    a later checkpoint learns that the entry answers again. When that read fails, its chain sends
+    nothing more (the head search is the first call of every chain and its failure ends it)."""
+    entry = EntryDouble(clock, write_limit=3)
+    entry.keep_full = True
+    one = _provider(entry.dispatch, "session-one", chunk_chars=1_000, budget_s=600)
+    with pytest.raises(CtxCheckpointError, match="refused twice in a row"):
+        one.on_pre_compress(_transcript(4, "a"), require_checkpoint=True)
+    assert one._chain().entry.errors_in_row == _cp.MAX_RATE_REFUSALS
+    calls = len(entry.log)
+    entry._search = lambda args: {"error": "search backend unavailable"}
+
+    two = _provider(entry.dispatch, "session-two", chunk_chars=1_000, budget_s=600)
+    with pytest.raises(CtxCheckpointError, match="head search failed"):
+        two.on_pre_compress(_transcript(4, "b"), require_checkpoint=True)
+
+    assert [(tool, answer) for _thread, tool, answer, _t in entry.log[calls:]] == [("search", "error")]
+    assert one._chain().entry.errors_in_row == _cp.MAX_RATE_REFUSALS + 1
+
+
+# -- L1: the key follows Hermes' own connection identity ----------------------------------------
+
+
+_SAME_CONNECTION = {
+    "include order": (
+        {"url": "https://c.example/mcp", "tools": {"include": ["search", "store"]}},
+        {"url": "https://c.example/mcp", "tools": {"include": ["store", "search"]}},
+    ),
+    "ssl_verify true named": ({"url": "https://c.example/mcp"}, {"url": "https://c.example/mcp", "ssl_verify": True}),
+    "empty env": ({"url": "https://c.example/mcp"}, {"url": "https://c.example/mcp", "env": {}}),
+    "empty args": ({"command": "ctx-mcp"}, {"command": "ctx-mcp", "args": []}),
+    "strict_redirect_headers false": (
+        {"url": "https://c.example/mcp"},
+        {"url": "https://c.example/mcp", "strict_redirect_headers": False},
+    ),
+    "another tools flag": (
+        {"url": "https://c.example/mcp", "tools": {"include": ["store"]}},
+        {"url": "https://c.example/mcp", "tools": {"include": ["store"], "resources": False}},
+    ),
+    "a timeout": ({"url": "https://c.example/mcp", "timeout": 30}, {"url": "https://c.example/mcp", "timeout": 300}),
+}
+_OTHER_CONNECTION = {
+    "another url": ({"url": "https://c.example/mcp"}, {"url": "https://d.example/mcp"}),
+    "another header": (
+        {"url": "https://c.example/mcp", "headers": {"Authorization": "Bearer one-0123456789"}},
+        {"url": "https://c.example/mcp", "headers": {"Authorization": "Bearer two-0123456789"}},
+    ),
+    "ssl_verify off": ({"url": "https://c.example/mcp"}, {"url": "https://c.example/mcp", "ssl_verify": False}),
+    "another include": (
+        {"url": "https://c.example/mcp", "tools": {"include": ["store"]}},
+        {"url": "https://c.example/mcp", "tools": {"include": ["search"]}},
+    ),
+    "strict_redirect_headers on": (
+        {"url": "https://c.example/mcp"},
+        {"url": "https://c.example/mcp", "strict_redirect_headers": True},
+    ),
+}
+
+
+def _key_and_entry(home: Path, entry: dict) -> tuple[tuple, dict]:
+    from hermes_cli.config import load_config
+
+    _write_entry(home, **entry) if "url" in entry else _write_command_entry(home, entry)
+    provider = CtxCheckpointMemoryProvider(config={})
+    provider.initialize("s", platform="cli", hermes_home=str(home), warning_callback=lambda message: None)
+    return provider._entry_key(), load_config()["mcp_servers"]["ctx"]
+
+
+def _write_command_entry(home: Path, entry: dict) -> None:
+    config = {"mcp_servers": {"ctx": entry}, "memory": {"provider": "ctx_checkpoint"}}
+    (home / "config.yaml").write_text(json.dumps(config), encoding="utf-8")
+
+
+@pytest.mark.parametrize("pair", [*_SAME_CONNECTION, *_OTHER_CONNECTION])
+def test_two_entries_share_a_state_exactly_when_hermes_sees_one_connection(_isolated_hermes_home, pair):
+    """The key used the entry's raw fields: entries Hermes treats as one connection (one breaker, one
+    RPC lock) got two states, so their chains together could show it four error answers in a row."""
+    from tools.mcp_tool_registration import _connection_identity
+
+    a, b = {**_SAME_CONNECTION, **_OTHER_CONNECTION}[pair]
+    key_a, effective_a = _key_and_entry(_isolated_hermes_home, a)
+    key_b, effective_b = _key_and_entry(_isolated_hermes_home, b)
+
+    hermes_same = _connection_identity(effective_a) == _connection_identity(effective_b)
+    assert hermes_same is (pair in _SAME_CONNECTION)
+    assert (key_a == key_b) is hermes_same, (key_a, key_b)
+
+
+def test_without_hermes_connection_identity_the_key_is_the_raw_entry_as_before(_isolated_hermes_home, monkeypatch):
+    """A Hermes without ``_connection_identity``: the raw connection fields, the key 0.17.0 used
+    before it followed Hermes' function."""
+    import hashlib
+
+    import tools.mcp_tool_registration as registration
+
+    monkeypatch.delattr(registration, "_connection_identity")
+    a, b = _SAME_CONNECTION["include order"]
+    key_a, _ = _key_and_entry(_isolated_hermes_home, a)
+    key_b, _ = _key_and_entry(_isolated_hermes_home, b)
+
+    assert key_a != key_b
+    raw = json.dumps({"url": a["url"], "tools": a["tools"]}, sort_keys=True, ensure_ascii=False, default=str)
+    assert key_a == ("mcp", "ctx", hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()[:32], "")

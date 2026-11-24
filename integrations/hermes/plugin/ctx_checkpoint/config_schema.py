@@ -20,7 +20,9 @@ DOCS_URL = "https://github.com/GottZ/ctx/blob/root/integrations/hermes/plugin/ct
 # by the terminal setup and the web dashboard only. "desktop_only" fields are left out of
 # get_config_schema(): the web dashboard sends every field with the value it loaded, so a value
 # changed elsewhere in the meantime would be written back unnoticed (terminal setup asks for the
-# operating mode on its own, after the connection test).
+# operating mode on its own, after the connection test). For the same reason the grant
+# (mcp_grant) is offered there as keep/on/off, "keep" by default, and the terminal asks for it on
+# its own after the operating mode.
 FIELDS: tuple[dict, ...] = (
     {
         "key": "ctx_url",
@@ -108,7 +110,8 @@ FIELDS: tuple[dict, ...] = (
             "On: the checkpoint's ctx calls go through Hermes' call_mcp with the checkpoint's own time limit, so a "
             "call it gives up on ends in Hermes as well instead of holding the ctx server entry until the next "
             "checkpoint's first call fails (writes plugins.entries.ctx_checkpoint.mcp_allowlist; the plugin reaches "
-            "the same ctx server either way)."
+            "the same ctx server either way). Only for the MCP transport: with transport rest the checkpoint does "
+            "not call ctx through Hermes."
         ),
         "default": False,
         "group": "Connection",

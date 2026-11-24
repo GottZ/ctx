@@ -113,7 +113,8 @@ def _negotiate_checkpoint_api(host_api: int) -> int:
 
 # The fields of an mcp_servers entry that make it one connection in Hermes (route and what
 # authenticates or secures it: tools/mcp_tool_registration.py _connection_identity with
-# tools/mcp_schema_cache.py config_fingerprint); the key of the checkpoint's shared state (#299).
+# tools/mcp_schema_cache.py config_fingerprint); the key of the checkpoint's shared state (#299)
+# on a Hermes without that function (``_connection_identity_of``).
 _CONNECTION_IDENTITY_KEYS = (
     "command",
     "args",
@@ -407,6 +408,33 @@ def _require_writable_config() -> None:
         raise ConfigReadOnlyError("this Hermes install is package-managed; config.yaml is read-only")
 
 
+_KEEP = "keep"
+"""The grant's choice on the dashboard and terminal (``mcp_grant``): leave config.yaml as it is."""
+
+
+def _allowlist_of(config: dict[str, Any], plugin_id: str) -> list[Any]:
+    """``plugins.entries.<plugin_id>.mcp_allowlist`` as setup may change it: a list (absent sections
+    read as an empty one). Raises ``ValueError`` when the list or a section above it is there but is
+    not of the shape Hermes reads (``PluginContext._mcp_allowlist`` grants nothing for it): the
+    merge would replace it, so setup leaves it to the operator (GottZ/ctx#299)."""
+    node: Any = config
+    path = ["plugins", "entries", plugin_id, "mcp_allowlist"]
+    for depth, key in enumerate(path):
+        value = node.get(key) if isinstance(node, dict) else None
+        if value is None:
+            return []
+        shape_ok = isinstance(value, list) if depth == len(path) - 1 else isinstance(value, dict)
+        if not shape_ok:
+            dotted = ".".join(path[: depth + 1])
+            raise ValueError(
+                f"{dotted} in config.yaml is a {type(value).__name__}, not a "
+                f"{'list' if depth == len(path) - 1 else 'mapping'}; setup does not replace it. Change it in "
+                f"config.yaml (Hermes reads mcp_allowlist as a list of server names). Nothing was saved."
+            )
+        node = value
+    return list(node)
+
+
 def _write_setup_config(
     settings: dict[str, Any],
     *,
@@ -459,11 +487,8 @@ def _write_setup_config(
         changes["compression"] = {"checkpoint_required": bool(checkpoint_required)}
     preserve: set[tuple[str, ...]] = set()
     if mcp_grant is not None:
-        plugins = config.get("plugins")
-        entries = plugins.get("entries") if isinstance(plugins, dict) else None
-        plugin_entry = entries.get(plugin_id) if isinstance(entries, dict) else None
-        listed = plugin_entry.get("mcp_allowlist") if isinstance(plugin_entry, dict) else None
-        allowlist = [item for item in listed if str(item) != name] if isinstance(listed, list) else []
+        listed = _allowlist_of(config, plugin_id)
+        allowlist = [item for item in listed if str(item) != name]
         if mcp_grant:
             allowlist.append(name)
         changes["plugins"] = {"entries": {plugin_id: {"mcp_allowlist": allowlist}}}
@@ -649,6 +674,26 @@ def _registered_tool(name: str) -> bool:
         return False
 
 
+def _connection_identity_of(entry: dict[str, Any]) -> Any:
+    """What makes the ``mcp_servers`` entry one connection in Hermes (GottZ/ctx#299): Hermes' own
+    ``tools/mcp_tool_registration.py`` ``_connection_identity`` — the comparison before one profile
+    adopts another profile's live connection (one breaker, one RPC lock), with Hermes' normalisation
+    (tool filters sorted, empty ``env``/``args`` as absent, ``ssl_verify`` true unless set,
+    ``strict_redirect_headers`` as a flag, other ``tools`` keys and timeouts not part of it). On a
+    Hermes without that function, or when it fails, the entry's raw connection fields
+    (``_CONNECTION_IDENTITY_KEYS``), as before. Only digested by the caller, never logged."""
+    try:
+        from tools.mcp_tool_registration import _connection_identity
+    except Exception:
+        _connection_identity = None
+    if callable(_connection_identity) and entry:
+        try:
+            return list(_connection_identity(dict(entry)))
+        except Exception:
+            logger.debug("ctx_checkpoint: Hermes' connection identity of the server entry failed", exc_info=True)
+    return {key: entry[key] for key in _CONNECTION_IDENTITY_KEYS if key in entry}
+
+
 def _mcp_grant(config: dict[str, Any], plugin_id: str, server: str) -> bool:
     """Whether ``plugins.entries.<plugin_id>.mcp_allowlist`` lists ``server``, read as Hermes reads it
     (``PluginContext._mcp_allowlist``: a list, anything else grants nothing)."""
@@ -772,8 +817,7 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
             return super()._entry_key()
         name = self._server_name()
         entry = _configured_server(_effective_config(), name)
-        identity = {key: entry[key] for key in _CONNECTION_IDENTITY_KEYS if key in entry}
-        canonical = json.dumps(identity, sort_keys=True, ensure_ascii=False, default=str)
+        canonical = json.dumps(_connection_identity_of(entry), sort_keys=True, ensure_ascii=False, default=str)
         fingerprint = hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()[:32] if entry else ""
         oauth = str(entry.get("auth") or "").strip().lower() == "oauth"
         return ("mcp", name, fingerprint, str(self._hermes_home) if oauth else "")
@@ -1080,6 +1124,14 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
                 continue
             if spec["key"] == "ctx_api_key" and mode not in ("new", "managed"):
                 continue
+            if spec["key"] == "mcp_grant":
+                if self.transport == "rest":
+                    continue  # the checkpoint does not call ctx through Hermes there (#299)
+                # The dashboard sends every field with the value it loaded: only an explicit on or
+                # off changes the grant, so a grant changed elsewhere meanwhile is not written back.
+                fields.append({**_legacy_field(spec, current.get("mcp_grant")), "choices": [_KEEP, "on", "off"]})
+                fields[-1]["default"] = _KEEP
+                continue
             fields.append(_legacy_field(spec, current.get(spec["key"])))
         return fields
 
@@ -1189,10 +1241,21 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
 
     def _grant_change(self, values: dict[str, Any], server: str) -> bool | None:
         """The ``mcp_grant`` the form or the terminal submitted for ``server``, ``None`` when it was not
-        submitted or equals what config.yaml grants now (nothing to write)."""
+        submitted, is ``keep``, or equals what config.yaml grants now (nothing to write). Raises
+        ``ValueError`` (nothing is written) for a change on ``transport: rest``, where the grant has
+        no effect, and when ``plugins.entries.<id>.mcp_allowlist`` or a section above it is there
+        but not of the shape Hermes reads (setup does not overwrite a configuration it cannot read)."""
+        if str(values.get("mcp_grant", "")).strip().lower() == _KEEP:
+            return None
         wanted = _switch_value(values, "mcp_grant")
         if wanted is None or wanted == _mcp_grant(_effective_config(), self._plugin_id, server):
             return None
+        if self.transport == "rest":
+            raise ValueError(
+                "The grant for Hermes' call_mcp applies to the MCP transport only; with transport rest the checkpoint "
+                "calls ctx without Hermes' MCP client. Nothing was saved."
+            )
+        _allowlist_of(_read_user_config(), self._plugin_id)
         return wanted
 
     def post_setup(self, hermes_home: str, config: dict[str, Any]) -> None:
@@ -1207,7 +1270,8 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         name, api_key = self._server_name(), ""
         try:
             _require_writable_config()
-            values, api_key = _prompt_setup(self.get_config_schema())
+            schema = self.get_config_schema()
+            values, api_key = _prompt_setup([field for field in schema if field["key"] != "mcp_grant"])
             settings = _normalize_setup_values(values, self._effective_settings())
             name = settings["mcp_server"]
             config = _read_user_config()
@@ -1230,7 +1294,8 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
                 return
             print(f"\n  Connection test passed: {test.detail}" if test.ok else f"\n  {test.detail}")
             switch = self._prompt_mode(offer=bool(test.ok))
-            grant = self._grant_change(values, name)
+            grant_fields = [field for field in schema if field["key"] == "mcp_grant"]
+            grant = self._grant_change(self._prompt_grant(grant_fields, name), name) if grant_fields else None
             if api_key:
                 from hermes_cli.config import save_env_value
 
@@ -1259,12 +1324,15 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         print(f"  Memory features: {'on' if settings['memory'] else 'off (checkpoints only)'}")
         print(f"  Operating mode: {'required' if required else 'best effort'}")
         granted = _mcp_grant(_effective_config(), self._plugin_id, name)
-        unused = (
-            " (granted, but this Hermes offers the plugin no call_mcp: no effect)" if self._call_mcp is None else ""
-        )
+        if self.transport == "rest":
+            unused = "transport rest: the checkpoint calls ctx without Hermes' MCP client, the grant has no effect"
+        elif self._call_mcp is None:
+            unused = "granted, but this Hermes offers the plugin no call_mcp: no effect"
+        else:
+            unused = ""
         print(f"  Hermes ends a ctx call the checkpoint gives up on: {'yes' if granted and not unused else 'no'}")
         if granted and unused:
-            print(f"   {unused.strip()}")
+            print(f"   ({unused})")
         if api_key:
             print(f"  API key saved to .env as {SETUP_API_KEY_ENV}")
         print(f"  `hermes ctx_checkpoint status` (or `hermes mcp test {name}`) checks the connection;")
@@ -1284,6 +1352,16 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         answers, _key = _prompt_setup([_legacy_field(_MODE_FIELD, current)])
         wanted = _switch_value(answers, "checkpoint_required")
         return None if wanted is None or wanted == current else wanted
+
+    def _prompt_grant(self, fields: list[dict[str, Any]], server: str) -> dict[str, Any]:
+        """Explain the grant for Hermes' call_mcp (GottZ/ctx#299), name its current state and ask:
+        keep (the default), on or off. Returns the answer as form values."""
+        granted = _mcp_grant(_effective_config(), self._plugin_id, server)
+        print(f"\n  {fields[0]['label']}:")
+        print(f"    {fields[0]['description']}")
+        print(f"    Now: {'on' if granted else 'off'} (plugins.entries.{self._plugin_id}.mcp_allowlist).")
+        answers, _key = _prompt_setup(fields)
+        return answers
 
 
 def register(ctx) -> None:

@@ -525,10 +525,13 @@ def _host_allowlist() -> list[str]:
     return PluginContext._mcp_allowlist("ctx_checkpoint")
 
 
-def test_the_dashboard_and_terminal_schema_offer_the_grant_with_its_current_value(hermes_home):
+def test_the_dashboard_and_terminal_schema_offer_the_grant_as_keep_on_off(hermes_home):
+    """The dashboard sends every field with the value it loaded: the grant is offered as keep (the
+    default), on and off, so a form loaded before the grant changed elsewhere does not write the
+    old value back (the operating mode is left out of that form for the same reason)."""
     fields = {f["key"]: f for f in CtxCheckpointMemoryProvider(config={}).get_config_schema()}
     grant = fields["mcp_grant"]
-    assert grant["choices"] == ["off", "on"] and grant["default"] == "off"
+    assert grant["choices"] == ["keep", "on", "off"] and grant["default"] == "keep"
     assert "call_mcp" in grant["description"] and "mcp_allowlist" in grant["description"]
 
     _write_config(
@@ -539,7 +542,27 @@ def test_the_dashboard_and_terminal_schema_offer_the_grant_with_its_current_valu
         },
     )
     fields = {f["key"]: f for f in CtxCheckpointMemoryProvider(config={}).get_config_schema()}
-    assert fields["mcp_grant"]["default"] == "on"
+    assert fields["mcp_grant"]["default"] == "keep"
+
+
+def test_a_dashboard_form_loaded_before_the_grant_was_taken_back_does_not_restore_it(hermes_home):
+    _write_config(
+        hermes_home,
+        {
+            "mcp_servers": {"ctx": {"url": "https://ctx.example.test/mcp", "auth": "oauth"}},
+            "plugins": {"entries": {"ctx_checkpoint": {"mcp_allowlist": ["ctx"]}}},
+        },
+    )
+    provider = CtxCheckpointMemoryProvider(config={})
+    loaded = {f["key"]: f.get("default") for f in provider.get_config_schema() if not f.get("secret")}
+    # Taken back on another surface (Desktop, config.yaml) while the dashboard form is open.
+    provider.write_config_fields({"mcp_grant": False}, str(hermes_home))
+    assert _host_allowlist() == []
+
+    provider.save_config({**loaded, "sensitivity": "personal"}, str(hermes_home))
+
+    assert _host_allowlist() == []
+    assert _read_config(hermes_home)["memory"]["ctx_checkpoint"]["sensitivity"] == "personal"
 
 
 def test_the_dashboard_form_writes_and_takes_back_the_grant_what_hermes_reads(hermes_home):
@@ -555,6 +578,9 @@ def test_the_dashboard_form_writes_and_takes_back_the_grant_what_hermes_reads(he
     provider.save_config({"ctx_url": "https://ctx.example.test/mcp", "mcp_grant": "on"}, str(hermes_home))
     entry = _read_config(hermes_home)["plugins"]["entries"]["ctx_checkpoint"]
     assert entry == {"mcp_allowlist": ["other", "ctx"], "settings": {"budget_s": 90}}
+    assert _host_allowlist() == ["other", "ctx"]
+
+    provider.save_config({"ctx_url": "https://ctx.example.test/mcp", "mcp_grant": "keep"}, str(hermes_home))
     assert _host_allowlist() == ["other", "ctx"]
 
     provider.save_config({"ctx_url": "https://ctx.example.test/mcp", "mcp_grant": "off"}, str(hermes_home))
@@ -581,20 +607,38 @@ def test_the_desktop_form_declares_reads_and_writes_the_grant(hermes_home):
     assert provider.read_config_fields(str(hermes_home))["values"]["mcp_grant"] is True
 
 
-def test_the_terminal_setup_asks_for_the_grant_and_writes_it(hermes_home, monkeypatch, capsys):
-    # ctx_url, sensitivity, category, chunk_chars, memory features, the grant, the operating mode
-    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", "", "on", ""], secret="ctx-key-abcdef")
+def test_the_terminal_setup_asks_for_the_grant_after_the_mode_and_writes_it(hermes_home, monkeypatch, capsys):
+    # ctx_url, sensitivity, category, chunk_chars, memory features, the operating mode, the grant
+    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", "", "", "on"], secret="ctx-key-abcdef")
 
     CtxCheckpointMemoryProvider(config={}, call_mcp=lambda *args: None).post_setup(str(hermes_home), {})
 
+    out = capsys.readouterr().out
     assert _host_allowlist() == ["ctx"]
+    assert "Now: off (plugins.entries.ctx_checkpoint.mcp_allowlist)" in out
+    assert "Hermes ends a ctx call the checkpoint gives up on: yes" in out
+
+
+def test_a_blank_answer_keeps_the_grant_in_the_terminal(hermes_home, monkeypatch, capsys):
+    _write_config(
+        hermes_home,
+        {
+            "mcp_servers": {"ctx": {"url": "https://ctx.example.test/mcp", "auth": "oauth"}},
+            "plugins": {"entries": {"ctx_checkpoint": {"mcp_allowlist": ["a", "ctx", "b"]}}},
+        },
+    )
+    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", "", "", ""])
+
+    CtxCheckpointMemoryProvider(config={}, call_mcp=lambda *args: None).post_setup(str(hermes_home), {})
+
+    assert _host_allowlist() == ["a", "ctx", "b"]
     assert "Hermes ends a ctx call the checkpoint gives up on: yes" in capsys.readouterr().out
 
 
 def test_the_terminal_summary_says_when_the_grant_has_no_effect(hermes_home, monkeypatch, capsys):
     """A Hermes that hands the plugin no call_mcp: the grant is written, and the summary says it
     does nothing there."""
-    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", "", "on", ""], secret="ctx-key-abcdef")
+    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", "", "", "on"], secret="ctx-key-abcdef")
 
     CtxCheckpointMemoryProvider(config={}).post_setup(str(hermes_home), {})
 
@@ -602,3 +646,80 @@ def test_the_terminal_summary_says_when_the_grant_has_no_effect(hermes_home, mon
     assert _host_allowlist() == ["ctx"]
     assert "Hermes ends a ctx call the checkpoint gives up on: no" in out
     assert "offers the plugin no call_mcp" in out
+
+
+# -- GottZ/ctx#299 round 1: the grant on transport rest, and an allowlist setup cannot read -------
+
+
+_REST = {
+    "memory": {"provider": "ctx_checkpoint", "ctx_checkpoint": {"transport": "rest"}},
+    "mcp_servers": {"ctx": {"url": "https://ctx.example.test/mcp", "auth": "oauth"}},
+}
+
+
+def test_on_transport_rest_the_grant_is_neither_offered_nor_written(hermes_home, monkeypatch, capsys):
+    """With transport rest the checkpoint calls ctx without Hermes' MCP client (the provider hands
+    the client no call_mcp there): setup does not offer the grant, does not write it, and the
+    terminal summary says it has no effect."""
+    _write_config(hermes_home, _REST)
+    provider = CtxCheckpointMemoryProvider(config={"transport": "rest"}, call_mcp=lambda *args: None)
+    assert provider.transport == "rest"
+    assert "mcp_grant" not in {f["key"] for f in provider.get_config_schema()}
+
+    # ctx_url, sensitivity, category, chunk_chars, memory features, the operating mode — no grant
+    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", "", ""], secret="ctx-key-abcdef")
+    provider.post_setup(str(hermes_home), {})
+    out = capsys.readouterr().out
+    assert "Hermes ends a ctx call the checkpoint gives up on: no" in out
+    assert "Now:" not in out
+    assert _host_allowlist() == []
+
+    with pytest.raises(ValueError, match="MCP transport only"):
+        provider.write_config_fields({"mcp_grant": True}, str(hermes_home))
+    provider.save_config({"ctx_url": "https://ctx.example.test/mcp", "mcp_grant": "keep"}, str(hermes_home))
+    assert _host_allowlist() == []
+    assert provider._granted_call_mcp("store") is None
+
+
+def test_on_transport_rest_a_grant_from_before_is_reported_without_effect(hermes_home, monkeypatch, capsys):
+    _write_config(hermes_home, {**_REST, "plugins": {"entries": {"ctx_checkpoint": {"mcp_allowlist": ["ctx"]}}}})
+    provider = CtxCheckpointMemoryProvider(config={"transport": "rest"}, call_mcp=lambda *args: None)
+    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", "", ""], secret="ctx-key-abcdef")
+
+    provider.post_setup(str(hermes_home), {})
+
+    out = capsys.readouterr().out
+    assert "Hermes ends a ctx call the checkpoint gives up on: no" in out
+    assert "transport rest" in out and "no effect" in out
+    assert _host_allowlist() == ["ctx"]  # left as it was
+
+
+@pytest.mark.parametrize(
+    "plugins",
+    [
+        {"entries": {"ctx_checkpoint": {"mcp_allowlist": "ctx"}}},
+        {"entries": {"ctx_checkpoint": "on"}},
+        {"entries": ["ctx_checkpoint"]},
+    ],
+)
+def test_an_allowlist_setup_cannot_read_is_left_to_the_operator(hermes_home, monkeypatch, capsys, plugins):
+    """Hermes grants nothing for an mcp_allowlist that is no list; setup used to replace it with
+    ["ctx"]. Now every surface refuses the change with a message and writes nothing."""
+    config = {"mcp_servers": {"ctx": {"url": "https://ctx.example.test/mcp", "auth": "oauth"}}, "plugins": plugins}
+    _write_config(hermes_home, config)
+    before = (hermes_home / "config.yaml").read_text(encoding="utf-8")
+    provider = CtxCheckpointMemoryProvider(config={}, call_mcp=lambda *args: None)
+
+    with pytest.raises(ValueError, match="setup does not replace it"):
+        provider.write_config_fields({"mcp_grant": True}, str(hermes_home))
+    with pytest.raises(ValueError, match="setup does not replace it"):
+        provider.save_config({"ctx_url": "https://ctx.example.test/mcp", "mcp_grant": "on"}, str(hermes_home))
+    _answers(monkeypatch, ["https://ctx.example.test/mcp", "", "", "", "", "", "on"])
+    provider.post_setup(str(hermes_home), {})
+    out = capsys.readouterr().out
+
+    assert "Setup failed" in out and "setup does not replace it" in out
+    assert (hermes_home / "config.yaml").read_text(encoding="utf-8") == before
+    # A save that does not touch the grant still goes through.
+    provider.save_config({"ctx_url": "https://ctx.example.test/mcp", "mcp_grant": "keep"}, str(hermes_home))
+    assert _read_config(hermes_home)["plugins"] == plugins
