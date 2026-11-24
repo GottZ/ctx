@@ -110,8 +110,9 @@ func (e *SupersedesConflictError) Error() string {
 // of a supersedes link (DreamLinkResolve: a delete reconciles the target, a
 // confirm writes the pin a declaration's already-superseded check reads). They
 // run side by side (dream batches with a supersedes guess are ordered among themselves by
-// the second lock, LockSupersedesGuesses; the row-lock discipline of
-// ReconcileSupersedesTargets is unchanged).
+// the guess lock, LockSupersedesGuesses; the row-lock discipline of
+// ReconcileSupersedesTargets is unchanged). Since issue #284 the confirm takes
+// it EXCLUSIVE (below): it runs the already-superseded gate itself.
 //
 // EXCLUSIVE: every path whose row-lock order differs from theirs, or whose
 // check reads links no row lock of its own covers — a store declaring a
@@ -119,20 +120,89 @@ func (e *SupersedesConflictError) Error() string {
 // target, then the link row; its cycle and already-superseded checks read the
 // links of OTHER blocks), an archive or a scope move (lockSupersedesSource: a
 // block and its targets in id order, then, for a move, the block's link
-// rows), a purge batch (purgeBlockBatch: blocks in scan order, then their
+// rows; the guard's single-id archive is one), the guard's resolve batch for
+// an archive (classifyGuardBatch: its blocks and their targets in id order —
+// shared for a keep, which holds rows in id order only), the confirm of a
+// supersedes link (its already-superseded gate reads the pins of other
+// sources), a purge batch (purgeBlockBatch: blocks in scan order, then their
 // link rows) and the dangling-link cleanup (dream.CleanupDanglingLinks, per
 // scope: link rows, then their targets). Each of them
 // runs alone in its scope against every other holder of the lock, so none of
 // these orders ever interleaves with another (issues #197, #284).
 //
-// The lock is the FIRST its transaction takes, and the guess lock, where a
-// transaction takes one, the second: every holder then waits for either one
-// holding no row lock. Transaction-scoped; released at commit or rollback.
+// The lock is the FIRST its transaction takes — after the guess lock where a
+// dream batch takes one (LockSupersedesGuesses) — so every holder waits for
+// either one holding no row lock. Transaction-scoped; released at commit or
+// rollback.
 func LockSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('ctx:supersedes:' || $1::text))`, scope); err != nil {
 		return fmt.Errorf("store: supersedes scope lock: %w", err)
 	}
 	return nil
+}
+
+// TryLockSupersedesSource is the lock pass of the guard run's archive verdict
+// (issue #284), for a transaction that already holds the block — the guard's
+// pick, FOR NO KEY UPDATE, so its scope cannot change — and must not wait: the
+// run holds its picked blocks for its whole batch, so a wait here would add an
+// edge a lock cycle could run through (a declaration holds its source and
+// waits for its target, a dream batch holds link rows and waits for its
+// targets). held is false, and the caller rolls back to its savepoint and
+// leaves the block for its next run, when one of its locks is taken.
+//
+// What an archive must keep out while it reads the block's supersedes links
+// is a writer that adds one from the block. With the block's row held, that
+// is only a dream batch with a supersedes guess: a declaration from the block
+// locks its identity row first, which the pick holds, while a batch's link
+// insert takes the key-share lock only. Such a batch holds the scope's guess
+// lock exclusively (LockSupersedesGuesses), so the verdict takes that lock
+// SHARED, with a try: a batch in flight leaves the block pending, and a batch
+// after the verdict waits for the run's commit and then finds its source
+// archived (dream.ErrSourceLeftScope). The scope's supersedes lock is not
+// taken: guard runs of one scope archive side by side (issue #359), and the
+// declarations, archives, moves, purges and block batches of the scope —
+// its exclusive holders — do not wait for a guard batch; they meet the verdict
+// on the rows, where the run waits for nobody.
+//
+// Then it locks the targets of the block's supersedes links in that scope, in
+// id order, skipping none (SKIP LOCKED and a count): a target another
+// transaction holds (an update of it, a reconcile of another batch) leaves the
+// block pending as well. The targets are the caller's to reconcile after its
+// archive.
+func TryLockSupersedesSource(ctx context.Context, tx pgx.Tx, blockID string) (targets []string, held bool, err error) {
+	var scope string
+	if err := tx.QueryRow(ctx,
+		`SELECT scope, pg_try_advisory_xact_lock_shared(hashtext('ctx:supersedes-guess'), hashtext(scope)) FROM context_blocks WHERE id = $1::uuid`,
+		blockID).Scan(&scope, &held); err != nil {
+		return nil, false, fmt.Errorf("store: try supersedes guess lock: %w", err)
+	}
+	if !held {
+		return nil, false, nil
+	}
+	rows, err := tx.Query(ctx, supersedesTargetsOfSQL, []string{blockID}, []string{scope})
+	if err != nil {
+		return nil, false, fmt.Errorf("store: try supersedes targets: %w", err)
+	}
+	want, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, false, fmt.Errorf("store: try supersedes targets: %w", err)
+	}
+	if len(want) == 0 {
+		return nil, true, nil
+	}
+	rows, err = tx.Query(ctx,
+		`SELECT id::text FROM context_blocks WHERE id = ANY($1::uuid[]) AND scope = $2 ORDER BY id FOR NO KEY UPDATE SKIP LOCKED`,
+		want, scope)
+	if err != nil {
+		return nil, false, fmt.Errorf("store: try supersedes targets: lock: %w", err)
+	}
+	if targets, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+		return nil, false, fmt.Errorf("store: try supersedes targets: lock: %w", err)
+	}
+	if len(targets) != len(want) {
+		return nil, false, nil
+	}
+	return targets, true, nil
 }
 
 // ShareSupersedesScope is LockSupersedesScope in shared mode (same key).
@@ -145,7 +215,7 @@ func ShareSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
 
 // LockSupersedesGuesses is the per-scope lock of dream supersedes guesses,
 // taken EXCLUSIVE by a dream link batch that carries a supersedes candidate
-// (dream.WriteLinks), after ShareSupersedesScope. Two such batches each run
+// (dream.WriteLinks), as its first lock, before ShareSupersedesScope. Two such batches each run
 // the cycle walk over committed links only, so side by side each could miss
 // the other's uncommitted guess and together close a cycle through declared
 // links that run against created_at (A→B and C→D beside declared B→C and D→A).
@@ -154,7 +224,13 @@ func ShareSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
 // it can only delete or re-classify supersedes links, which closes no cycle.
 // An archive or a scope move holds the scope lock exclusively
 // (lockSupersedesSource), which keeps every batch of the scope out, so no
-// guess adds a supersedes link from the block while it reads them.
+// guess adds a supersedes link from the block while it reads them. The guard
+// run's archive verdict takes this lock in SHARED mode instead, with a try
+// (TryLockSupersedesSource): it keeps the batches with a guess out without
+// ordering guard runs or the scope's other writers behind each other. It holds
+// it until its batch commits, which is why a batch takes this lock before the
+// scope lock (issue #284): waiting for the guard, it holds nothing the
+// scope's other writers wait for.
 //
 // A key space apart from LockSupersedesScope's (the two-key form of the
 // advisory lock functions), so the two locks of one scope never share a key.
@@ -198,9 +274,14 @@ type supersedesTarget struct {
 //     supersedes delete`, DreamLinkResolve), which reconciles the target.
 //
 // Lock order: the scope's supersedes lock (LockSupersedesScope, first), the
-// written block's row (the upsert identity, FOR UPDATE — the lock
+// written block's row (the upsert identity, FOR NO KEY UPDATE — the lock
 // UpsertBlock's pre-read takes anyway), then the target (FOR NO KEY UPDATE),
-// all BEFORE the first write of the transaction. Source before
+// all BEFORE the first write of the transaction. The identity lock is not FOR
+// UPDATE (issue #284): that one also refuses the foreign key's key-share lock,
+// and a guard run that holds the target (its pick) and matched it against the
+// written block takes that lock on the written block at its audit insert —
+// the declaration held the source and waited for the target, the run waited
+// for the source: 40P01. Source before
 // target, not id order: a dream batch that already inserted a link touching
 // the source holds FOR KEY SHARE on it and then locks its supersedes targets,
 // so taking the target first and then waiting for the source would close a
@@ -325,7 +406,7 @@ func lockSupersedesPair(ctx context.Context, tx pgx.Tx, category, title, scope, 
 	if err := tx.QueryRow(ctx,
 		`SELECT id::text FROM context_blocks
 		  WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived
-		  FOR UPDATE`,
+		  FOR NO KEY UPDATE`,
 		category, title, scope).Scan(&sourceID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return supersedesTarget{}, "", fmt.Errorf("store: supersedes: lock source: %w", err)
 	}
@@ -399,6 +480,35 @@ func supersedesTargetAllowed(tgt supersedesTarget, types *blocktype.Set) error {
 // the writer's statement outranks the guess, and declareSupersedes moves the
 // target's pointer to the written block.
 func supersedesStateAllows(ctx context.Context, tx pgx.Tx, sourceID, targetID, scope string) error {
+	if err := supersedesSettledByOther(ctx, tx, sourceID, targetID, scope); err != nil {
+		return err
+	}
+	if sourceID == "" {
+		return nil
+	}
+
+	// Cycle: does the target (directly or through a chain) supersede the
+	// source already? Every supersedes link counts, pinned or not: a dream
+	// guess that the target supersedes the source refuses the declaration as
+	// a cycle too — the remedy is to delete that guess (`ctx dream resolve
+	// <target> <source> supersedes delete`) and declare again.
+	cycle, err := SupersedesWouldCycle(ctx, tx, sourceID, targetID)
+	if err != nil {
+		return err
+	}
+	if cycle {
+		return &SupersedesConflictError{Kind: SupersedesCycle, Target: targetID}
+	}
+	return nil
+}
+
+// supersedesSettledByOther is the already-superseded gate: it refuses with
+// SupersedesSuperseded (and the head of the chain) when a live block of the
+// scope other than sourceID ("" for none yet) settles targetID
+// (SettledSupersedesSQL). Two runners: a declaration (supersedesStateAllows)
+// and the confirm of a dream guess that would settle the target
+// (DreamLinkResolve) — a target has at most one settling superseder.
+func supersedesSettledByOther(ctx context.Context, tx pgx.Tx, sourceID, targetID, scope string) error {
 	var other string
 	err := tx.QueryRow(ctx,
 		`SELECT dl.source_block_id::text
@@ -422,22 +532,6 @@ func supersedesStateAllows(ctx context.Context, tx pgx.Tx, sourceID, targetID, s
 		return &SupersedesConflictError{Kind: SupersedesSuperseded, Target: targetID, Head: head}
 	case !errors.Is(err, pgx.ErrNoRows):
 		return fmt.Errorf("store: supersedes: other superseder: %w", err)
-	}
-	if sourceID == "" {
-		return nil
-	}
-
-	// Cycle: does the target (directly or through a chain) supersede the
-	// source already? Every supersedes link counts, pinned or not: a dream
-	// guess that the target supersedes the source refuses the declaration as
-	// a cycle too — the remedy is to delete that guess (`ctx dream resolve
-	// <target> <source> supersedes delete`) and declare again.
-	cycle, err := SupersedesWouldCycle(ctx, tx, sourceID, targetID)
-	if err != nil {
-		return err
-	}
-	if cycle {
-		return &SupersedesConflictError{Kind: SupersedesCycle, Target: targetID}
 	}
 	return nil
 }

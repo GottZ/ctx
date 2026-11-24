@@ -247,12 +247,21 @@ func markSupersededSnapshot(ctx context.Context, tx pgx.Tx, targetID, sourceID s
 // without that scope's locks would reopen the lock-order cycle with a
 // declaration there, so the caller's transaction rolls back and runs again
 // (writeSupersedesSource), and the next scope read names the new scope.
+//
+// The caller answers it as well when the lock pass missed the block — no live
+// block of the write scopes had the id, so nothing was locked — and its own
+// statement then changed a row with that id after all (issue #284): the block
+// entered a write scope between the two statements, unlocked, and the targets
+// of the supersedes links it may have brought along were never read. The run
+// again reads it in that scope and locks it there.
 var errSupersedesSourceChanged = errors.New("store: lock supersedes source: the block changed scope during the lock pass")
 
 // supersedesSourceAttempts bounds those runs. A fixed bound, not a policy:
 // each repeat needs another commit that moves the same block within the few
-// statements between a scope read and the lock pass after it, so a third
-// failure is not contention but a fault, and surfaces as the error.
+// statements between a scope read and the lock pass after it (or between the
+// scope read and the caller's statement), so a third failure is not
+// contention but a fault, and surfaces as the error — after a rollback of
+// every attempt, nothing written.
 const supersedesSourceAttempts = 3
 
 // writeSupersedesSource is pgxdb.Write for a transaction that starts with
@@ -305,14 +314,23 @@ func writeSupersedesSource(ctx context.Context, db pgxdb.Beginner, s pgxdb.Stage
 // or archived id locks nothing either; the caller's own statement answers it
 // as before.
 //
+// missed reports that the scope read found no live block of writeScopes with
+// the id, and nothing was locked. The caller's statement normally finds no row
+// then either. If it changes one after all, the block entered a write scope in
+// between (READ COMMITTED: the statement reads a later snapshot than the scope
+// read), and the caller returns errSupersedesSourceChanged so that the
+// transaction runs again with the block locked (issue #284). The flag costs
+// the ordinary path nothing: no statement is added on a hit or a miss.
+//
 // The candidate ids are built as ONE array (the block, then its targets) and
 // matched with = ANY: primary-key probes for a handful of ids. An `id = $1 OR
 // id IN (subquery)` form is planned as a filter with a hashed subplan over a
 // full primary-key scan (ORDER BY id) — every archive would read the corpus.
-func lockSupersedesSource(ctx context.Context, tx pgx.Tx, blockID string, writeScopes []string) ([]string, error) {
+func lockSupersedesSource(ctx context.Context, tx pgx.Tx, blockID string, writeScopes []string) (targets []string, missed bool, err error) {
 	parsed, err := uuid.Parse(blockID)
 	if err != nil {
-		return nil, nil //nolint:nilerr // deliberate: the caller's statement decides a malformed id
+		// A malformed id never matches the caller's statement either.
+		return nil, false, nil //nolint:nilerr // deliberate: the caller's statement decides a malformed id
 	}
 	// The statements below return ids as id::text, the canonical lowercase
 	// form; a full id the caller typed in capitals (ResolveBlockID returns a
@@ -324,40 +342,65 @@ func lockSupersedesSource(ctx context.Context, tx pgx.Tx, blockID string, writeS
 		`SELECT scope FROM context_blocks WHERE id = $1::uuid AND scope = ANY($2::text[]) AND NOT is_archived`,
 		blockID, writeScopes).Scan(&scope)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil // not a live block the caller may write: nothing to reconcile
+		return nil, true, nil // not a live block the caller may write: nothing locked
 	}
 	if err != nil {
-		return nil, fmt.Errorf("store: lock supersedes source: scope: %w", err)
+		return nil, false, fmt.Errorf("store: lock supersedes source: scope: %w", err)
 	}
 	if err := LockSupersedesScope(ctx, tx, scope); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	rows, err := tx.Query(ctx, lockSupersedesSourceSQL, blockID, scope)
 	if err != nil {
-		return nil, fmt.Errorf("store: lock supersedes source: %w", err)
+		return nil, false, fmt.Errorf("store: lock supersedes source: %w", err)
 	}
 	locked, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		return nil, fmt.Errorf("store: lock supersedes source: %w", err)
+		return nil, false, fmt.Errorf("store: lock supersedes source: %w", err)
 	}
 	if !slices.Contains(locked, blockID) {
-		return nil, errSupersedesSourceChanged
+		return nil, false, errSupersedesSourceChanged
 	}
-	targets := slices.DeleteFunc(locked, func(id string) bool { return id == blockID })
 
 	// The target list above comes from that statement's snapshot, taken
 	// BEFORE it waited for the block's lock. Under the scope locks above no
 	// declaration and no dream guess of the scope adds a supersedes link from
-	// the block while this transaction runs, so the re-read normally finds
-	// nothing; it stays for a writer outside that discipline that held the
-	// block and committed while we waited. Now the block is held, and this
-	// statement's fresh snapshot sees every such link; its targets are locked
-	// as well (in id order among themselves). Both statements keep to the
+	// the block while this transaction runs, so the re-read normally finds no
+	// target the statement did not lock; it stays for a writer outside that
+	// discipline that held the block and committed while we waited. Now the
+	// block is held, and this statement's fresh snapshot sees every such link;
+	// its targets are locked as well (in id order among themselves), and the
+	// re-read's list is the one returned. Both statements keep to the
 	// locked scope like the lock pass: a target in another scope carries no
 	// state from this block (the reconcile counts only sources of the
 	// target's own scope), and its row may be held by a declaration there.
-	rows, err = tx.Query(ctx, supersedesTargetsOfSQL, blockID, scope)
+	if targets, err = lockLateSupersedesTargets(ctx, tx, []string{blockID}, []string{scope}, locked); err != nil {
+		return nil, false, err
+	}
+	return targets, false, nil
+}
+
+// supersedesTargetsOfSQL reads the targets of the supersedes links of blocks
+// ($1) that live in the source's own scope, one of the locked scopes ($2), in
+// id order; idx_dream_links_supersedes serves the links, the primary key the
+// scopes.
+const supersedesTargetsOfSQL = `SELECT DISTINCT dl.target_block_id::text
+	  FROM context_dream_links dl
+	  JOIN context_blocks s ON s.id = dl.source_block_id
+	  JOIN context_blocks t ON t.id = dl.target_block_id
+	 WHERE dl.source_block_id = ANY($1::uuid[]) AND dl.relationship = 'supersedes'
+	   AND s.scope = ANY($2::text[]) AND t.scope = s.scope
+	 ORDER BY 1`
+
+// lockLateSupersedesTargets reads the targets of the sources' supersedes links
+// again — the sources are locked, so this statement's snapshot sees every link
+// a writer committed while the lock pass waited for them — locks the ones not
+// in locked (the rows the lock pass holds) in id order, within scopes (the
+// locked scopes), and returns every current target the transaction now holds,
+// in id order: the targets to reconcile after the caller's write.
+func lockLateSupersedesTargets(ctx context.Context, tx pgx.Tx, sources, scopes, locked []string) ([]string, error) {
+	rows, err := tx.Query(ctx, supersedesTargetsOfSQL, sources, scopes)
 	if err != nil {
 		return nil, fmt.Errorf("store: lock supersedes source: re-read: %w", err)
 	}
@@ -365,36 +408,31 @@ func lockSupersedesSource(ctx context.Context, tx pgx.Tx, blockID string, writeS
 	if err != nil {
 		return nil, fmt.Errorf("store: lock supersedes source: re-read: %w", err)
 	}
-	var late []string
+	var held, late []string
 	for _, id := range current {
-		if !slices.Contains(targets, id) {
+		if slices.Contains(locked, id) {
+			held = append(held, id)
+		} else {
 			late = append(late, id)
 		}
 	}
-	if len(late) > 0 {
-		rows, err := tx.Query(ctx,
-			`SELECT id::text FROM context_blocks WHERE id = ANY($1::uuid[]) AND scope = $2 ORDER BY id FOR NO KEY UPDATE`,
-			late, scope)
-		if err != nil {
-			return nil, fmt.Errorf("store: lock supersedes source: late targets: %w", err)
-		}
-		lateLocked, err := pgx.CollectRows(rows, pgx.RowTo[string])
-		if err != nil {
-			return nil, fmt.Errorf("store: lock supersedes source: late targets: %w", err)
-		}
-		targets = append(targets, lateLocked...)
+	if len(late) == 0 {
+		return held, nil
 	}
-	return targets, nil
+	rows, err = tx.Query(ctx,
+		`SELECT id::text FROM context_blocks WHERE id = ANY($1::uuid[]) AND scope = ANY($2::text[]) ORDER BY id FOR NO KEY UPDATE`,
+		late, scopes)
+	if err != nil {
+		return nil, fmt.Errorf("store: lock supersedes source: late targets: %w", err)
+	}
+	lateLocked, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("store: lock supersedes source: late targets: %w", err)
+	}
+	held = append(held, lateLocked...)
+	slices.Sort(held)
+	return held, nil
 }
-
-// supersedesTargetsOfSQL reads the targets of a block's supersedes links that
-// live in a scope ($1 = the block, $2 = the scope), in id order;
-// idx_dream_links_supersedes serves the links, the primary key the scope.
-const supersedesTargetsOfSQL = `SELECT dl.target_block_id::text
-	  FROM context_dream_links dl
-	  JOIN context_blocks t ON t.id = dl.target_block_id
-	 WHERE dl.source_block_id = $1::uuid AND dl.relationship = 'supersedes' AND t.scope = $2
-	 ORDER BY dl.target_block_id`
 
 // lockSupersedesSourceSQL is lockSupersedesSource's statement ($1 = the block,
 // $2 = the scope whose supersedes locks the transaction holds). Only a block
