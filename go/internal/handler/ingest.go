@@ -232,7 +232,14 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 	// (store.ProvenanceClaimed: one descent of idx_context_derived_identity
 	// since migration 187), alongside the per-chunk hash check this endpoint
 	// already runs.
+	// A chunk whose value carries a NUL character fails on its own, before
+	// any statement (issue #519; the NUL guard leaves the chunks to this
+	// handler), and the others are written.
+	nulChunks := ingestNULChunks(req.Chunks)
 	for i, chunk := range req.Chunks {
+		if nulChunks[i] != "" {
+			continue
+		}
 		if rej := claimReject(nil, chunk.Category, "", "", chunk.Metadata); rej != nil {
 			writeJSONReject(w, rej.prefixed(fmt.Sprintf("chunk[%d]: ", i)))
 			return
@@ -276,7 +283,10 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for i, chunk := range req.Chunks {
-		result := h.processChunk(ctx, reqID, chunk, i, writeScope, authResult.ApiKeyID, classifySet)
+		result := IngestResult{Index: i, Status: "failed", Error: nulChunks[i] + " " + nulFieldMessage}
+		if nulChunks[i] == "" {
+			result = h.processChunk(ctx, reqID, chunk, i, writeScope, authResult.ApiKeyID, classifySet)
+		}
 		resp.Results = append(resp.Results, result)
 
 		switch result.Status {

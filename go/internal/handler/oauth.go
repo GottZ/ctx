@@ -303,7 +303,7 @@ func (h *OAuthHandler) authorizeForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+	r.Body = http.MaxBytesReader(w, r.Body, AuthFlowBodyCap)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -417,7 +417,7 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+	r.Body = http.MaxBytesReader(w, r.Body, AuthFlowBodyCap)
 	if err := r.ParseForm(); err != nil {
 		oauthError(w, "invalid_request", "bad form data")
 		return

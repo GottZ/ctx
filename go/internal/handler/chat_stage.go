@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,6 +44,11 @@ func (s *chatStageRunner) StageWrite(ctx context.Context, category, title, conte
 		return nil, "", errors.New("chat stage: no resolved auth identity")
 	}
 	reqID := RequestIDFromContext(ctx)
+	// Issue #519: a NUL the model wrote into an argument is refused as the
+	// HTTP and MCP surfaces refuse it — before any statement, model-visible.
+	if f := updateNULField(store.UpdateBlockData{Category: &category, Title: &title, Content: &content, Tags: tags, Metadata: metadata}); f != "" {
+		return nil, f + " " + nulFieldMessage, nil
+	}
 
 	var set *blocktype.Set
 	if s.blocktypes != nil {
@@ -142,7 +148,7 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	if len(fields) == 0 {
 		return nil, "nothing to update — provide at least one of category, title, content, tags, metadata", nil
 	}
-	if msg := blockSizeLimit(strOrEmpty(data.Category), strOrEmpty(data.Title), strOrEmpty(data.Content)); msg != "" {
+	if msg := stageUpdateShapeReject(id, data); msg != "" {
 		return nil, msg, nil
 	}
 	// I7 claim gates, the call the MCP update twin makes for an update without
@@ -268,4 +274,17 @@ func previewOf(content string) string {
 		return content
 	}
 	return string(r[:max]) + "…"
+}
+
+// stageUpdateShapeReject is the refusal of a staged update's values before
+// any statement: a NUL character in the id or a field (issue #519, the
+// refusal StageWrite gives), then the size caps.
+func stageUpdateShapeReject(id string, data store.UpdateBlockData) string {
+	if strings.ContainsRune(id, 0) {
+		return "id " + nulFieldMessage
+	}
+	if f := updateNULField(data); f != "" {
+		return f + " " + nulFieldMessage
+	}
+	return blockSizeLimit(strOrEmpty(data.Category), strOrEmpty(data.Title), strOrEmpty(data.Content))
 }
