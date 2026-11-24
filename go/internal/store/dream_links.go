@@ -99,9 +99,11 @@ func DreamLinkResolve(ctx context.Context, pool *pgxpool.Pool, sourceID, targetI
 		var storedRationale *string
 		var sourceScope string
 		err = tx.QueryRow(ctx,
-			`SELECT dl.relationship, dl.pinned, dl.rationale, s.scope, dl.confidence >= $5::real
+			`SELECT dl.relationship, dl.pinned, dl.rationale, s.scope,
+			        dl.confidence >= $5::real AND NOT t.is_archived
 			 FROM context_dream_links dl
 			 JOIN context_blocks s ON s.id = dl.source_block_id
+			 JOIN context_blocks t ON t.id = dl.target_block_id
 			 WHERE dl.source_block_id = $1::uuid
 			   AND dl.target_block_id = $2::uuid
 			   AND dl.relationship = $3
@@ -137,7 +139,10 @@ func DreamLinkResolve(ctx context.Context, pool *pgxpool.Pool, sourceID, targetI
 			// the declaration's already-superseded gate and is refused like a
 			// second declaration, with the head of the chain (issue #284). A
 			// guess below that confidence settles nothing when pinned, and a
-			// confirm of a link that already settles adds nothing.
+			// confirm of a link that already settles adds nothing; nor does a
+			// link to an archived target, which has no lifecycle to settle
+			// (the reconcile passes it by), so its confirm is not refused for
+			// another settler of the archived block (issue #547).
 			if supersedes && settles && !pinned {
 				if err := supersedesSettledByOther(ctx, tx, sourceID, targetID, lockedScope); err != nil {
 					return err
