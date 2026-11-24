@@ -2251,6 +2251,67 @@ DELETE FROM context_pending_writes p
 
 removes them. A prune of this release deletes the stages of the keys it deletes, not those an older instance left. Way back: remove those stages, re-add the keys (`ALTER TABLE context_pending_writes ADD CONSTRAINT context_pending_writes_api_key_id_fkey FOREIGN KEY (api_key_id) REFERENCES context_api_keys(id) ON DELETE CASCADE, ADD CONSTRAINT context_pending_writes_principal_id_fkey FOREIGN KEY (principal_id) REFERENCES context_principals(id);` — it validates every chunk and brings the chunk locks back), then `DELETE FROM _migrations WHERE version = 194;`.
 
+### Migration 195: browse and recent read their page from an index per scope
+
+Issue #237. Browse — the empty-query path of the compact and the full search (`/api/search`, the MCP `search` tool, the chat `ctx_search`, `ctx search`) — and recent (`/api/recent`, the MCP `recent` tool, the chat `ctx_recent`) list the visible blocks newest first, `ORDER BY updated_at DESC, id DESC` with the keyset cursor `(updated_at, id)`. No index delivered that order for a reader's scopes, and the visibility clause `scope = ANY(read scopes) OR id = ANY(granted ids)` left the planner one plan: read every visible row of the scopes, sort them, keep a page. Migration 195 adds
+
+```sql
+CREATE INDEX idx_blocks_scope_updated ON context_blocks (scope, updated_at DESC, id DESC)
+ WHERE NOT is_archived;
+CREATE INDEX idx_blocks_scope_category_updated ON context_blocks (scope, category, updated_at DESC, id DESC)
+ WHERE NOT is_archived;
+```
+
+and the two listings read one range per read scope (`store/blocks_list.go`): a `LATERAL` arm per distinct read scope — over the second index when the listing names a category —, each from the cursor on with the page's `LIMIT`, one arm for the granted blocks outside the read scopes by primary key, and the sort of their rows for the `LIMIT` above them. The rows and their order are the ones of the statements before 195 (`TestListWalkSameRowsAsTheStatementsBefore195`: 1 052 pages compared with the indexes and again without them — one, three and duplicated scopes, a scope without rows, an empty list, grants inside and outside the read scopes and archived granted blocks, type exclusions, categories, limits 1–50, the probe row, cursors of every page of a full paging, on a tie, between rows and past the end). Recent now breaks a tie of `updated_at` by `id DESC`, as browse does; before, the order within a tie and which rows of a tie a `LIMIT` cut off were the plan's.
+
+**Cost per page.** Measured on the production image at 1 000 000 and 5 000 000 rows (rows of about 1.3 kB, 500 scopes interleaved, 1 in 13 archived, timestamps shared by 50 rows each; `random_page_cost` 1.1 and 4, custom and generic plan; buffers, the range over the four cells, first page and a cursor at four fifths; `TestBrowseIndexMeasure`, `CTX_I237_MEASURE=1`; the CI image gave the same numbers at 1 000 000 rows):
+
+| reader | 1 000 000 rows: before → after | 5 000 000 rows: before → after |
+|---|---|---|
+| one scope (184 000 / 922 000 rows) | 157 848–201 391 (0.4–1.0 s) → 13–15 | 792 750–1 006 463 (1.0–4.8 s) → 14–16 (0.15–0.36 ms) |
+| one scope of 920 rows | 935–1 009 → 13–15 | 935–1 008 → 14–16 |
+| three scopes | 53 125–53 198 → 39–43 | 265 641–265 642 → 42–47 |
+| one scope with 25 grants | 157 915–201 385 → 98–99 | 792 818–1 006 463 → 99–100 |
+| 50 scopes | 54 739–54 813 → 652–706 | 273 827–273 828 → 704–756 |
+| 500 scopes | 200 743–204 469 (3.4–4.3 s) → 6 531–7 041 (11–42 ms) | 1 006 337–1 022 330 (2.1–17.2 s) → 7 032–7 540 (17–36 ms) |
+| a category of 5 % of the big scope | 8 377–8 380 → 13–15 | 41 949–42 023 → 14–16 |
+| a category the big scope holds 10 times, other scopes 5 % of their rows | 360–361 → 4–6 | 1 784–1 858 → 5–8 |
+| the never-ranked types excluded (`types_exclude`) | 139 246–201 382 → 13–17 | 792 142–1 006 432 → 14–17 |
+
+A reader of K scopes reads up to K × the page's rows and K descents, whatever its scopes hold and whatever other tenants hold: a reader of all 502 scopes of the 1 000 000-row store read 7 061–7 068 buffers (15–17 ms) for a page of 10 and 27 378–27 385 (40–58 ms) for the largest page, 50 — the cost grows with the number of scopes, not with their rows, and every reader gets its page. `TestBrowseRecentPageCostIndependentOfTheStore` holds every page of one, three and 50 scopes, with grants and on a deep cursor, to that bound on a store and on one ten times its size (red on the base: 1 362–15 263 buffers, growing tenfold), and a small reader's page to it beside ten times the other tenants' rows. The rejected key without the scope, `(updated_at DESC, id DESC)`, can be walked by the statements as they were, and is for a small reader too, through every tenant's rows newer than the reader's page: at 1 000 000 rows a reader of a scope without rows read 3–4 buffers before and up to 223 041 with that key, a reader of a 920-row scope up to 2 470.
+
+**What the indexes do not serve.** A listing with a type list (`types`), tags (`tags`, `tags_all`) or the cluster facet sends the statement before 195 unchanged: each filter can keep a handful of a scope's rows, an arm would walk its scope to find them, and the statement before 195 reads the filter's own index (`idx_blocks_type_name`, `idx_context_tags`, the cluster membership); its cost is that of the base. Measured with the walk all the same at 1 000 000 rows: a type the reader's 920-row scope does not hold, 81 buffers before and 933 on the walk; a category of 10 rows in a scope of 184 000 rows without the category index, 5–6 before and up to 161 321 on the walk — which is why the category has its index; the other filters would each need one. A full-text search never walks. Where a page reads more than the base (measured at 1 000 000 rows unless noted): a category the reader's scopes hardly hold costs one descent per scope (three scopes 3–4 → 9–10 buffers); a reader of many scopes that hold few rows each pays about three buffers per scope (at 200 000 rows: 2 010 scopes of which 2 000 empty, 467–504 → 6 140; 1 000 scopes of 2 rows, 1 863–2 016 → 4 847; at 1 000 000 rows: 500 scopes of 40 rows each 3 476 → 7 000, a reader of 5 000 scopes 34 359 → 70 000 — in 105–200 ms against 154–322 ms before —, and a category that 500 scopes hardly hold or do not hold 3–5 → 1 500, about 2 ms); a type exclusion that keeps a handful of a scope's rows walks the scope (127 618–157 847 before, 127 618–161 321 after, at most 2 % more); and with the indexes standing the planner walks them for the unchanged statement of a type list or a tag on a cursor deep in a scope (a type absent from a 920-row scope 81 → 189 buffers; a rare tag on a deep cursor in the largest scope of a 200 000-row store 2 → 34), where a common type reads less (7 451 → 2 415).
+
+**Without the indexes** an arm reads its scope through `idx_context_scope` and sorts it, which costs more than the statement before 195 for many scopes or a category (744 081 against 200 743–204 469 buffers for 500 scopes, 18 881 against 8 377 for the category, at 1 000 000 rows). So the listings read the catalog (`store.listIndexReadySQL`: valid, ready, exactly the definitions above), a process keeps that reading for a minute, and a listing sends the statement before 195 while the index its arms read does not stand (`TestBrowseIndexReadinessIsTheMigrationsDefinition`: dropped, `INVALID`, another definition under the name).
+
+**HOT, size, writes.** `scope`, `category`, `updated_at`, `id` and `is_archived` are named by other indexes of `context_blocks` already (`idx_blocks_workflow_board`, `idx_context_category`), so no update that was HOT stops being HOT, and every update that writes `updated_at` was not HOT before 195 either (`TestBrowseIndexesTakeNoUpdateOffHOT`). Neither index names an embedding column: they are outside the re-embed cutover. Measured at 1 000 000 rows through the production write paths, three rounds of 1 000 writes each with and without the two indexes (`TestBrowseIndexWriteMeasure`, `CTX_I237_WRITE_MEASURE=1`; the host under a load of 5–7): an insert (`store.UpsertBlock`) 14 815–14 831 bytes of WAL against 14 194–14 658 without (the first round after a checkpoint 19 332, full pages), 2.2–4.5 ms against 2.2–2.7 ms; an update of the content (`store.UpdateBlock`, which writes `updated_at`) 30 172–39 807 against 34 138–34 807 bytes, 1.5–2.3 against 1.6–1.8 ms; a vector (`store.StoreEmbedding`) and a dream claim (`dream.PickBlock`) within the spread of the rounds. HOT: 1 000 of 1 000 dream claims and 1 000 of the 2 000 updates `UpdateBlock` makes for 1 000 content changes, 0 of 1 000 vector writes — the same with and without the indexes. Size: 51.7 MB and 60.3 MB at 1 000 000 rows, 257 MB and 300 MB at 5 000 000 (about 52 and 60 bytes per row); 200 000 updates of the `updated_at` of the same 2 000 rows grew each by 20 MB, which a `VACUUM` keeps for reuse rather than returning.
+
+**The migration.** Below 500 000 rows (`ctx_migration_rows`, [migration 191](#migration-191-a-threshold-reads-the-current-size-of-a-table)) it builds the missing indexes inline: `CREATE INDEX` takes `SHARE` on `context_blocks` until the commit, readers go on, every insert, update and delete waits, and each build reads the whole heap. Measured with a writer inserting a block every 2 ms (production image, rows of about 1.5 KB of heap, host load 4.6–5.7; `TestMigration195InlineBuildWriterWait`, `CTX_M195_MEASURE=1`): both builds, and the writer's longest wait, 0.61–0.86 s at 250 000 rows (390 MB heap) and 1.29–1.83 s at 500 000 (781 MB), 11 + 14 MB and 22 + 28 MB of index. Above the threshold, or for a name that holds an `INVALID` index, another definition or a relation that is not an index, it logs a WARNING per name, builds and drops nothing of that name and takes no `SHARE` lock for it (`TestMigration195`). Build them out of band on the running binary (readers and writers go on; at 1 000 000 rows both builds took 3.2–3.3 s and a writer's longest wait was 3–55 ms, `CTX_M195_CIC=1`); first, what holds the names:
+
+```sql
+SELECT c.relname, c.relkind, i.indisvalid, pg_get_indexdef(c.oid)
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  LEFT JOIN pg_index i ON i.indexrelid = c.oid
+ WHERE n.nspname = 'public'
+   AND c.relname IN ('idx_blocks_scope_updated', 'idx_blocks_scope_category_updated');
+```
+
+The migration adopts an index that is valid and deparses exactly as `CREATE INDEX idx_blocks_scope_updated ON public.context_blocks USING btree (scope, updated_at DESC, id DESC) WHERE (NOT is_archived)` respectively `CREATE INDEX idx_blocks_scope_category_updated ON public.context_blocks USING btree (scope, category, updated_at DESC, id DESC) WHERE (NOT is_archived)`. No row for a name — build it; such an index, valid — keep it; that definition with `indisvalid` false (an aborted `CONCURRENTLY` build) — `DROP INDEX CONCURRENTLY <name>;`, then build it; anything else — rename it, then build it:
+
+```sql
+CREATE INDEX CONCURRENTLY idx_blocks_scope_updated
+    ON context_blocks (scope, updated_at DESC, id DESC)
+    WHERE NOT is_archived;
+CREATE INDEX CONCURRENTLY idx_blocks_scope_category_updated
+    ON context_blocks (scope, category, updated_at DESC, id DESC)
+    WHERE NOT is_archived;
+```
+
+No `IF NOT EXISTS`: it would pass over an `INVALID` index or a foreign object of the name. Until an index stands the listings that read it send the statements before 195 and the schema-contract manifest stays red. `lock_timeout` is 3 s and bounds the acquisition of the `SHARE` lock, not the build. The threshold counts live rows, the build reads the heap: compact a heap far larger than its rows first, or build the indexes by the runbook before the upgrade.
+
+**Rolling deploy and way back.** Executed with the code of the rollback image v5.81.0 (`c4b78d75`) on a database migrated to 195: its migration runner leaves version 195 alone; it reads with the statements before 195 — the same rows as before the upgrade — and pays the indexes' writes (an insert, an update and an archive through its store succeed); its schema-contract check finds `_migrations:195` without an embedded file (`migration_integrity`, breaking) and the two indexes as unknown (param): in mode `warn` it starts with `/health` reporting `schema_contract: attention`, in mode `enforce` it refuses to start until `CTX_CONTRACT_MODE=warn` or `off` is set. Way back, only for a name whose check above shows an index of its definition: `DROP INDEX CONCURRENTLY <name>;` for both, then `DELETE FROM _migrations WHERE version = 195;` — the listings of this release send the statements before 195 from their next reading of the catalog, within a minute.
+
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
 `CTX_GRAPH_OVERVIEW_CSR_LOADER` (default `false`, hot) switches how the rebuild gets its graph into memory. It changes no result — the partition, the modularity and the intra-cluster degrees are byte-identical either way, and that identity is a gate, not a hope.

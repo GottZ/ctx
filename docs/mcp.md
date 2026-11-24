@@ -386,7 +386,7 @@ same three keys and answers through the same function.
 
 ### recent
 
-Newest blocks first — for questions like "what was saved this week". Read-only.
+Newest blocks first (by the time of their last write, a tie by id) — for questions like "what was saved this week". Read-only.
 
 | Parameter | Type | | Description |
 |---|---|---|---|
