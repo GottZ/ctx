@@ -197,7 +197,7 @@ func recentIndexSQL(readScopes []string, category string, limit int, typesExclud
 // INVALID or foreign index of the name. Without its index an arm reads its
 // whole scope through idx_context_scope and sorts it, which costs more than
 // the statement before 195 where a reader holds many scopes or filters a
-// category (measured at 1 000 000 rows: 744 081 against 201 301-204 469
+// category (measured at 1 000 000 rows: 744 081 against 200 743-204 469
 // buffers for 500 scopes, 18 881 against 8 377 for a category), so a listing
 // sends the statement before 195 until the index its arms read stands.
 const listIndexReadySQL = `SELECT

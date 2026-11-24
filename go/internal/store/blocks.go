@@ -2503,7 +2503,8 @@ func searchBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, p
 // searchParams is the input of the statement builder. It exists so the §6.6
 // plan gate can EXPLAIN the very statement production runs instead of a
 // hand-copied approximation of it — a copy would drift and the gate would then
-// measure the copy.
+// measure the copy. A browse sends the walk of blocks_list.go while its
+// indexes stand (searchStatement).
 type searchParams struct {
 	Query           string
 	ReadScopes      []string
