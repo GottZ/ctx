@@ -70,7 +70,7 @@ func manageNULField(req manageRequest) string {
 			// name); a key that carries the NUL names its object, so the
 			// answer does not echo the character.
 			if k, found := jsonNULKey(f); found {
-				if k == "" || strings.ContainsRune(k, 0) {
+				if k == "" { // a key of the object carries it
 					return name
 				}
 				return name + "." + k

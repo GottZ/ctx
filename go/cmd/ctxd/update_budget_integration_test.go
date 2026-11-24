@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GottZ/ctx/internal/store"
 )
@@ -211,6 +212,18 @@ func TestSingleUpdateBooksWrite(t *testing.T) {
 				t.Fatalf("spend %d: %d %s", i, r.status, r.answer)
 			}
 		}
+		// Hold the rows of the eight updates, so they all reach their
+		// budget step together once they are let go: with the key's budget
+		// lock the first holds it while it waits for its row and the others
+		// wait for the lock; without it all eight would count the same rest.
+		holder, err := f.pool.Begin(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		raced := ids[updateBudgetLimit-1:]
+		if _, err := holder.Exec(context.Background(), `SELECT 1 FROM context_blocks WHERE id = ANY($1) FOR UPDATE`, raced); err != nil {
+			t.Fatal(err)
+		}
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		statuses := map[int]int{}
@@ -224,6 +237,17 @@ func TestSingleUpdateBooksWrite(t *testing.T) {
 				mu.Unlock()
 			}(ids[updateBudgetLimit-1+i])
 		}
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+			var waiting int
+			if err := f.pool.QueryRow(context.Background(),
+				`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
+				t.Fatal(err)
+			}
+			if waiting >= parallel || time.Now().After(deadline) {
+				break
+			}
+		}
+		_ = holder.Rollback(context.Background())
 		wg.Wait()
 		if statuses[http.StatusOK] != 1 || statuses[http.StatusTooManyRequests] != parallel-1 {
 			t.Errorf("statuses %v, want one 200 and %d × 429", statuses, parallel-1)
