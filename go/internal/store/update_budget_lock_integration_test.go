@@ -184,3 +184,59 @@ func TestBudgetedWritersDeadlockCount(t *testing.T) {
 	}
 	t.Logf("budgeted writers of one key, %d rounds per pair:\n%s", ublCountRounds, strings.Join(table, "\n"))
 }
+
+// TestBudgetedWritesBookWithTheirCommit (issue #519, review of PR #553): the
+// booking of a single update and of a batch is a row of the write's own
+// transaction, so a write whose COMMIT fails leaves no booking — a booking
+// on the pool beside the transaction would stay. A deferred constraint
+// trigger refuses, at the commit, a row that carries the marker content.
+func TestBudgetedWritesBookWithTheirCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	key, _, err := store.CreateApiKey(ctx, pool, "budget-commit", "private", nil, store.DefaultTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE FUNCTION zz_refuse_at_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN IF NEW.content = 'refused at commit' THEN RAISE EXCEPTION 'refused at commit'; END IF; RETURN NULL; END $$`,
+		`CREATE CONSTRAINT TRIGGER zz_refuse_at_commit AFTER UPDATE ON context_blocks
+		 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION zz_refuse_at_commit()`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	budget := &store.WriteBudget{APIKeyID: key.ID, Limit: 100}
+	scopes := []string{"budget-commit"}
+	a, b := ubSeed(t, pool, "budget-commit", "a"), ubSeed(t, pool, "budget-commit", "b")
+	bookings := func() int {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM context_access_log WHERE api_key_id = $1 AND action = 'write'`, key.ID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	refused := store.UpdateBlockData{Content: ubuPtr("refused at commit")}
+	if _, _, err := store.UpdateBlockBooked(ctx, pool, a, refused, scopes, budget); err == nil || !strings.Contains(err.Error(), "refused at commit") {
+		t.Fatalf("single update: %v, want the commit's refusal", err)
+	}
+	if _, err := store.UpsertBlocks(ctx, pool, []store.BatchUpsert{ubuUpdate(b, refused, scopes...)}, "ubl", nil, budget); err == nil || !strings.Contains(err.Error(), "refused at commit") {
+		t.Fatalf("batch: %v, want the commit's refusal", err)
+	}
+	if n := bookings(); n != 0 {
+		t.Errorf("%d bookings after two writes whose commit failed, want 0", n)
+	}
+	if _, _, err := store.UpdateBlockBooked(ctx, pool, a, store.UpdateBlockData{Content: ubuPtr("written")}, scopes, budget); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertBlocks(ctx, pool, []store.BatchUpsert{ubuUpdate(b, store.UpdateBlockData{Content: ubuPtr("written")}, scopes...)}, "ubl", nil, budget); err != nil {
+		t.Fatal(err)
+	}
+	if n := bookings(); n != 2 {
+		t.Errorf("%d bookings after two committed writes, want 2", n)
+	}
+}

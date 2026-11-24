@@ -28,7 +28,10 @@
 // Before the fix a check its deadline cancelled destroyed its connection,
 // whose close — and a build an abandoned acquire left — kept a pool slot
 // after the semaphore released it, and the door held more slots than the
-// semaphore admits; the same verdict applies to that flood.
+// semaphore admits; the same verdict applies to that flood. A third holds
+// the checks past modelAuthCheckBound, where their statements are cancelled
+// and their connections destroyed: a slot goes back only once its close is
+// done (onSlot waits for CleanupDone), so the verdict holds there too.
 //
 //	go test -tags=integration -p 1 -count=1 -run TestModelAuthSemaphore -v ./internal/handler/
 package handler
@@ -58,6 +61,10 @@ const (
 	// semStall is how long the stalled flood's lock holds the door's checks:
 	// past modelAuthDBDeadline, so every check of that stretch runs into it.
 	semStall = 2500 * time.Millisecond
+	// semStallPastBound holds them past modelAuthCheckBound as well: the
+	// checks' statements are cancelled there and their connections
+	// destroyed, and the slot goes back only once the close is done.
+	semStallPastBound = modelAuthCheckBound + 1500*time.Millisecond
 )
 
 func semLoadavg() string {
@@ -131,10 +138,35 @@ type semCounts struct {
 // trace.
 type semPoolMeter struct {
 	*madTracer
-	mu    sync.Mutex
-	owner map[*pgx.Conn]semOwner // acquired connections, until their release
-	total int
-	c     semCounts
+	mu      sync.Mutex
+	owner   map[*pgx.Conn]semOwner // acquired connections, until their release
+	closing []semClosing           // destroyed connections whose close may still run
+	total   int
+	c       semCounts
+}
+
+// semClosing is a destroyed connection of owner o until done (CleanupDone).
+type semClosing struct {
+	o    semOwner
+	done <-chan struct{}
+}
+
+// endClosed ends the closing slots whose close is done; the caller holds
+// m.mu. Every acquire runs it first, so a slot whose close ended before the
+// acquire started is never counted beside it — the order onSlot keeps when it
+// waits for CleanupDone before its semaphore slot goes back — while one whose
+// close still runs is.
+func (m *semPoolMeter) endClosed() {
+	kept := m.closing[:0]
+	for _, c := range m.closing {
+		select {
+		case <-c.done:
+			m.add(&m.c.closing, &m.c.peakClosing, c.o, -1)
+		default:
+			kept = append(kept, c)
+		}
+	}
+	m.closing = kept
 }
 
 // add moves owner o's slots of one kind by n and updates the peaks; the
@@ -163,6 +195,7 @@ func (m *semPoolMeter) TraceAcquireStart(ctx context.Context, _ *pgxpool.Pool, _
 		a.owner = semLoad
 	}
 	m.mu.Lock()
+	m.endClosed()
 	m.c.acquires[a.owner]++
 	m.add(&m.c.inFlight, &m.c.peakInFlight, a.owner, 1)
 	m.mu.Unlock()
@@ -228,10 +261,11 @@ func (m *semPoolMeter) TraceRelease(_ *pgxpool.Pool, d pgxpool.TraceReleaseData)
 	}
 	m.c.destroyed[o]++
 	m.move(&m.c.closing, &m.c.peakClosing, o)
+	m.closing = append(m.closing, semClosing{o: o, done: pc.CleanupDone()})
 	go func() {
 		<-pc.CleanupDone()
 		m.mu.Lock()
-		m.add(&m.c.closing, &m.c.peakClosing, o, -1)
+		m.endClosed()
 		m.mu.Unlock()
 	}()
 }
@@ -370,7 +404,13 @@ func TestModelAuthSemaphore_Integration(t *testing.T) {
 				}
 			}()
 		}
-		time.Sleep(semPhase)
+		// The flood runs on until the stall has ended, so checks keep waiting
+		// for the semaphore while those past the bound give their slots back.
+		run := semPhase
+		if stall+time.Second > run {
+			run = stall + time.Second
+		}
+		time.Sleep(run)
 		close(stop)
 		lw.Wait()
 		wg.Wait()
@@ -390,7 +430,7 @@ func TestModelAuthSemaphore_Integration(t *testing.T) {
 	for _, fl := range []struct {
 		name  string
 		stall time.Duration
-	}{{"flood", 0}, {"stalled flood", semStall}} {
+	}{{"flood", 0}, {"stalled flood", semStall}, {"flood stalled past the check bound", semStallPastBound}} {
 		flood, statuses, reqs := phase(true, fl.stall)
 		fc := meter.settled()
 		meter.phase()
@@ -432,6 +472,9 @@ func TestModelAuthSemaphore_Integration(t *testing.T) {
 		}
 		if fl.stall > 0 && st.DBErrors == 0 && st.SemaphoreTimeouts == 0 {
 			t.Errorf("%s: no check ran into its deadline — the stall was not exercised", fl.name)
+		}
+		if fl.stall > modelAuthCheckBound && fc.destroyed[semDoor] == 0 {
+			t.Errorf("%s: no door connection was destroyed — no check reached modelAuthCheckBound", fl.name)
 		}
 	}
 	if unknown != 0 {
