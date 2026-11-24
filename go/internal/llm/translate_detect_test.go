@@ -105,6 +105,8 @@ func TestNeedsTranslationQuotedTextIsMaterial(t *testing.T) {
 		"Vad betyder felet ”the disk is full” på servern?",
 		`Hvad betyder "the build is green" egentlig?`,
 		`Was bedeutet "Schreibschutz"?`,
+		`Was bedeutet der Fehler "the server is not responding "?`,
+		`Was bedeutet "the users' data is gone" für uns?`,
 	)
 	checkNeedsTranslation(t, false,
 		`Who composed "Der Ring des Nibelungen"?`,
@@ -112,6 +114,7 @@ func TestNeedsTranslationQuotedTextIsMaterial(t *testing.T) {
 		"Who wrote „Im Westen nichts Neues“ and when?",
 		"Who wrote 'Im Westen nichts Neues' and when?",
 		`What does "Größe" mean in Jörg's notes?`,
+		"What does 'Wie geht's dem Jörg und der Familie' mean?",
 	)
 }
 
@@ -145,6 +148,7 @@ func TestNeedsTranslationApostrophesAndOpenQuotes(t *testing.T) {
 		"Where is the users' data and the admins' log?",
 		`What is the "Größe`,
 		"'Twas the night before the release",
+		"Jörg's notes and the admins' Übersicht",
 	)
 	checkNeedsTranslation(t, true,
 		"Wie geht's dem Jörg und was macht's Haus?",
@@ -306,6 +310,8 @@ func TestNeedsTranslationLongInput(t *testing.T) {
 	checkNeedsTranslation(t, false,
 		strings.Repeat("what was the decision about the backup schedule ", 20000),
 		strings.Repeat("x", 1<<20),
+		strings.Repeat(`"a `, 1<<18),
+		`"` + strings.Repeat("what was the decision ", 40000),
 	)
 	checkNeedsTranslation(t, true,
 		strings.Repeat("a", 100*1024)+"ä",

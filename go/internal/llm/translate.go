@@ -305,19 +305,17 @@ func opensQuote(text string, i, size int) bool {
 }
 
 // closingQuote returns the position and size of the first mark of the kind
-// at or after from that can close a quote: it follows something other than
-// white space and is not followed by a letter or digit (so the apostrophe of
-// it's closes nothing). -1 when there is none.
+// at or after from that can close a quote: one not followed by a letter or
+// digit (so the apostrophe of it's closes nothing, and "text " still closes).
+// -1 when there is none.
 func closingQuote(text string, from, kind int) (int, int) {
-	afterSpace := false
 	for j := from; j < len(text); {
 		r, size := utf8.DecodeRuneInString(text[j:])
-		if !afterSpace && quoteKind(r) == kind {
+		if quoteKind(r) == kind {
 			if next, _ := utf8.DecodeRuneInString(text[j+size:]); !isWordRune(next) {
 				return j, size
 			}
 		}
-		afterSpace = unicode.IsSpace(r)
 		j += size
 	}
 	return -1, 0
