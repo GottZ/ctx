@@ -966,10 +966,11 @@ var (
 // (issue #487): German when it has German marker words, weekday or month
 // names and no English ones, English the other way round, and mixed
 // otherwise. A word in capitals is an acronym and "am" or "um" after a
-// number or "I" English, so neither counts. DetectGerman, the detection of the translation step, does not
-// decide it: it answers only "German or not", counts the umlaut of a name
-// ("Was Jürgen there on Monday?" is German to it) and needs two stopwords or
-// a domain term ("Was kommt am Montag?" is not German to it).
+// number or "I" English, so neither counts. NeedsTranslation, the detection of the translation step, does not
+// decide it: it answers only "translate or not" (German and the Nordic
+// languages yes, English no) and needs two stopwords, a domain term, a Nordic
+// function word or a word with ä ö ü ß å æ ø ("Was kommt am Montag?" is not
+// translated).
 func questionLanguage(c clauseWords) int {
 	return c.lang
 }

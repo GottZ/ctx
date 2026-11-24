@@ -880,14 +880,16 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			"translated", translated,
 			"request_id", requestID,
 		)
-	} else if cfg.Query.Translate != llm.TranslateOff && llm.DetectGerman(query) {
-		// The heuristic fires on umlauts and German stopwords, so Swedish,
-		// Danish and Finnish questions land here too; the translation to
-		// English is right for them as well, only the old label was not.
-		// That holds for a corpus written in English; a tenant whose blocks
-		// are in the language its users ask in switches the step off with
-		// query.translate = off (#210) — then no question is translated,
-		// whatever the heuristic says. The pin above stays first, so a
+	} else if cfg.Query.Translate != llm.TranslateOff && llm.NeedsTranslation(query) {
+		// The step translates into English because the corpus is English or
+		// German. NeedsTranslation matches German and Swedish, Danish,
+		// Norwegian and Finnish questions, whatever letters they are written
+		// with, and leaves English ones as written (#210: measured on 100
+		// Swedish and Danish questions, the translation raised MRR@10 against
+		// an English corpus and left it level against a German one). A tenant
+		// whose blocks are in the language its users ask in switches the step
+		// off with query.translate = off — then no question is translated,
+		// whatever the detector says. The pin above stays first, so a
 		// measurement can still pin a translation for such a tenant.
 		slog.Info("non-english heuristic matched, translating",
 			"request_id", requestID,

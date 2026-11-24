@@ -65,7 +65,7 @@ func TestQueryTranslateSetting(t *testing.T) {
 		return trHits.Load()
 	}
 
-	if !llm.DetectGerman("wie ist der status der datenbank") {
+	if !llm.NeedsTranslation("wie ist der status der datenbank") {
 		t.Fatal("fixture question no longer matches the heuristic — the probe would pass vacuously")
 	}
 	for _, tc := range []struct {

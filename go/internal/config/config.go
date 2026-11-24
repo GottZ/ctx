@@ -957,20 +957,21 @@ type QueryConfig struct {
 	// reaches with limit = 20 — a raised value moves no request past it.
 	MaxSourceRunes int `key:"query.max_source_runes" env:"CTX_MAX_SOURCE_RUNES" default:"1500" mut:"hot" tenancy:"tenant-overridable"`
 	// Translate switches the query path's detect+translate step (#210):
-	// "auto" (llm.TranslateAuto, the default and today's behaviour) translates
-	// a question llm.DetectGerman matches into English before retrieval; "off"
+	// "auto" (llm.TranslateAuto, the default) translates a question
+	// llm.NeedsTranslation matches into English before retrieval; "off"
 	// (llm.TranslateOff) sends every question to the retrieval arms as
 	// written, with no translate-role call. The empty value reads as auto;
 	// anything else is refused after trim + lower-case (V65) — a tolerant
 	// reading would be auto, so a typo of "off" would silently keep the step
 	// the operator was switching off (the V20 reasoning).
 	//
-	// The heuristic matches on umlauts and German stop words, so Swedish and
-	// some English questions are translated too. For an English corpus that is
-	// the stated design; for a corpus in the users' own language the English
-	// text works against the full-text and title arms, and no detector fixes
-	// that — the step has to go. Temporal normalisation is unaffected (it reads
-	// the original question), and pinned_translation still applies.
+	// auto translates German and Swedish, Danish, Norwegian and Finnish
+	// questions (whatever letters they are written with) and leaves English
+	// ones as written: right for an English or German corpus. For a corpus in
+	// the users' own third language the English text works against the
+	// full-text and title arms, and no detector fixes that — the step has to
+	// go. Temporal normalisation is unaffected (it reads the original
+	// question), and pinned_translation still applies.
 	//
 	// tenant-overridable with the thresholds: it changes only how that
 	// tenant's OWN questions reach retrieval, and "off" removes a wire call
