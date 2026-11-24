@@ -47,7 +47,7 @@ def e2e(hermes, tmp_path, monkeypatch, request):
         load_in(home)
     import discord
     from discord.ext import commands
-    from gateway.config import PlatformConfig
+    from gateway.config import GatewayConfig, PlatformConfig
     from gateway.profile_routing import ProfileRoute
     from gateway.run import GatewayRunner
     from hermes_cli import plugins
@@ -88,7 +88,7 @@ def e2e(hermes, tmp_path, monkeypatch, request):
         channel.guild.name = f"guild-{guild[-3:]}"
         channels[name] = channel
     runner = GatewayRunner.__new__(GatewayRunner)
-    runner.config = SimpleNamespace(
+    runner.config = GatewayConfig(
         multiplex_profiles=True, group_sessions_per_user=True, thread_sessions_per_user=False,
         profile_routes=[ProfileRoute(name="a", platform="discord", profile="routed", guild_id=GUILD_A),
                         ProfileRoute(name="c", platform="discord", profile="bare", guild_id=GUILD_C)])
@@ -276,7 +276,7 @@ async def e2e_real(hermes, tmp_path, monkeypatch, request):
     manager = load_in(homes.root)
     import discord
     from discord.ext import commands
-    from gateway.config import Platform
+    from gateway.config import GatewayConfig, Platform
     from gateway.platforms.helpers import MessageDeduplicator
     from gateway.run import GatewayRunner
     from hermes_cli import plugins
@@ -305,8 +305,8 @@ async def e2e_real(hermes, tmp_path, monkeypatch, request):
     await bot.__aenter__()                      # binds the running loop; no login, no gateway
     model = DiscordWorld(bot)
     runner = GatewayRunner.__new__(GatewayRunner)
-    runner.config = SimpleNamespace(multiplex_profiles=False, profile_routes=[], group_sessions_per_user=True,
-                                    thread_sessions_per_user=False)
+    runner.config = GatewayConfig(multiplex_profiles=False, profile_routes=[], group_sessions_per_user=True,
+                                  thread_sessions_per_user=False)
     runner._resolve_profile_home_for_source = lambda source: homes.root
     runner._profile_name_for_source = lambda source, adapter_profile=None: None
     adapter = PolicyAdapter.__new__(PolicyAdapter)

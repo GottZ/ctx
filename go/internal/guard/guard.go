@@ -28,6 +28,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/pgxdb"
+	"github.com/GottZ/ctx/internal/store"
 )
 
 // GuardResult holds the outcome of processing a single block. The two
@@ -550,25 +551,27 @@ func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *block
 		return false
 	}
 
-	if archives(result.Decision, mode) && result.MatchedID != nil {
-		claimed, err := claimArchivePair(ctx, tx, blockID, *result.MatchedID)
-		if err != nil {
-			slog.Error("guard: claim archive failed", "block_id", blockID, "error", err)
+	var supersedesTargets []string
+	if archives(result.Decision, mode) {
+		targets, ok := claimArchive(ctx, tx, blockID, result)
+		if !ok {
 			rollbackToSavepoint(ctx, tx, sp)
 			return false
 		}
-		if !claimed {
-			// Not an error: the block stays pending and the next run checks
-			// it against what the concurrent decision left.
-			slog.Info("guard: archive verdict meets a concurrent one, block left for the next run",
-				"block_id", blockID, "matched_id", *result.MatchedID)
-			rollbackToSavepoint(ctx, tx, sp)
-			return false
-		}
+		supersedesTargets = targets
 	}
 
 	if err := applyDecision(ctx, tx, blockID, result, mode); err != nil {
 		slog.Error("guard: apply decision failed", "block_id", blockID, "error", err)
+		rollbackToSavepoint(ctx, tx, sp)
+		return false
+	}
+
+	// An archived block supersedes nothing: the targets of its supersedes
+	// links are reconciled in the verdict's savepoint, as every archive does
+	// (issue #284). Their rows are held already (claimArchive).
+	if _, err := store.ReconcileSupersedesTargets(ctx, tx, supersedesTargets, ""); err != nil {
+		slog.Error("guard: supersedes reconcile failed", "block_id", blockID, "error", err)
 		rollbackToSavepoint(ctx, tx, sp)
 		return false
 	}
@@ -591,6 +594,47 @@ func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *block
 		"similarity", result.Similarity,
 	)
 	return true
+}
+
+// claimArchive takes what an archive verdict needs before applyDecision
+// archives blockID, none of it with a wait: the pair claim against the matched
+// neighbour (claimArchivePair), then the archive's supersedes locks
+// (store.TryLockSupersedesSource: the scope's guess lock, shared, which keeps
+// out a dream batch that could add a supersedes link from the block, and the
+// targets of its supersedes links), returning those targets for the reconcile
+// after the archive. ok=false leaves the block pending for the next run — the
+// caller rolls back to its savepoint, which releases every lock taken here —
+// when another verdict claims one of the two blocks, the neighbour is gone,
+// or another transaction holds the guess lock exclusively or a target (a
+// dream batch with a supersedes guess of the scope, an update of a target):
+// the next run decides on what that transaction left, no half verdict stays
+// behind (issue #284).
+func claimArchive(ctx context.Context, tx pgx.Tx, blockID string, result *GuardResult) (targets []string, ok bool) {
+	if result.MatchedID != nil {
+		claimed, err := claimArchivePair(ctx, tx, blockID, *result.MatchedID)
+		if err != nil {
+			slog.Error("guard: claim archive failed", "block_id", blockID, "error", err)
+			return nil, false
+		}
+		if !claimed {
+			// Not an error: the block stays pending and the next run checks
+			// it against what the concurrent decision left.
+			slog.Info("guard: archive verdict meets a concurrent one, block left for the next run",
+				"block_id", blockID, "matched_id", *result.MatchedID)
+			return nil, false
+		}
+	}
+	targets, held, err := store.TryLockSupersedesSource(ctx, tx, blockID)
+	if err != nil {
+		slog.Error("guard: archive supersedes locks failed", "block_id", blockID, "error", err)
+		return nil, false
+	}
+	if !held {
+		slog.Info("guard: archive verdict meets a supersedes write of its scope or target, block left for the next run",
+			"block_id", blockID)
+		return nil, false
+	}
+	return targets, true
 }
 
 // archives reports whether a verdict archives the checked block: a

@@ -181,7 +181,25 @@ func WriteLinks(ctx context.Context, pool interface {
 		Begin:  "dream: begin tx",
 		Commit: "dream: commit links",
 	}, func(tx pgx.Tx) error {
-		// Issue #197: the scope's supersedes lock comes first, before any row
+		// A batch that may write a supersedes guess takes the scope's guess
+		// lock first, exclusively: two such batches each walk committed links
+		// only, so side by side they could each miss the other's guess and
+		// close a cycle together. The input decides, before any row lock: the
+		// per-link coerce below never turns another class into supersedes, so
+		// a batch without a supersedes candidate cannot write one (it can still
+		// delete or re-classify one, which closes no cycle). First, before the
+		// scope lock (issue #284): the guard run's archive verdict holds the
+		// guess lock shared until its batch commits, and a batch that waited
+		// for it while holding the scope lock shared would hold the scope's
+		// exclusive writers (block batches, declarations, archives) behind the
+		// guard batch too. Waiting here it holds nothing; only the dream
+		// batches with a guess and the guard's verdicts take this lock.
+		if carriesSupersedes(links) {
+			if err := store.LockSupersedesGuesses(ctx, tx, sourceScope); err != nil {
+				return err
+			}
+		}
+		// Issue #197: the scope's supersedes lock comes next, before any row
 		// lock of the batch, in SHARED mode (store.ShareSupersedesScope): a
 		// store declaring a supersedes holds it exclusively and so never
 		// interleaves with a batch, nor does an archive or a scope move of a
@@ -198,19 +216,6 @@ func WriteLinks(ctx context.Context, pool interface {
 		// on the source).
 		if err := store.ShareSupersedesScope(ctx, tx, sourceScope); err != nil {
 			return err
-		}
-		// A batch that may write a supersedes guess also takes the scope's
-		// guess lock, exclusively and second: two such batches each walk
-		// committed links only, so side by side they could each miss the
-		// other's guess and close a cycle together. The input decides, before
-		// any row lock: the per-link coerce below never turns another class
-		// into supersedes, so a batch without a supersedes candidate cannot
-		// write one (it can still delete or re-classify one, which closes no
-		// cycle).
-		if carriesSupersedes(links) {
-			if err := store.LockSupersedesGuesses(ctx, tx, sourceScope); err != nil {
-				return err
-			}
 		}
 
 		// Fetch source block metadata for structural checks. updated_at is no
@@ -235,11 +240,12 @@ func WriteLinks(ctx context.Context, pool interface {
 		// own: an archive or a move of the source through
 		// store.lockSupersedesSource holds that lock exclusively, so one that
 		// committed before is seen here and none commits until this batch
-		// does. Not covered: archives that take no supersedes lock (the guard's
-		// verdicts and resolves) and an archive or move whose lock pass missed
-		// the block because it was outside the caller's write scopes then
-		// (issue #284, point 5). A vanished row (srcErr) keeps its old exit
-		// below: no type, rejected fail-closed.
+		// does. So do the guard's archives (its resolves through the same lock
+		// pass; its archive verdict takes the lock without waiting, and leaves
+		// the block pending while a batch holds it), and an archive or move
+		// whose lock pass missed the block runs again until it holds the lock
+		// (issue #284). A vanished row (srcErr) keeps its old exit below: no
+		// type, rejected fail-closed.
 		if srcErr == nil && (srcScope != sourceScope || srcArchived) {
 			slog.Info("dream: write links skipped — the source left the scope it was picked in",
 				"source", sourceID, "picked_scope", sourceScope, "scope", srcScope, "archived", srcArchived)

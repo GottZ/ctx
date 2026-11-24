@@ -7,3 +7,10 @@ const LockSupersedesSourceSQLForTest = lockSupersedesSourceSQL
 
 // SupersedesTargetsOfSQLForTest is the re-read that follows the lock pass.
 const SupersedesTargetsOfSQLForTest = supersedesTargetsOfSQL
+
+// ErrSupersedesSourceChangedForTest is the error an archive or a scope move
+// answers when its lock pass kept missing the block (issue #284).
+var ErrSupersedesSourceChangedForTest = errSupersedesSourceChanged
+
+// GuardBatchLockSQLForTest is the guard resolve batch's lock statement.
+const GuardBatchLockSQLForTest = guardBatchLockSQL
