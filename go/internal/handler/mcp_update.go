@@ -188,8 +188,19 @@ func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *bloc
 	// (issue #453).
 	ctx, cancel := followUpContext(ctx)
 	defer cancel()
+	var set *blocktype.Set
 	if blocktypes != nil && (data.Title != nil || data.Metadata != nil || data.MetadataMerge != nil) {
-		set := blocktypes.SnapshotForRequest(ctx)
+		set = blocktypes.SnapshotForRequest(ctx)
+	}
+	finishBlockUpdateSet(ctx, pool, set, data, block, reqID)
+}
+
+// finishBlockUpdateSet is finishBlockUpdate on a registry snapshot the caller
+// holds and in a context it already detached: the update items of a block
+// batch (issue #211) run it in the batch's one afterwork bound. A nil set
+// skips the re-classify, as a nil registry does.
+func finishBlockUpdateSet(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, data store.UpdateBlockData, block *store.Block, reqID string) {
+	if set != nil && (data.Title != nil || data.Metadata != nil || data.MetadataMerge != nil) {
 		if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
 			slog.Warn("update afterwork: re-classify failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
@@ -206,7 +217,13 @@ func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *bloc
 // grants nil — a block grant is read-only and must never widen a write path).
 // Returns "" plus a user-facing message on any miss.
 func resolveUpdateTarget(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, id string) (string, string) {
-	resolvedID, matches, err := store.ResolveBlockID(ctx, cfg.Pool, id, writableBlockScopes(ar), nil)
+	return resolveUpdateTargetIn(ctx, cfg.Pool, ar, id)
+}
+
+// resolveUpdateTargetIn is resolveUpdateTarget on a pool: the update items of a
+// block batch resolve their ids through it (issue #211).
+func resolveUpdateTargetIn(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult, id string) (string, string) {
+	resolvedID, matches, err := store.ResolveBlockID(ctx, pool, id, writableBlockScopes(ar), nil)
 	if err != nil {
 		if len(matches) > 0 {
 			return "", fmt.Sprintf("ambiguous id prefix (%d matches) — re-specify with a longer prefix or the full id", len(matches))

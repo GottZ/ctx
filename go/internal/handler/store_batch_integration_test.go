@@ -257,13 +257,13 @@ func TestStoreBatchRefusalsWriteNothing(t *testing.T) {
 		body     map[string]any
 		code     string
 		text     string
-		restOnly bool // MCP's own schema refuses the shape before the core runs
+		restOnly bool // MCP's own schema refuses the shape before the core runs (no case left since #211's update items)
 	}{
 		{"no item", sbItems(), "missing_fields", "items: a batch needs at least one item", false},
 		{"above the cap", sbItems(sbItem("sb-c1", "a"), sbItem("sb-c2", "b"), sbItem("sb-c3", "c"), sbItem("sb-c4", "d"), sbItem("sb-c5", "e")),
 			"size_cap", "items: 5 items exceed the batch cap of 4", false},
 		{"missing content", sbItems(sbItem("sb-m1", "a"), map[string]any{"category": "learnings", "title": "sb-m2"}),
-			"missing_fields", "items[1]: Missing required fields", true},
+			"missing_fields", "items[1]: Missing required fields", false},
 		{"content above 50 KB", sbItems(sbItem("sb-s1", "a"), sbItem("sb-s2", big)), "size_cap", "items[1]: Content exceeds 50KB", false},
 		{"invalid sensitivity", sbItems(sbItem("sb-v1", "a"), sbItem("sb-v2", "b", "sensitivity", "secret")),
 			"invalid_sensitivity", "items[1]: Invalid sensitivity", false},
@@ -275,8 +275,6 @@ func TestStoreBatchRefusalsWriteNothing(t *testing.T) {
 			"reserved_metadata", "items[1]: metadata:", false},
 		{"scope not writable", sbItems(sbItem("sb-w1", "a"), sbItem("sb-w2", "b", "scope", "sb-foreign")),
 			"scope_denied", "items[1]: Cannot write to requested scope", false},
-		{"parent_id", sbItems(sbItem("sb-pa1", "a"), sbItem("sb-pa2", "b", "parent_id", existing)),
-			"invalid_body", "items[1]: parent_id is not part of a batch", true},
 		{"one identity twice", sbItems(sbItem("sb-d1", "a"), sbItem("sb-d1", "b")),
 			"constraint", "items[1]: same category, title and scope as items[0]", false},
 		{"one supersedes target twice", sbItems(sbItem("sb-st1", "a"), sbItem("sb-st2", "b", "supersedes", existing),
