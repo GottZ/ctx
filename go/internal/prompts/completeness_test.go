@@ -114,7 +114,7 @@ var bodyPins = map[string]struct {
 	sha   string
 }{
 	"llm.classifySystemPrompt":           {decls: []string{"classifySystemPrompt"}, sha: "405dc65451808a2c"},
-	"llm.translationSystemPrompt":        {decls: []string{"translationSystemPrompt"}, sha: "6676c6ad05963d78"},
+	"llm.translationSystemPrompt":        {decls: []string{"translationSystemPrompt"}, sha: "23024ee5188c3592"},
 	"llm.temporalPromptTemplate":         {decls: []string{"temporalPromptTemplate"}, sha: "4395901488d3293e"},
 	"llm.systemPromptV52":                {decls: []string{"systemPromptV52"}, sha: "43d61b3933ab77ac"},
 	"llm.systemPromptV6":                 {decls: []string{"systemPromptV6"}, sha: "7ca8b734e6802895"},

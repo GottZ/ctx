@@ -71,7 +71,7 @@ func TestQueryAdmissionAbandonTemporalFallbackIsWarn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
-	if !llm.HasTemporalIntent(aaqTemporalQuery) || llm.NormalizeTemporalRules(aaqTemporalQuery, time.Now()) != nil || llm.DetectGerman(aaqTemporalQuery) {
+	if !llm.HasTemporalIntent(aaqTemporalQuery) || llm.NormalizeTemporalRules(aaqTemporalQuery, time.Now()) != nil || llm.NeedsTranslation(aaqTemporalQuery) {
 		t.Fatal("fixture question no longer takes the temporal LLM fallback alone — the probe would test something else")
 	}
 	installRequestPrincipalHook(t)
