@@ -25,6 +25,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/chat"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -164,22 +165,11 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	}
 
 	var ttl time.Duration
-	rateLimit := 0
 	if s.cfg != nil {
-		snap := s.cfg.SnapshotForRequest(ctx)
-		ttl = snap.Writes.ConfirmTTL
-		rateLimit = snap.Query.RateLimitWrite
+		ttl = s.cfg.SnapshotForRequest(ctx).Writes.ConfirmTTL
 	}
-	if rateLimit > 0 {
-		writeCount, err := store.CheckRateLimit(ctx, s.pool, ar.ApiKeyID)
-		if err != nil {
-			logRequestError(ctx, "chat: stage update rate limit check error", "error", err, "request_id", reqID)
-			return nil, "", err
-		}
-		if writeCount >= rateLimit {
-			return nil, fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", rateLimit), nil
-		}
-	}
+	// The write budget is counted and spent with the stage, in its
+	// transaction (stageWithIntent, issue #519).
 
 	resolvedID, _, err := store.ResolveBlockID(ctx, s.pool, id, writableBlockScopes(ar), nil)
 	if err != nil {
@@ -222,7 +212,12 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 		slog.Error("chat: canonicalize staged update failed", "error", err, "request_id", reqID)
 		return nil, "", err
 	}
-	pw, err := store.StagePendingWrite(ctx, s.pool, ar.ApiKeyID, block.Scope, "update", "chat", canonical, hash, ttl)
+	pw, err := stageWithIntent(ctx, s.pool, updateWriteBudget(ctx, s.cfg, ar), func(q pgxdb.Rower) (*store.PendingWrite, error) {
+		return store.StagePendingWrite(ctx, q, ar.ApiKeyID, block.Scope, "update", "chat", canonical, hash, ttl)
+	})
+	if rej := updateBudgetReject(err); rej != nil {
+		return nil, rej.Msg, nil
+	}
 	if err != nil {
 		logRequestError(ctx, "chat: stage pending update failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return nil, "", err

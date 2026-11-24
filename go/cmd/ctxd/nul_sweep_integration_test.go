@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -241,13 +242,12 @@ type nulSweepFixture struct {
 	keys    map[string]string
 	cookies string
 	csrf    string
-	seq     int
+	seq     atomic.Int64
 }
 
 func (f *nulSweepFixture) do(t *testing.T, c nulSweepCase, nul bool) nulSweepResult {
 	t.Helper()
-	f.seq++
-	reqID := fmt.Sprintf("0519-%05x", f.seq)
+	reqID := fmt.Sprintf("0519-%05x", f.seq.Add(1))
 	u := strings.ReplaceAll(c.url, nulSweepMark, nulValue(c.id, nul, false))
 	body := strings.ReplaceAll(c.body, nulSweepMark, nulValue(c.id, nul, !c.form))
 	var rd io.Reader
@@ -301,7 +301,9 @@ func (f *nulSweepFixture) do(t *testing.T, c nulSweepCase, nul bool) nulSweepRes
 	return res
 }
 
-func nulSweepRouter(t *testing.T) *nulSweepFixture {
+// nulSweepRouter builds the production router over a fresh database with the
+// environment of the sweep plus env, and an admin key.
+func nulSweepRouter(t *testing.T, env map[string]string) *nulSweepFixture {
 	t.Helper()
 	pool := testdb.SetupTestDB(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -312,11 +314,15 @@ func nulSweepRouter(t *testing.T) *nulSweepFixture {
 	slog.SetDefault(slog.New(lg))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	applyEnv(t, map[string]string{
+	full := map[string]string{
 		"CTX_CAMO_ENABLED":   "true",
 		"CTX_SECRETS_KEY":    strings.Repeat("ab", 32),
 		"CTX_OAUTH_DCR_MODE": "admin",
-	})
+	}
+	for k, v := range env {
+		full[k] = v
+	}
+	applyEnv(t, full)
 	t.Setenv("CTX_OAUTH_DCR_MODE", "admin")
 	cc, issues := loadFromEnv()
 	if config.HasErrors(issues) {
@@ -463,7 +469,7 @@ func TestNULSweep(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration sweep")
 	}
-	f := nulSweepRouter(t)
+	f := nulSweepRouter(t, nil)
 	ctx := context.Background()
 	adminKey := f.keys["admin"]
 

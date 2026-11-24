@@ -801,7 +801,12 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
-	block, _, err := store.UpdateBlock(ctx, h.pool, resolvedID, data, writableBlockScopes(ar))
+	// Issue #519: the update is a write of the key's budget (update_budget.go).
+	block, _, err := store.UpdateBlockBooked(ctx, h.pool, resolvedID, data, writableBlockScopes(ar), updateWriteBudget(ctx, h.cfg, ar))
+	if rej := updateBudgetReject(err); rej != nil {
+		writeJSONReject(w, rej)
+		return
+	}
 	if err != nil {
 		writeUpdateFailure(w, err, reqID, "write_outcome", writeOutcome(err))
 		return

@@ -37,6 +37,7 @@
 package handler
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -46,6 +47,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -287,13 +289,14 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 			return errResult(miss), nil, nil
 		}
 		noteToolBlock(ctx, resolvedID)
-		block, _, err := store.UpdateBlock(ctx, cfg.Pool, resolvedID, data, writableBlockScopes(ar))
+		// Issue #519: the update is a write of the key's budget (update_budget.go).
+		block, _, err := store.UpdateBlockBooked(ctx, cfg.Pool, resolvedID, data, writableBlockScopes(ar), updateWriteBudget(ctx, cfg.Cfg, ar))
 		if err != nil {
 			// I7/S3: the target is a derivative — 403 class, not a 500.
 			// #227: the update would take another active block's identity —
 			// the 409 class, the same verdict REST manage update answers.
-			// #280: a re-type of a comment or an issue.
-			if rej := updateFailureReject(err); rej != nil {
+			// #280: a re-type of a comment or an issue. #519: the budget.
+			if rej := cmp.Or(updateBudgetReject(err), updateFailureReject(err)); rej != nil {
 				return errResultReject(rej), nil, nil
 			}
 			noteToolWrite(ctx, err)
@@ -327,22 +330,11 @@ func mcpUpdateHandler(cfg MCPConfig) mcp.ToolHandlerFor[updateInput, any] {
 // merge (CanonicalWrite.MetadataMerge says why).
 func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, input updateInput, fields []string) (*mcp.CallToolResult, any, error) {
 	var ttl time.Duration
-	rateLimit := 0
 	if cfg.Cfg != nil {
-		snap := cfg.Cfg.SnapshotForRequest(ctx)
-		ttl = snap.Writes.ConfirmTTL
-		rateLimit = snap.Query.RateLimitWrite
+		ttl = cfg.Cfg.SnapshotForRequest(ctx).Writes.ConfirmTTL
 	}
-	if rateLimit > 0 {
-		writeCount, err := store.CheckRateLimit(ctx, cfg.Pool, ar.ApiKeyID)
-		if err != nil {
-			logRequestError(ctx, "mcp: stage update rate limit check error", "error", err)
-			return errResult("stage failed: internal error"), nil, nil
-		}
-		if writeCount >= rateLimit {
-			return errResult(fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", rateLimit)), nil, nil
-		}
-	}
+	// The write budget is counted and spent with the stage, in its
+	// transaction (stageWithIntent, issue #519).
 
 	resolvedID, miss := resolveUpdateTarget(ctx, cfg, ar, input.ID)
 	if miss != "" {
@@ -401,8 +393,14 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 		return errResult("stage failed: cannot canonicalize payload"), nil, nil
 	}
 	noteToolBlock(ctx, resolvedID)
-	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, block.Scope, "update", "mcp", canonical, hash, ttl)
+	// Issue #519: the stage pays its write intent in its transaction.
+	pw, err := stageWithIntent(ctx, cfg.Pool, updateWriteBudget(ctx, cfg.Cfg, ar), func(q pgxdb.Rower) (*store.PendingWrite, error) {
+		return store.StagePendingWrite(ctx, q, ar.ApiKeyID, block.Scope, "update", "mcp", canonical, hash, ttl)
+	})
 	noteToolStaged(ctx, err, false)
+	if rej := updateBudgetReject(err); rej != nil {
+		return errResultReject(rej), nil, nil
+	}
 	if err != nil {
 		logRequestError(ctx, "mcp: stage pending update failed", "error", err, "write_outcome", statementOutcome(err))
 		return errResult("stage failed: could not persist the staged write"), nil, nil
