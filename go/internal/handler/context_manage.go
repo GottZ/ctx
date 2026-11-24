@@ -796,8 +796,8 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
-	if status, msg := h.applySensitivityGuard(ctx, ar, reqID, resolvedID, &data); msg != "" {
-		writeJSON(w, status, map[string]any{"success": false, "error": msg})
+	if rej := sensitivityGuardReject(ctx, h.pool, ar, reqID, resolvedID, &data); rej != nil {
+		writeJSONReject(w, rej) // with its code, as the store's refusal (issue #547)
 		return
 	}
 
@@ -830,20 +830,11 @@ func strOrEmpty(s *string) string {
 	return *s
 }
 
-// applySensitivityGuard enforces the F3 §3.5 downgrade guard on a block
+// sensitivityGuardReject enforces the F3 §3.5 downgrade guard on a block
 // update: lowering has the same flow direction as a backend trust elevation —
 // more content may reach less trusted backends — and carries the same
 // friction (confirm flag + metadata audit who/when/from→to). Upgrades stay
-// free. Empty msg = proceed; otherwise (status, msg) is the error response.
-func (h *ManageHandler) applySensitivityGuard(ctx context.Context, ar *auth.AuthResult, reqID, resolvedID string, data *store.UpdateBlockData) (int, string) {
-	if rej := sensitivityGuardReject(ctx, h.pool, ar, reqID, resolvedID, data); rej != nil {
-		return rej.Status, rej.Msg
-	}
-	return 0, ""
-}
-
-// sensitivityGuardReject is applySensitivityGuard's verdict as a rejection
-// class: an invalid level (invalid_sensitivity), a downgrade without its
+// free. Its verdict is a rejection class: an invalid level (invalid_sensitivity), a downgrade without its
 // confirm flag (missing_fields — the flag is what the remedy adds) and a read
 // fault (internal), each with the status and the message manage update has
 // always answered. nil = proceed; a confirm sets data.SensitivityAudit, the
@@ -870,6 +861,7 @@ func sensitivityGuardReject(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 		return classInternal.reject("Internal server error")
 	}
 	if data.ConfirmSensitivityDowngrade {
+		data.SensitivityDowngraded = sensitivityDowngradeLine(ar, reqID, resolvedID)
 		// The audit entry's proposal: the store writes it only for a
 		// downgrade of the level it holds the row at, with that level as
 		// "from" (issue #547) — this read is not under the write's lock.
@@ -886,10 +878,21 @@ func sensitivityGuardReject(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 	if !data.ConfirmSensitivityDowngrade {
 		return sensitivityDowngradeReject(curSens, newSens)
 	}
-	slog.Warn("manage: confirmed sensitivity downgrade",
-		"block_id", resolvedID, "from", string(curSens), "to", string(newSens),
-		"api_key_id", ar.ApiKeyID, "request_id", reqID)
 	return nil
+}
+
+// sensitivityDowngradeLine is the WARN line of a confirmed downgrade, written
+// by the store's report (UpdateBlockData.SensitivityDowngraded) once the
+// downgrade committed, with the level the store held the row at (issue #547:
+// the line came from the handler's read before the write — it named that
+// level, 1 191 lines "from=internal" for blocks the audit entry said were
+// "credentials", and a downgrade decided only under the lock got no line).
+func sensitivityDowngradeLine(ar *auth.AuthResult, reqID, resolvedID string) func(from, to backends.Sensitivity) {
+	return func(from, to backends.Sensitivity) {
+		slog.Warn("manage: confirmed sensitivity downgrade",
+			"block_id", resolvedID, "from", string(from), "to", string(to),
+			"api_key_id", ar.ApiKeyID, "request_id", reqID)
+	}
 }
 
 func (h *ManageHandler) handleDelete(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {

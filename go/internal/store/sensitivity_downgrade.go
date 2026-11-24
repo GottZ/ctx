@@ -46,6 +46,10 @@ type sensitivityPlan struct {
 	proposal    map[string]any
 	arg         int
 	writeScopes []string
+	// report is UpdateBlockData.SensitivityDowngraded; held is the level the
+	// last decision found under the lock.
+	report func(from, to backends.Sensitivity)
+	held   backends.Sensitivity
 }
 
 // lockSensitivitySQL locks the row an update writes — UpdateBlock's WHERE, the
@@ -77,6 +81,7 @@ func (p *sensitivityPlan) resolve(ctx context.Context, tx pgx.Tx, id string, arg
 // the audit argument.
 func (p *sensitivityPlan) decide(held backends.Sensitivity, args []any) error {
 	args[p.arg] = nil
+	p.held = held
 	if p.to.Rank() >= held.Rank() {
 		return nil
 	}
@@ -91,4 +96,17 @@ func (p *sensitivityPlan) decide(held backends.Sensitivity, args []any) error {
 	audit["to"] = string(p.to)
 	args[p.arg] = audit
 	return nil
+}
+
+// reportDowngrade calls the plan's report once its update has committed
+// (blockUpdate.handOver, after UpdateBlock's commit and after a block batch's)
+// when the committed decision was a confirmed downgrade — its audit argument
+// is set — with the level that held under the lock. A refused or rolled-back
+// update never reaches it, and an update that turned out not to lower the
+// block sets no audit argument: exactly one call per downgrade made.
+func (p *sensitivityPlan) reportDowngrade(args []any) {
+	if p == nil || p.report == nil || args[p.arg] == nil {
+		return
+	}
+	p.report(p.held, p.to)
 }

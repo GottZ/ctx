@@ -1767,6 +1767,10 @@ type UpdateBlockData struct {
 	// (who/when/from→to) and merged into metadata.sensitivity_audit. Never
 	// client-supplied (json:"-").
 	SensitivityAudit map[string]any `json:"-"`
+	// SensitivityDowngraded, when set, is called once after the update
+	// committed a confirmed downgrade, with the levels decided under the row
+	// lock (sensitivityPlan, issue #547) — the handler's WARN line.
+	SensitivityDowngraded func(from, to backends.Sensitivity) `json:"-"`
 	// Edits (issue #406) change the content by text replacement instead of
 	// replacing it: applied in order, all or none, to the content of the row
 	// UpdateBlock holds (ApplyContentEdits). Mutually exclusive with Content
@@ -2107,7 +2111,7 @@ func prepareUpdate(id string, data UpdateBlockData, writeScopes []string) (block
 		// Handler has validated the level; the downgrade confirm is decided
 		// under the row lock (sensitivityPlan, issue #547).
 		u.sens = &sensitivityPlan{to: backends.Sensitivity(*data.Sensitivity), confirm: data.ConfirmSensitivityDowngrade,
-			proposal: data.SensitivityAudit, arg: auditArg, writeScopes: writeScopes}
+			proposal: data.SensitivityAudit, arg: auditArg, writeScopes: writeScopes, report: data.SensitivityDowngraded}
 		u.assign = append(u.assign,
 			updateAssignment{"sensitivity", fmt.Sprintf("$%d", argIdx)},
 			updateAssignment{"sensitivity_source", "'manual'"})
@@ -2205,6 +2209,7 @@ func prepareUpdate(id string, data UpdateBlockData, writeScopes []string) (block
 // for the afterwork (issue #434); for edits, the ones the held row resolved.
 // As in execHeld, the handover names the returned content.
 func (u blockUpdate) handOver(b *Block) {
+	u.sens.reportDowngrade(u.args) // after the commit, as handOver itself (issue #547)
 	if !u.contentSent {
 		return
 	}
