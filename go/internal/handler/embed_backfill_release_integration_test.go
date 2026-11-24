@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -327,8 +328,10 @@ func TestEmbedBackfillReleaseStaysInTheCallersRange(t *testing.T) {
 	if code != http.StatusOK || body["released"] != float64(1) {
 		t.Errorf("tenant-admin release of the class: %d %s, want released 1", code, raw)
 	}
-	if ok, _, _, _ := f.memo(t, ownID); ok {
-		t.Errorf("the tenant's own regular memo is still there")
+	// A tenant-admin's release keeps the memo, due: the block is back in the
+	// pick, and the row remembers the release (the hold of a repeat).
+	if !relDue(t, f.pool, ownID) {
+		t.Errorf("the tenant's own memo is not released (due)")
 	}
 	for _, id := range []string{foreignID, grantedID} {
 		if ok, _, _, _ := f.memo(t, id); !ok {
@@ -502,4 +505,164 @@ func TestEmbedBackfillReleaseLeavesACallerTimeoutMemo(t *testing.T) {
 	if ok, _, _, _ := f.memo(t, id); !ok {
 		t.Errorf("the caller_timeout memo is gone")
 	}
+}
+
+// TestEmbedBackfillReleaseClampsThePageAt1000: one call releases at most
+// 1 000 memos, whatever limit it names (review F4: a limit of 5 000 ran as a
+// dry run over three memos only, so nothing pinned the bound).
+func TestEmbedBackfillReleaseClampsThePageAt1000(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newRelFixture(t)
+	ctx := context.Background()
+	const n = 1001
+	long := strings.Repeat("a long text ", 40)
+	for i := range n {
+		if _, err := store.UpsertBlock(ctx, f.pool, "learnings", fmt.Sprintf("rel236 bound %04d", i), long, nil, nil, "private", true, store.SensitivityWrite{}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := relCfg(50)
+	cfg.EmbedBackfill.SyncCap = 0 // one pass parks them all
+	f.backfill([]string{"private"}, cfg)
+	code, dry, raw := f.release(t, relServerAdmin, map[string]any{"class": "oversize", "limit": 100000})
+	if code != http.StatusOK || dry["counted"] != float64(n) {
+		t.Fatalf("dry run: %d %s, want counted %d", code, raw, n)
+	}
+	code, body, raw := f.release(t, relServerAdmin, map[string]any{"class": "oversize", "limit": 100000, "confirm_memos": dry["confirm_memos"], "as_of": dry["as_of"]})
+	if code != http.StatusOK || body["released"] != float64(1000) || body["remaining"] != float64(1) {
+		t.Fatalf("first page with limit 100000: %d %s, want released 1000 remaining 1", code, raw)
+	}
+	code, body, raw = f.release(t, relServerAdmin, map[string]any{"class": "oversize", "confirm_memos": body["confirm_memos"], "as_of": dry["as_of"]})
+	if code != http.StatusOK || body["released"] != float64(1) || body["remaining"] != float64(0) {
+		t.Fatalf("second page: %d %s, want released 1 remaining 0", code, raw)
+	}
+}
+
+// relDue reports whether the block's regular memo is there and due (it no
+// longer keeps the block out of the pick).
+func relDue(t *testing.T, pool *pgxpool.Pool, blockID string) bool {
+	t.Helper()
+	var due bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT next_attempt_at <= now() FROM context_embed_failures WHERE block_id = $1::uuid AND migration_id IS NULL`, blockID).Scan(&due); err != nil {
+		return false
+	}
+	return due
+}
+
+// TestEmbedBackfillReleaseHoldsATenantAdminsRepeat: a tenant-admin's release
+// of an oversize memo whose block is parked again is held for
+// embed_backfill.release_hold, doubling with each such park; a server-admin
+// is not held and resets the count, and so does a change of the block's
+// content.
+func TestEmbedBackfillReleaseHoldsATenantAdminsRepeat(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newRelFixture(t)
+	ctx := context.Background()
+	const hold = 600 * time.Millisecond
+	cfg := config.Defaults()
+	cfg.EmbedBackfill.ReleaseHold = hold
+	f.mh = NewManageHandler(f.pool, staticConfigStore{cfg: cfg}, nil, nil, nil, nil, nil, nil)
+	tn, err := store.CreateTenant(ctx, f.pool, "rel-h", "rel-h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const scope = "rel-h:data"
+	if _, err := store.AssignTenantScope(ctx, f.pool, tn.ID, scope, nil); err != nil {
+		t.Fatal(err)
+	}
+	admin := &auth.AuthResult{IsValid: true, ApiKeyID: "rel-h-key", HomeScope: scope, TenantID: tn.ID, TenantRole: auth.RoleAdmin}
+	id := relBlock(t, f.pool, scope, "rel236 held", strings.Repeat("a long text ", 40))
+	park := func() {
+		t.Helper()
+		f.backfill([]string{scope}, relCfg(50))
+		if ok, class, inf, _ := f.memo(t, id); !ok || class != "oversize" || !inf {
+			t.Fatalf("park: memo=%v class=%q infinity=%v", ok, class, inf)
+		}
+	}
+	attempts := func() int {
+		_, _, _, a := f.memo(t, id)
+		return a
+	}
+	dry := func(ar *auth.AuthResult) map[string]any {
+		t.Helper()
+		code, body, raw := f.release(t, ar, map[string]any{"class": "oversize"})
+		if code != http.StatusOK {
+			t.Fatalf("dry run: %d %s", code, raw)
+		}
+		return body
+	}
+	release := func(ar *auth.AuthResult) {
+		t.Helper()
+		if code, body, raw := f.releaseConfirmed(t, ar, map[string]any{"class": "oversize"}); code != http.StatusOK || body["released"] != float64(1) {
+			t.Fatalf("release: %d %s, want released 1", code, raw)
+		}
+	}
+
+	park()
+	release(admin) // the first release is never held
+	park()
+	if got := attempts(); got != 2 {
+		t.Fatalf("after the release and the park: %d attempts, want 2 (the row of the release)", got)
+	}
+	body := dry(admin)
+	until, _ := time.Parse(time.RFC3339Nano, fmt.Sprint(body["held_until"]))
+	if body["counted"] != float64(0) || body["held"] != float64(1) || until.IsZero() {
+		t.Fatalf("tenant-admin's repeat inside the hold: %v, want counted 0, held 1 and held_until", body)
+	}
+	if b := dry(relServerAdmin); b["counted"] != float64(1) || b["held"] != float64(0) {
+		t.Errorf("server-admin's dry run: %v, want counted 1, held 0 (never held)", b)
+	}
+	time.Sleep(time.Until(until) + 50*time.Millisecond)
+	release(admin) // the hold has passed
+	park()
+	body = dry(admin)
+	until2, _ := time.Parse(time.RFC3339Nano, fmt.Sprint(body["held_until"]))
+	if body["held"] != float64(1) || attempts() != 3 {
+		t.Fatalf("after the second park: %v with %d attempts, want held 1 with 3", body, attempts())
+	}
+	if got, prev := until2.Sub(f.releasedAt(t, id)), hold; got < 2*prev-50*time.Millisecond {
+		t.Errorf("the second hold lasts %v from the release, want twice the first (%v)", got, 2*prev)
+	}
+
+	// A server-admin's release resets the count: the next park is a first one.
+	release(relServerAdmin)
+	park()
+	if got := attempts(); got != 1 {
+		t.Errorf("after a server-admin's release and a park: %d attempts, want 1", got)
+	}
+	if b := dry(admin); b["counted"] != float64(1) {
+		t.Errorf("tenant-admin after a server-admin's release: %v, want counted 1", b)
+	}
+
+	// So does a change of the content.
+	release(admin)
+	park()
+	edited := strings.Repeat("a long text, edited ", 40)
+	if _, _, err := store.UpdateBlock(ctx, f.pool, id, store.UpdateBlockData{Content: &edited}, []string{scope}); err != nil {
+		t.Fatal(err)
+	}
+	park()
+	if got := attempts(); got != 1 {
+		t.Errorf("after a content change and a park: %d attempts, want 1", got)
+	}
+	if b := dry(admin); b["counted"] != float64(1) {
+		t.Errorf("tenant-admin after a content change: %v, want counted 1", b)
+	}
+}
+
+// releasedAt is first_seen of the block's regular memo: the time a
+// tenant-admin last released it (or its first park).
+func (f *relFixture) releasedAt(t *testing.T, blockID string) time.Time {
+	t.Helper()
+	var at time.Time
+	if err := f.pool.QueryRow(context.Background(),
+		`SELECT first_seen FROM context_embed_failures WHERE block_id = $1::uuid AND migration_id IS NULL`, blockID).Scan(&at); err != nil {
+		t.Fatal(err)
+	}
+	return at
 }

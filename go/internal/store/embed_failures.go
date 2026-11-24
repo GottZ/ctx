@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -550,18 +551,18 @@ const EmbedFailureQueryPathExcludedPredicate = `
 	)`
 
 // BackfillReleaseMaxLimit is the most regular memos one
-// embed-backfill-release call deletes (one statement, one page). A fixed
+// embed-backfill-release call releases (one statement, one page). A fixed
 // bound, not a policy: it keeps the statement's hold on the memo rows it
 // takes short and its WAL bounded; a larger set is released page by page.
 const BackfillReleaseMaxLimit = 1000
 
 // ErrBackfillReleaseSelector is a release that does not name exactly one of
-// a block or a releasable class, names a page size out of range, or
-// confirms without the as_of of its dry run.
+// a block or a releasable class, names a page size out of range, confirms
+// without the as_of of its dry run, or is a tenant reader's without a hold.
 var ErrBackfillReleaseSelector = errors.New("store: backfill release: exactly one of a block id or a class (wire, oversize), a limit of 1 to 1000, and a confirm together with the dry run's as_of")
 
 // ErrBackfillReleaseConfirmMismatch is a confirmed release whose fresh count
-// differs from the number it confirms: nothing was deleted.
+// differs from the number it confirms: nothing was released.
 var ErrBackfillReleaseConfirmMismatch = errors.New("store: backfill release: the memos in range are not the confirmed number")
 
 // BackfillRelease is one release of regular backfill memos (issue #236):
@@ -575,6 +576,10 @@ var ErrBackfillReleaseConfirmMismatch = errors.New("store: backfill release: the
 // both back, and takes only the memos the dry run could count (first_seen
 // not after AsOf), and only when their fresh count equals Confirm. Limit is
 // the page size (0 = BackfillReleaseMaxLimit).
+//
+// Hold and HoldCap are embed_backfill.release_hold and
+// embed_backfill.backoff_cap, the bound of a tenant reader's repeat
+// (ReleaseBackfillMemos); a tenant reader without a Hold is refused.
 type BackfillRelease struct {
 	BlockID    string
 	Class      EmbedFailureClass
@@ -583,40 +588,75 @@ type BackfillRelease struct {
 	Limit      int
 	Confirm    *int64
 	AsOf       *time.Time
+	Hold       time.Duration
+	HoldCap    time.Duration
 }
 
 // BackfillReleaseResult is what a release counted and did. AsOf is the time
 // of the dry run's count, which bounds every page of the release; Counted the
-// number of memos in range not written after AsOf, when the call counted;
-// Released the number it deleted; Remaining what is left of them after it
-// (Counted - Released: memos it skipped because another transaction held
-// them, and memos past the page).
+// number of memos in range the reader may release now and that were not
+// written after AsOf, when the call counted; Released the number it
+// released; Remaining what is left of them after it (Counted - Released:
+// memos it skipped because another transaction held them, and memos past the
+// page). Held is the number of memos in range a tenant reader may not
+// release yet (an oversize repeat inside its hold), HeldUntil the earliest
+// end of those holds.
 type BackfillReleaseResult struct {
 	DryRun    bool
 	AsOf      time.Time
 	Counted   int64
 	Released  int64
 	Remaining int64
+	Held      int64
+	HeldUntil *time.Time
 }
 
-// ReleaseBackfillMemos deletes regular backfill memos (migration_id IS NULL)
-// so the backfill takes their blocks again: the next pick of the block's
-// class reads it, embeds it when it fits now (a raised
-// embed_backfill.max_tokens, an embed backend with a larger context, a
-// backend that is up again), and parks it again after one attempt when it
-// does not. Without it a parked block came back only through a change of its
-// title or content (InvalidateEmbeddingTx); a write that re-sends the same
-// text does not release it (#216). A migration's memos (migration_id set)
-// are that migration's bookkeeping and are never taken, and neither is a
+// ReleaseBackfillMemos releases regular backfill memos (migration_id IS
+// NULL) that keep a block out of the pick (next_attempt_at in the future), so
+// the backfill takes their blocks again: the next pick of the block's class
+// reads it, embeds it when it fits now (a raised embed_backfill.max_tokens,
+// an embed backend with a larger context, a backend that is up again), and
+// parks it again after one attempt when it does not. Without it a parked
+// block came back only through a change of its title or content
+// (InvalidateEmbeddingTx); a write that re-sends the same text does not
+// release it (#216). A migration's memos (migration_id set) are that
+// migration's bookkeeping and are never taken, and neither is a
 // caller_timeout memo (releasableClasses).
 //
+// A server-admin's release deletes the memo: the block is as a content change
+// leaves it, at its first attempt. A tenant-admin's release keeps it and
+// makes it due (next_attempt_at = now()), its attempts and all, and records
+// the release in first_seen, so a block the backend still cannot take is
+// parked again on the same row, one attempt more. That row is what bounds a
+// tenant reader's repeat: an oversize memo of more than one attempt is
+// released again only once its hold has passed, Hold * 2^(attempts-2) after
+// first_seen (the release before, or the first park), at most HoldCap.
+// Without the bound a tenant-admin that released its blocks in a loop while
+// they kept not fitting held one turn of the background arm in every round
+// of its tenants for good — a pick each, and a wire call each for a block the
+// backend refuses — where the way back without the action, a content change
+// per block, costs a write each. The first release of every block stays
+// unbounded (the release after a backend change or a raised limit). A wire
+// memo is not held: its block's failure holds its tenant in the arm for an
+// interval, and its next failure backs off for longer, since the attempts
+// stay. A server-admin's release is not held and resets the count, and so
+// does a change of the block's title or content (InvalidateEmbeddingTx
+// deletes the memo).
+//
 // The pages of one release are bound to its dry run: a memo whose
-// first_seen is after AsOf (the start of the transaction that wrote it) is
-// neither counted nor deleted. A released block that does not fit is parked
-// again with a new memo, so without the bound every page would find the
-// blocks the pages before it released, and a release paged to remaining 0
-// would not end while blocks keep not fitting; a memo written between a
-// page's count and its delete stays out of that page as well.
+// first_seen is after AsOf (the start of the transaction that wrote it, or
+// the time a tenant-admin released it) is neither counted nor released. A
+// released block that does not fit is parked again, so without the bound
+// every page would find the blocks the pages before it released, and a
+// release paged to remaining 0 would not end while blocks keep not fitting;
+// a memo written between a page's count and its release stays out of that
+// page as well.
+//
+// The count and the page of a tenant reader's class release start at the
+// tenant's own scopes and read their pending blocks on the index ranges the
+// backfill pick reads (unembedded, stale), a memo probe per block: their cost
+// grows with the tenant's pending blocks, not with the other tenants' memos.
+// A block that is not pending holds no memo that keeps it out of the pick.
 //
 // Locks: memo rows only, and none it would have to wait for — the page is
 // taken FOR UPDATE SKIP LOCKED, so a memo another transaction holds (the
@@ -628,7 +668,7 @@ type BackfillReleaseResult struct {
 // memo of one block while it waits for the next block. It reads the block
 // rows of the reader rule without a lock.
 func ReleaseBackfillMemos(ctx context.Context, pool *pgxpool.Pool, r BackfillRelease) (BackfillReleaseResult, error) {
-	where, args, err := r.where()
+	sel, err := r.selection()
 	if err != nil {
 		return BackfillReleaseResult{}, err
 	}
@@ -636,18 +676,22 @@ func ReleaseBackfillMemos(ctx context.Context, pool *pgxpool.Pool, r BackfillRel
 	if !r.AllTenants && r.TenantID == "" {
 		return res, nil // the zero reader reaches nothing
 	}
+	if !res.DryRun {
+		res.AsOf = *r.AsOf
+		sel.memo += ` AND f.first_seen <= ` + sel.add(res.AsOf)
+	}
+	var asOf time.Time
+	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE `+sel.eligible+`),
+		       count(*) FILTER (WHERE NOT `+sel.eligible+`),
+		       min(`+sel.holdEnd+`) FILTER (WHERE NOT `+sel.eligible+`),
+		       now()
+		  FROM `+sel.source(sel.memo, false), sel.args...).Scan(&res.Counted, &res.Held, &res.HeldUntil, &asOf); err != nil {
+		return res, fmt.Errorf("store: backfill release: count: %w", err)
+	}
 	if res.DryRun {
-		if err := pool.QueryRow(ctx, `SELECT count(*), now() FROM context_embed_failures f WHERE `+where, args...).Scan(&res.Counted, &res.AsOf); err != nil {
-			return res, fmt.Errorf("store: backfill release: count: %w", err)
-		}
+		res.AsOf = asOf
 		res.Remaining = res.Counted
 		return res, nil
-	}
-	res.AsOf = *r.AsOf
-	where += fmt.Sprintf(` AND f.first_seen <= $%d`, len(args)+1)
-	args = append(args, res.AsOf)
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_failures f WHERE `+where, args...).Scan(&res.Counted); err != nil {
-		return res, fmt.Errorf("store: backfill release: count: %w", err)
 	}
 	if res.Counted != *r.Confirm {
 		res.Remaining = res.Counted
@@ -657,14 +701,18 @@ func ReleaseBackfillMemos(ctx context.Context, pool *pgxpool.Pool, r BackfillRel
 	if limit == 0 {
 		limit = BackfillReleaseMaxLimit
 	}
-	tag, err := pool.Exec(ctx, fmt.Sprintf(`WITH page AS (
-		SELECT f.block_id FROM context_embed_failures f
-		 WHERE %s
-		 LIMIT $%d
-		 FOR UPDATE SKIP LOCKED)
-		DELETE FROM context_embed_failures d USING page
-		 WHERE d.block_id = page.block_id AND d.migration_id IS NULL`, where, len(args)+1),
-		append(args, limit)...)
+	page := `WITH page AS (
+		SELECT f.block_id FROM ` + sel.source(sel.memo+` AND `+sel.eligible, true) + `
+		 LIMIT ` + sel.add(limit) + `)
+		`
+	if r.AllTenants {
+		page += `DELETE FROM context_embed_failures d USING page
+		 WHERE d.block_id = page.block_id AND d.migration_id IS NULL`
+	} else {
+		page += `UPDATE context_embed_failures u SET next_attempt_at = now(), first_seen = now()
+		  FROM page WHERE u.block_id = page.block_id AND u.migration_id IS NULL`
+	}
+	tag, err := pool.Exec(ctx, page, sel.args...)
 	if err != nil {
 		return res, fmt.Errorf("store: backfill release: %w", err)
 	}
@@ -673,33 +721,93 @@ func ReleaseBackfillMemos(ctx context.Context, pool *pgxpool.Pool, r BackfillRel
 	return res, nil
 }
 
-// where is the condition of r's memos on context_embed_failures f, and its
-// arguments: the regular memos of the block or of the class, and for a
-// tenant reader only those of blocks in the tenant's scopes.
-func (r BackfillRelease) where() (string, []any, error) {
+// releaseSelection is the SQL of r's memos: memo, the condition on the memo
+// row f; the scope and the tenant of a tenant reader's class release, which
+// reads the memos from its own scopes; the condition under which the reader
+// may release a memo now (eligible) and the end of a held memo's hold
+// (holdEnd); and the statement's arguments.
+type releaseSelection struct {
+	memo, eligible, holdEnd string
+	tenant                  string // placeholder of the tenant id, "" = read the memo table
+	args                    []any
+}
+
+// add appends a statement argument and returns its placeholder.
+func (s *releaseSelection) add(v any) string {
+	s.args = append(s.args, v)
+	return fmt.Sprintf("$%d", len(s.args))
+}
+
+// source is the FROM and WHERE of a statement over the memos that meet cond,
+// f being the memo row; locked, the memo rows are taken FOR UPDATE SKIP
+// LOCKED. A tenant reader's class release starts at the tenant's scopes and
+// reads their pending blocks on the backfill pick's index ranges (the
+// unembedded ones on idx_embedding_pending_scope_sens, the stale ones on
+// idx_embedding_stale_scope_sens), and each block's regular memo by its
+// block id; the memo is read in a subquery of one row per block (a block has
+// at most one regular memo, idx_embed_failures_backfill), which keeps the
+// probe a probe — joined, the planner hashed the whole memo table.
+func (s *releaseSelection) source(cond string, locked bool) string {
+	lock := ""
+	if locked {
+		lock = `
+		 FOR UPDATE OF f SKIP LOCKED`
+	}
+	if s.tenant == "" {
+		return `context_embed_failures f WHERE ` + cond + lock
+	}
+	lateralLock := ""
+	if locked {
+		lateralLock = ` FOR UPDATE SKIP LOCKED`
+	}
+	return `context_tenant_scopes ts
+		CROSS JOIN LATERAL (
+		  SELECT b.id FROM context_blocks b
+		   WHERE b.scope = ts.scope AND b.embedding IS NULL AND NOT b.is_archived AND NOT b.embed_excluded
+		  UNION ALL
+		  SELECT b.id FROM context_blocks b
+		   WHERE b.scope = ts.scope AND b.embedding_stale AND b.embedding IS NOT NULL AND NOT b.is_archived) p
+		CROSS JOIN LATERAL (
+		  SELECT f.block_id, f.last_class, f.attempts, f.first_seen FROM context_embed_failures f
+		   WHERE f.block_id = p.id AND ` + cond + `
+		   LIMIT 1` + lateralLock + `) f
+		WHERE ts.tenant_id = ` + s.tenant + `::uuid`
+}
+
+// selection builds r's releaseSelection.
+func (r BackfillRelease) selection() (releaseSelection, error) {
 	if (r.BlockID == "") == (r.Class == "") || r.Limit < 0 || r.Limit > BackfillReleaseMaxLimit ||
-		(r.Confirm != nil) != (r.AsOf != nil) {
-		return "", nil, ErrBackfillReleaseSelector
+		(r.Confirm != nil) != (r.AsOf != nil) || (!r.AllTenants && r.TenantID != "" && r.Hold <= 0) {
+		return releaseSelection{}, ErrBackfillReleaseSelector
 	}
-	where := `f.migration_id IS NULL AND `
-	var args []any
-	if r.BlockID != "" {
-		where += `f.block_id = $1::uuid AND f.last_class = ANY($2::text[])`
-		args = append(args, r.BlockID, releasableClassNames())
-	} else {
-		if !slices.Contains(releasableClasses, r.Class) {
-			return "", nil, ErrBackfillReleaseSelector
-		}
-		where += `f.last_class = $1`
-		args = append(args, string(r.Class))
-	}
-	if !r.AllTenants {
-		args = append(args, r.TenantID)
-		where += fmt.Sprintf(`
+	sel := releaseSelection{eligible: `true`, holdEnd: `NULL::timestamptz`}
+	switch {
+	case r.BlockID != "":
+		sel.memo = `f.block_id = ` + sel.add(r.BlockID) + `::uuid AND f.last_class = ANY(` + sel.add(releasableClassNames()) + `::text[])`
+		if !r.AllTenants {
+			sel.memo += `
 		   AND EXISTS (SELECT 1 FROM context_blocks b JOIN context_tenant_scopes ts ON ts.scope = b.scope
-		                WHERE b.id = f.block_id AND ts.tenant_id = $%d::uuid)`, len(args))
+		                WHERE b.id = f.block_id AND ts.tenant_id = ` + sel.add(r.TenantID) + `::uuid)`
+		}
+	case !slices.Contains(releasableClasses, r.Class):
+		return releaseSelection{}, ErrBackfillReleaseSelector
+	case r.AllTenants:
+		sel.memo = `f.last_class = ` + sel.add(string(r.Class))
+	default:
+		sel.tenant = sel.add(r.TenantID)
+		sel.memo = `f.last_class = ` + sel.add(string(r.Class))
 	}
-	return where, args, nil
+	sel.memo = `f.migration_id IS NULL AND f.next_attempt_at > now() AND ` + sel.memo
+	if !r.AllTenants {
+		capSecs := r.HoldCap.Seconds()
+		if capSecs <= 0 {
+			capSecs = math.MaxFloat64 // no cap: the doubling alone
+		}
+		hold := `make_interval(secs => least(` + sel.add(r.Hold.Seconds()) + `::float8 * power(2, least(f.attempts, 32) - 2), ` + sel.add(capSecs) + `::float8))`
+		sel.holdEnd = `f.first_seen + ` + hold
+		sel.eligible = `(f.last_class <> '` + string(EmbedFailureOversize) + `' OR f.attempts <= 1 OR ` + sel.holdEnd + ` <= now())`
+	}
+	return sel, nil
 }
 
 // releasableClassNames is releasableClasses as the text[] of a statement.

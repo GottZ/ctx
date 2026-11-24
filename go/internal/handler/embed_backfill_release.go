@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -42,7 +43,10 @@ const backfillReleaseHelp = "data payload required: exactly one of block_id (a u
 // does not exist. Without confirm_memos it is a dry run that answers its
 // count and as_of; a confirmed call sends both back, deletes at most limit
 // of the memos the dry run could count and answers what is left of them,
-// with the number to confirm for the next page.
+// with the number to confirm for the next page. A tenant-admin's repeat of an
+// oversize release waits for embed_backfill.release_hold (doubling with each
+// park after a release); such memos are answered as held, with the earliest
+// end of their holds (store.ReleaseBackfillMemos).
 func (h *ManageHandler) handleEmbedBackfillRelease(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	ctx := r.Context()
 	var spec backfillReleaseSpec
@@ -54,6 +58,7 @@ func (h *ManageHandler) handleEmbedBackfillRelease(w http.ResponseWriter, r *htt
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": backfillReleaseHelp})
 		return
 	}
+	eb := h.embedBackfillConfig(r)
 	res, err := store.ReleaseBackfillMemos(ctx, h.pool, store.BackfillRelease{
 		BlockID:    spec.BlockID,
 		Class:      store.EmbedFailureClass(spec.Class),
@@ -62,6 +67,8 @@ func (h *ManageHandler) handleEmbedBackfillRelease(w http.ResponseWriter, r *htt
 		Limit:      min(spec.Limit, store.BackfillReleaseMaxLimit),
 		Confirm:    spec.ConfirmMemos,
 		AsOf:       spec.AsOf,
+		Hold:       eb.ReleaseHold,
+		HoldCap:    eb.BackoffCap,
 	})
 	switch {
 	case errors.Is(err, store.ErrBackfillReleaseSelector):
@@ -71,7 +78,7 @@ func (h *ManageHandler) handleEmbedBackfillRelease(w http.ResponseWriter, r *htt
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"action": req.Action, "success": false,
 			"error":   "the memos in range are not the confirmed number — check the count and confirm again",
-			"counted": res.Counted, "confirm_memos": res.Counted, "as_of": res.AsOf,
+			"counted": res.Counted, "confirm_memos": res.Counted, "as_of": res.AsOf, "held": res.Held,
 		})
 		return
 	case err != nil:
@@ -82,6 +89,10 @@ func (h *ManageHandler) handleEmbedBackfillRelease(w http.ResponseWriter, r *htt
 	body := map[string]any{
 		"action": req.Action, "success": true, "dry_run": res.DryRun,
 		"counted": res.Counted, "confirm_memos": res.Remaining, "as_of": res.AsOf,
+		"held": res.Held,
+	}
+	if res.HeldUntil != nil {
+		body["held_until"] = *res.HeldUntil
 	}
 	if !res.DryRun {
 		body["released"] = res.Released
@@ -91,4 +102,17 @@ func (h *ManageHandler) handleEmbedBackfillRelease(w http.ResponseWriter, r *htt
 			"api_key_id", ar.ApiKeyID, "request_id", RequestIDFromContext(ctx))
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// embedBackfillConfig is the embed_backfill group of the request's snapshot
+// (its keys are global-only, so every snapshot carries the operator's
+// values), the registry defaults without a config store.
+func (h *ManageHandler) embedBackfillConfig(r *http.Request) config.EmbedBackfillConfig {
+	if h.cfg == nil {
+		return config.Defaults().EmbedBackfill
+	}
+	if c := h.cfg.SnapshotForRequest(r.Context()); c != nil {
+		return c.EmbedBackfill
+	}
+	return config.Defaults().EmbedBackfill
 }

@@ -60,7 +60,8 @@ func embedBackfillReleaseCmd(getClient func() (*Client, error)) *cobra.Command {
 			"attempt when they do not — after raising embed_backfill.max_tokens, moving to an embed backend with a larger context,\n" +
 			"or the end of a backend outage. Without --confirm it only counts; --confirm and --as-of take the count and the time it\n" +
 			"printed and release one page (--limit, at most 1000) of the memos that were there then. A re-embed migration's own\n" +
-			"memos and caller_timeout memos are never touched.",
+			"memos and caller_timeout memos are never touched. A tenant-admin key releases an oversize memo again whose block\n" +
+			"was parked again only after embed_backfill.release_hold (doubling with each such park); a server-admin key is not held.",
 		Example: `  ctx admin embed-backfill release --class oversize
   ctx admin embed-backfill release --class oversize --confirm 42 --as-of 2026-11-24T05:00:00.123456Z
   ctx admin embed-backfill release --block 01a2...`,
@@ -96,6 +97,8 @@ func embedBackfillReleaseCmd(getClient func() (*Client, error)) *cobra.Command {
 				Remaining    int64  `json:"remaining"`
 				ConfirmMemos int64  `json:"confirm_memos"`
 				AsOf         string `json:"as_of"`
+				Held         int64  `json:"held"`
+				HeldUntil    string `json:"held_until"`
 			}
 			_ = json.Unmarshal(resp, &r)
 			if err := checkEnvelope(resp, envelopeRequired); err != nil {
@@ -109,6 +112,9 @@ func embedBackfillReleaseCmd(getClient func() (*Client, error)) *cobra.Command {
 				return err
 			}
 			return renderOrJSON(resp, func([]byte) error {
+				if r.Held > 0 {
+					fmt.Printf("%d memo(s) held: released before and parked again, releasable again from %s\n", r.Held, r.HeldUntil)
+				}
 				if r.DryRun {
 					fmt.Printf("%d memo(s) in range; release them with --confirm %d --as-of %s\n", r.Counted, r.ConfirmMemos, r.AsOf)
 					return nil

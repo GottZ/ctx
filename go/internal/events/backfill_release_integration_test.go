@@ -177,11 +177,13 @@ func TestBackfillReleaseArmTakesTheBlockAgain(t *testing.T) {
 }
 
 // TestBackfillReleaseAgainstAWorkingArm runs 200 class releases on one
-// connection while the arm works on another: a backend that answers 500
-// memoizes every block as wire with a backoff that has passed by the next
-// pick, so the arm keeps taking blocks whose memo row exists, holding the
-// block row through the wire call and then writing the memo row — the order
-// a release would have to cross to close a cycle. Neither side may fail.
+// connection while the arm works on two others and a content writer on a
+// fourth: a backend that answers 500 memoizes every block as wire with a
+// backoff of an hour, so a block comes back to the pick only when a release
+// or an edit lets it, and then the arm holds its row through the wire call
+// and writes its memo row, and the writer holds its row and releases its memo
+// row (InvalidateEmbeddingTx) — the order block row, then memo row, which a
+// release would have to cross to close a cycle. Nobody may fail.
 func TestBackfillReleaseAgainstAWorkingArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -193,10 +195,11 @@ func TestBackfillReleaseAgainstAWorkingArm(t *testing.T) {
 	down.Store(true)
 	srv, calls := releaseEmbedServer(t, 2*time.Millisecond, &down)
 	router := releaseRouter(t, srv.URL)
-	cfg := releaseCfg(0, time.Microsecond, time.Millisecond)
+	cfg := releaseCfg(0, time.Hour, 2*time.Hour)
 	const blocks, rounds = 12, 200
+	ids := make([]string, blocks)
 	for i := range blocks {
-		releaseBlock(t, pool, fmt.Sprintf("rel236 race %02d", i), fmt.Sprintf("race text %d", i))
+		ids[i] = releaseBlock(t, pool, fmt.Sprintf("rel236 race %02d", i), fmt.Sprintf("race text %d", i))
 	}
 
 	stop := make(chan struct{})
@@ -224,6 +227,28 @@ func TestBackfillReleaseAgainstAWorkingArm(t *testing.T) {
 			}
 		}()
 	}
+	var edits atomic.Int64
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for n := 0; ; n++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			text := fmt.Sprintf("race text, edit %d", n)
+			if _, _, err := store.UpdateBlock(ctx, pool, ids[n%blocks], store.UpdateBlockData{Content: &text}, []string{"private"}); err != nil {
+				select {
+				case armErr <- fmt.Errorf("writer: %w", err):
+				default:
+				}
+				return
+			}
+			edits.Add(1)
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
 	var released, mismatched int64
 	var relErr error
 	for round := 0; round < rounds && relErr == nil; round++ {
@@ -247,15 +272,15 @@ func TestBackfillReleaseAgainstAWorkingArm(t *testing.T) {
 	wg.Wait()
 	select {
 	case err := <-armErr:
-		t.Errorf("the arm failed while the releases ran: %v", err)
+		t.Errorf("the arm or the writer failed while the releases ran: %v", err)
 	default:
 	}
 	if relErr != nil {
-		t.Errorf("a release failed while the arm ran: %v", relErr)
+		t.Errorf("a release failed while the arm and the writer ran: %v", relErr)
 	}
-	t.Logf("%d rounds: %d memos released, %d confirms refused by a changed count; %d arm picks, %d wire calls",
-		rounds, released, mismatched, steps.Load(), calls.Load())
-	if released == 0 || steps.Load() == 0 {
-		t.Errorf("no overlap exercised: released %d, arm picks %d", released, steps.Load())
+	t.Logf("%d rounds: %d memos released, %d confirms refused by a changed count; %d arm picks, %d wire calls, %d edits",
+		rounds, released, mismatched, steps.Load(), calls.Load(), edits.Load())
+	if released == 0 || steps.Load() == 0 || edits.Load() == 0 {
+		t.Errorf("no overlap exercised: released %d, arm picks %d, edits %d", released, steps.Load(), edits.Load())
 	}
 }
