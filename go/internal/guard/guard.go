@@ -475,23 +475,23 @@ func RunGuardBatch(ctx context.Context, pool interface {
 			return err
 		}
 
-		for _, block := range blocks {
-			// Check for context cancellation (demand interruption).
-			select {
-			case <-ctx.Done():
-				slog.Info("guard: interrupted by context cancellation", "processed", processed)
-				return ctx.Err()
-			default:
-			}
-
-			switch processBlock(ctx, tx, block, set) {
-			case blockProcessed:
-				processed++
-			case blockDeferred:
-				deferred++
-			}
+		if processed, deferred, err = checkBlocks(ctx, tx, blocks, set, 0); err != nil || deferred == 0 {
+			return err
 		}
-		return nil
+		// Deferred blocks stay at the front of the next pick (issue #547):
+		// as many blocks again, past this run's, so the newer ones get their
+		// verdict while the older wait for what holds them (pickPast).
+		more, err := pickPast(ctx, tx, checkTypes, blocks, len(blocks)-processed, int(deferred))
+		if err != nil || len(more) == 0 {
+			return err
+		}
+		if err := prepareChecks(ctx, tx, more, set, search); err != nil {
+			return err
+		}
+		blocks = append(blocks, more...)
+		n, d, err := checkBlocks(ctx, tx, more, set, processed)
+		processed, deferred = processed+n, deferred+d
+		return err
 	})
 
 	if err != nil {

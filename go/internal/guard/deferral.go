@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
 	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/GottZ/ctx/internal/blocktype"
 )
 
 // A deferred verdict is a block the run checked and then left pending, with no
@@ -77,4 +81,54 @@ func neighbourKeyShare(ctx context.Context, tx pgx.Tx, matchedID string) error {
 		return errVerdictDeferred
 	}
 	return fmt.Errorf("matched neighbour key share: %w", err)
+}
+
+// checkBlocks runs processBlock over blocks in the run's transaction and
+// counts the blocks with a verdict and the deferred ones; done is what the
+// run processed before (for the interruption line).
+func checkBlocks(ctx context.Context, tx pgx.Tx, blocks []pendingBlock, set *blocktype.Set, done int) (processed int, deferred int64, err error) {
+	for _, block := range blocks {
+		// Check for context cancellation (demand interruption).
+		select {
+		case <-ctx.Done():
+			slog.Info("guard: interrupted by context cancellation", "processed", done+processed)
+			return processed, deferred, ctx.Err()
+		default:
+		}
+		switch processBlock(ctx, tx, block, set) {
+		case blockProcessed:
+			processed++
+		case blockDeferred:
+			deferred++
+		}
+	}
+	return processed, deferred, nil
+}
+
+// pickPast is the run's second pick (issue #547, review round 1): up to n
+// waiting blocks it has not taken yet. A deferred block stays pending and at
+// the front of the pick (the oldest first) until the transaction that holds
+// its neighbour ends — a purge or prune batch, one batch long, then the next
+// one may hold the next neighbour — so with at least a batch of them
+// deferred, a run picked them again and again and no newer block got its
+// verdict (0 of 10 in the review). The pick itself is unchanged: this
+// transaction holds the blocks it took (SKIP LOCKED passes only another
+// transaction's), the ones with a verdict no longer wait, so a pick of
+// waiting+n returns the run's own still waiting blocks and n more, which are
+// kept. No lock beyond the pick's own.
+func pickPast(ctx context.Context, tx pgx.Tx, checkTypes []string, taken []pendingBlock, waiting, n int) ([]pendingBlock, error) {
+	picked, err := pickPending(ctx, tx, checkTypes, waiting+n)
+	if err != nil {
+		return nil, err
+	}
+	more := make([]pendingBlock, 0, n)
+	for _, b := range picked {
+		if len(more) == n {
+			break
+		}
+		if !slices.ContainsFunc(taken, func(t pendingBlock) bool { return t.id == b.id }) {
+			more = append(more, b)
+		}
+	}
+	return more, nil
 }

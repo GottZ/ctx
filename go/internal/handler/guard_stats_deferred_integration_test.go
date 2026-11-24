@@ -93,3 +93,59 @@ func TestGuardStatsCountsDeferredVerdicts(t *testing.T) {
 		t.Errorf("deferred_verdicts after the quiet run = {%v, %v}, want {%v, 0}", since2, last2, since)
 	}
 }
+
+// TestGuardRunDecidesNewerBlocksPastDeferredOnes (issue #547, review round 1):
+// a run whose whole pick is deferred — the neighbour of both picked blocks
+// held FOR UPDATE, as a purge or prune batch holds it — takes as many blocks
+// again past its own and decides them. Before, the deferred blocks stood at
+// the front of every pick while the hold lasted and no newer block got a
+// verdict.
+func TestGuardRunDecidesNewerBlocksPastDeferredOnes(t *testing.T) {
+	f := newGuardStatsFixture(t)
+	set := f.reg.Snapshot()
+	write := func(title string, vec []float32) string {
+		b, err := store.UpsertBlock(f.ctx, f.pool, "q547", title, title+" content", nil, nil, "private", true, store.SensitivityWrite{}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.StoreEmbedding(f.ctx, f.pool, b.ID, "q547", vec); err != nil {
+			t.Fatal(err)
+		}
+		return b.ID
+	}
+	checked := func(id string) bool {
+		var c bool
+		if err := f.pool.QueryRow(f.ctx, `SELECT metadata ? 'guard_checked_at' FROM context_blocks WHERE id = $1`, id).Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	// m: the held neighbour of the two older blocks; a: the neighbour of the
+	// two newer ones, not held.
+	m := write("q547p neighbour", gdVec(5, 1, 6, 0))
+	write("q547p other neighbour", gdVec(100, 1, 101, 0))
+	if _, err := guard.RunGuardBatch(f.ctx, f.pool, set, 100, config.Defaults().GuardSearch()); err != nil {
+		t.Fatal(err)
+	}
+	old1 := write("q547p old one", gdVec(5, 0.96, 6, 0.28))
+	old2 := write("q547p old two", gdVec(5, 0.96, 7, 0.28))
+	new1 := write("q547p new one", gdVec(100, 0.96, 101, 0.28))
+	new2 := write("q547p new two", gdVec(100, 0.96, 102, 0.28))
+
+	holder, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback(f.ctx) }()
+	if _, err := holder.Exec(f.ctx, `SELECT 1 FROM context_blocks WHERE id = $1 FOR UPDATE`, m); err != nil {
+		t.Fatal(err)
+	}
+	n, err := guard.RunGuardBatch(f.ctx, f.pool, set, 2, config.Defaults().GuardSearch())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 || !checked(new1) || !checked(new2) || checked(old1) || checked(old2) {
+		t.Errorf("a run of 2 beside the held neighbour processed %d: new %v %v, old %v %v — want the two newer decided, the two older deferred",
+			n, checked(new1), checked(new2), checked(old1), checked(old2))
+	}
+}
