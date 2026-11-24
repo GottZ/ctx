@@ -441,7 +441,7 @@ func validTestConfig(dbStatsInterval time.Duration) *config.Config {
 		Guard: config.Defaults().Guard, // #381: V66 range
 		// V21 (#38): the embed back-off bases must be > 0 to pass Validate —
 		// registry defaults, not wire-active here.
-		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
+		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour, ReleaseHold: config.Defaults().EmbedBackfill.ReleaseHold}, // #236: V69 refuses a zero release hold
 		EmbedMigration: config.EmbedMigrationConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
 		// A03-W03-3: same class as the two lines above — the distiller group's
 		// sizing keys carry fatal floors (V25), so a zero-valued group fails
