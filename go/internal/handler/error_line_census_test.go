@@ -56,7 +56,7 @@ var rawErrorLines = map[string]int{
 	"mcp_confirm.go":          1, // payload canonicalization
 	"mcp_issues.go":           1, // MCP tool error without a request context in view
 	"mcp_recover.go":          2, // recovered panics
-	"mcp_store_batch.go":      1, // payload canonicalization
+	"mcp_store_batch.go":      2, // payload canonicalization; an update item's edits failing at stage for a cause other than a refusal
 	"mcp_update.go":           2, // content edits and payload canonicalization
 	"middleware.go":           5, // credential conflicts, request id random source, recovered panic, door wiring
 	"model_auth.go":           3, // trusted-proxy configuration (twice), door stacking (wiring defect)
@@ -64,6 +64,7 @@ var rawErrorLines = map[string]int{
 	"project_issues_write.go": 1, // detached write-log goroutine
 	"query.go":                1, // embed chain resolution (no I/O)
 	"session_keys.go":         2, // row scan, csrf random source
+	"store_batch.go":          1, // a staged batch's update base unparseable at confirm
 	"v1_admission.go":         3, // admission on a foreign context, planner or wiring defect, error outside the writer
 	"webhook_github.go":       2, // sealbox, secret resolve verdict
 }

@@ -15,8 +15,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // readBatchUpdateTargets reads, without a lock, the identity each update
@@ -219,7 +217,7 @@ func batchUpdateMiss(ctx context.Context, tx pgx.Tx, u *blockUpdate, cur batchId
 func writeBatchUpdate(ctx context.Context, tx pgx.Tx, u *blockUpdate, h batchHold) (*Block, error) {
 	b := &Block{}
 	swept, _, err := u.execHeld(ctx, tx, b, updateHold{targets: h.targets})
-	if errors.Is(err, pgxdb.ErrRollback) {
+	if errors.Is(err, errUpdateMiss) {
 		return nil, ErrBlockNotFound
 	}
 	if err != nil {

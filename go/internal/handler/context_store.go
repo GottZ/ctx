@@ -351,10 +351,11 @@ func upsertStoreBlockWithParent(ctx context.Context, pool *pgxpool.Pool, set *bl
 		Metadata: res.Metadata, Scope: res.WriteScope, ScopeExplicit: res.ScopeExplicit, Sens: res.Sens,
 		TypeName: req.Type, Supersedes: req.Supersedes, ParentID: req.ParentID,
 	}}, apiKeyID, set, nil)
-	if err != nil {
-		return nil, err
+	var block *store.Block
+	if len(results) > 0 {
+		block = results[0].Block
 	}
-	return results[0].Block, nil
+	return block, err
 }
 
 // blockSizeLimit checks the shared write-path size caps. Empty = within

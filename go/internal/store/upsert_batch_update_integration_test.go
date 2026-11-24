@@ -177,7 +177,9 @@ func TestUpsertBlocksUpdateItemCost(t *testing.T) {
 		name string
 		data func(i int) store.UpdateBlockData
 	}{
-		{"a new content", func(i int) store.UpdateBlockData { return store.UpdateBlockData{Content: ubuPtr(fmt.Sprintf("new content %d", i))} }},
+		{"a new content", func(i int) store.UpdateBlockData {
+			return store.UpdateBlockData{Content: ubuPtr(fmt.Sprintf("new content %d", i))}
+		}},
 		{"tags", func(int) store.UpdateBlockData { return store.UpdateBlockData{Tags: []string{"x", "y"}} }},
 		{"edits", func(int) store.UpdateBlockData {
 			return store.UpdateBlockData{Edits: []store.ContentEdit{{Old: "body", New: &repl}}}

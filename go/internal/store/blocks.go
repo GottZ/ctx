@@ -2284,6 +2284,9 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, u blockUp
 		}
 		var err error
 		swept, needsReEmbed, err = u.execHeld(ctx, tx, b, held)
+		if errors.Is(err, errUpdateMiss) {
+			return pgxdb.ErrRollback // a miss writes nothing: a rollback, not a commit
+		}
 		return err
 	}); err != nil {
 		if errors.Is(err, pgxdb.ErrRollback) {
@@ -2305,6 +2308,11 @@ type updateHold struct {
 	missed  bool
 }
 
+// errUpdateMiss is execHeld's answer to a statement that found no row: the
+// update wrote nothing, and its caller decides what a miss is (UpdateBlock: a
+// rollback and the miss reason; a block batch: ErrBlockNotFound).
+var errUpdateMiss = errors.New("store: update block: no row")
+
 // execHeld is the transaction half of a by-id update, run after its lock pass:
 // the UPDATE…RETURNING scan into b, the archived-claim probe of a moved
 // identity, on a scope move the GD5 link sweep (the link tables' row-scope
@@ -2313,7 +2321,7 @@ type updateHold struct {
 // the vector invalidation when the statement reports that the title or the
 // content changed (InvalidateEmbeddingTx, the primitive UpsertBlock uses on
 // its content-change path). A statement that finds no row answers
-// pgxdb.ErrRollback: a miss writes nothing.
+// errUpdateMiss.
 func (u blockUpdate) execHeld(ctx context.Context, tx pgx.Tx, b *Block, held updateHold) (swept int, needsReEmbed bool, err error) {
 	var moved bool
 	dest := []any{
@@ -2326,9 +2334,7 @@ func (u blockUpdate) execHeld(ctx context.Context, tx pgx.Tx, b *Block, held upd
 	}
 	err = tx.QueryRow(ctx, u.query, u.args...).Scan(dest...)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// A miss writes nothing: pgxdb.ErrRollback keeps it a rollback
-		// instead of a commit.
-		return 0, false, pgxdb.ErrRollback
+		return 0, false, errUpdateMiss
 	}
 	if err != nil {
 		return 0, false, blockUpdateError(err)
