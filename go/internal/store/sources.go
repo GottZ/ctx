@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
@@ -40,6 +41,16 @@ var ErrChunkNotWritable = errors.New("store: chunk source not found")
 // insert and raises an existing chunk on conflict (strict '>', like
 // UpsertBlock's detector arm) — before, a new chunk only got the DDL default by
 // accident and an overwritten chunk kept its old, possibly lower, level.
+//
+// A re-ingest whose conflict branch replaces the slot's title or content with
+// a different value invalidates the row's vector (InvalidateEmbeddingTx: kept,
+// marked stale, the backfill memo released) in the transaction of the write,
+// so the backfill embeds the new text (issue #236); before, the vector of the
+// earlier text stayed current-looking and out of the backfill's reach. The
+// statement decides (chunkTextChangedCol), as the issue domain's writers do:
+// a re-ingest of the same title and content — new tags or metadata only — and
+// a fresh insert leave the vector alone. The block row the statement wrote
+// comes before the memo row, the order every content writer takes them in.
 func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunkIndex int, category, title, content string, tags []string, metadata map[string]any, scope string) (*Block, error) {
 	if tags == nil {
 		tags = []string{}
@@ -89,14 +100,29 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 		 DO UPDATE SET
 			%s
 		  WHERE context_blocks.scope = EXCLUDED.scope
-		 RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, created_at, updated_at`,
-		insertCols, selectVals, strings.Join(setClauses, ",\n\t\t\t"))
+		 RETURNING id, category, tags, title, content, metadata, scope, sensitivity, sensitivity_source, created_at, updated_at,
+		           %s`,
+		insertCols, selectVals, strings.Join(setClauses, ",\n\t\t\t"), chunkTextChangedCol)
 
-	b := &Block{}
-	err := pool.QueryRow(ctx, query, args...).Scan(
-		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
-		&b.Sensitivity, &b.SensitivitySource, &b.CreatedAt, &b.UpdatedAt,
-	)
+	var b *Block
+	err := pgxdb.Write(ctx, pool, pgxdb.At("store: insert chunk"), func(tx pgx.Tx) error {
+		b = &Block{}
+		var textChanged bool
+		if err := tx.QueryRow(ctx, query, args...).Scan(
+			&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
+			&b.Sensitivity, &b.SensitivitySource, &b.CreatedAt, &b.UpdatedAt, &textChanged,
+		); err != nil {
+			return err
+		}
+		if !textChanged {
+			return nil
+		}
+		if err := InvalidateEmbeddingTx(ctx, tx, b.ID); err != nil {
+			return err
+		}
+		dropInvalidatedMarks(b)
+		return nil
+	})
 	if pgxdb.AbsentOrMalformed(err) {
 		return nil, ErrChunkNotWritable
 	}
@@ -111,3 +137,9 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 	}
 	return b, nil
 }
+
+// chunkTextChangedCol is InsertChunk's last RETURNING column: whether the
+// statement replaced an existing row's title or content by a different value
+// (textChangedCol). old.* is the conflicting row before the update and NULL on
+// an insert (PostgreSQL 18), so a fresh chunk answers false.
+const chunkTextChangedCol = `(old.id IS NOT NULL AND ` + textChangedCol + `)`
