@@ -50,11 +50,12 @@ def real(hermes, tmp_path):
 
 
 def _runner(real, *, routed_profile):
+    from gateway.config import GatewayConfig
     from gateway.profile_routing import ProfileRoute
 
     runner = real.GatewayRunner.__new__(real.GatewayRunner)
     routes = [ProfileRoute(name="guild", platform="discord", profile=routed_profile, guild_id=GUILD)]
-    runner.config = SimpleNamespace(multiplex_profiles=True, profile_routes=routes)
+    runner.config = GatewayConfig(multiplex_profiles=True, profile_routes=routes)
     return runner
 
 

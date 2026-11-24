@@ -48,7 +48,7 @@ class World:
         self.homes = Homes(tmp_path)
         (self.homes.root / "config.yaml").write_text(_config([OPERATOR], settings), encoding="utf-8")
         import discord
-        from gateway.config import Platform
+        from gateway.config import GatewayConfig, Platform
         from gateway.run import GatewayRunner
         from plugins.platforms.discord.adapter import DiscordAdapter
 
@@ -69,8 +69,8 @@ class World:
             DiscordAdapter.handle_message = pipeline_entry   # beneath the plugin's wrapper (installed at bind)
         load_in(self.homes.root)
         runner = GatewayRunner.__new__(GatewayRunner)
-        runner.config = SimpleNamespace(multiplex_profiles=False, profile_routes=[], group_sessions_per_user=True,
-                                        thread_sessions_per_user=False)
+        runner.config = GatewayConfig(multiplex_profiles=False, profile_routes=[], group_sessions_per_user=True,
+                                      thread_sessions_per_user=False)
         runner._resolve_profile_home_for_source = lambda source: self.homes.root
         runner._profile_name_for_source = lambda source, adapter_profile=None: None
         self.runner = runner
@@ -93,11 +93,12 @@ class World:
 
     def add_bot(self, bot_id: str, home: Any, *, allow_bots: str = "none") -> Any:
         DiscordAdapter, Platform = self.DiscordAdapter, self.Platform
+        from gateway.config import PlatformConfig
         from gateway.platforms.helpers import MessageDeduplicator
 
         adapter = DiscordAdapter.__new__(DiscordAdapter)
         adapter.platform = Platform.DISCORD
-        adapter.config = SimpleNamespace(extra={"allow_bots": allow_bots})
+        adapter.config = PlatformConfig(enabled=True, extra={"allow_bots": allow_bots})   # a connected bot's
         adapter._owner_profile = None
         adapter.gateway_runner = self.runner
         adapter._dedup = MessageDeduplicator()
