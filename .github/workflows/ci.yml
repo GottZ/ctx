@@ -545,7 +545,13 @@ jobs:
     # oai package alone ran 343–801 s under -race on a loaded host (C7's
     # measurement at load 54); the per-binary bound is a wall-clock cap, not
     # a quality gate — a hang still fails, only later.
-    timeout-minutes: 20
+    # 30 (was 20), and -timeout=18m in the nightly form (12m stays for pushes
+    # and pull requests), since 2026-11-24 (#540): with coverage on top of
+    # -race the scheduled and dispatched runs of 2026-11-24 took 17.1–18.3
+    # minutes for the step and 596–601 s for the oai binary on the two-core
+    # runner, against 10.2–14.1 minutes in the nights before; a night that
+    # is a minute slower ends at the job's limit instead of at a test.
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -568,15 +574,17 @@ jobs:
           # keeps the observability. Failure output stays visible without -v
           # (go test prints failing tests' logs regardless).
           EXTRA_FLAGS=""
+          PKG_TIMEOUT=12m
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             EXTRA_FLAGS="-v -coverprofile=coverage.out -covermode=atomic"
+            PKG_TIMEOUT=18m
           fi
           go test \
             $EXTRA_FLAGS \
             -short \
             -race \
             -count=1 \
-            -timeout=12m \
+            -timeout="$PKG_TIMEOUT" \
             ./...
 
       - name: Upload coverage
