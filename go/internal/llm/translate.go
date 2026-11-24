@@ -295,13 +295,12 @@ func quoteKind(r rune) int {
 }
 
 // opensQuote reports whether the quote mark at text[i:i+size] can open a
-// quote: it does not follow a letter or digit and is followed by something
-// other than white space. An apostrophe inside or at the end of a word
-// (don't, Jörg's, users') opens none.
+// quote: it does not follow a letter or digit and is not the last rune. An
+// apostrophe inside or at the end of a word (don't, Jörg's, users') opens
+// none; a mark followed by a space does (« the build is green »).
 func opensQuote(text string, i, size int) bool {
 	prev, _ := utf8.DecodeLastRuneInString(text[:i])
-	next, n := utf8.DecodeRuneInString(text[i+size:])
-	return !isWordRune(prev) && n > 0 && !unicode.IsSpace(next)
+	return !isWordRune(prev) && i+size < len(text)
 }
 
 // closingQuote returns the position and size of the first mark of the kind
