@@ -612,6 +612,14 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 // scope '_global': server-admin-only history of a tenant-admin's grants) — so
 // they are deleted first, in a statement of their own, under the same lock.
 //
+// STAGED WRITES (issue #277): step 7 deletes the staged writes of the
+// tenant's keys (context_pending_writes, which hold block content) before the
+// keys, under the keys' row locks. Their foreign key on context_api_keys
+// cascaded that until migration 194 dropped it: a key on the hypertable gave
+// every chunk a copy of the key, so creating a chunk locked context_api_keys
+// against every authentication's last_used_at write and dropping one (the
+// confirm-retention eviction) took ACCESS EXCLUSIVE on it.
+//
 // stamp attributes the hard deletes of steps 7b and 7 in the audit trail
 // (migrations 160, 161): they run in one transaction stamped with the caller's
 // actor and request id and ALWAYS via='offboarding' — whatever stamp.Via says —
@@ -696,6 +704,23 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM context_model_consumers WHERE tenant_id = $1::uuid`, tenantID); err != nil {
 			return fmt.Errorf("model consumers: %w", err)
+		}
+		// The staged writes of the tenant's keys, explicitly and under the
+		// keys' row locks (issue #277): since migration 194 no foreign key
+		// cascades a key delete onto context_pending_writes. The lock first —
+		// the lock a stage's key read conflicts with (StagePendingWrite, FOR
+		// KEY SHARE) — so a stage committed while the prune waited is deleted
+		// here, and one that comes after finds its key gone and stages
+		// nothing. The order key rows, then stage rows is the one the cascade
+		// had.
+		if _, err := tx.Exec(ctx,
+			`SELECT 1 FROM context_api_keys WHERE tenant_id = $1::uuid ORDER BY id FOR UPDATE`, tenantID); err != nil {
+			return fmt.Errorf("api keys lock: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM context_pending_writes WHERE api_key_id IN (SELECT id FROM context_api_keys WHERE tenant_id = $1::uuid)`,
+			tenantID); err != nil {
+			return fmt.Errorf("pending writes: %w", err)
 		}
 		_, err := tx.Exec(ctx, `DELETE FROM context_api_keys WHERE tenant_id = $1::uuid`, tenantID)
 		return err

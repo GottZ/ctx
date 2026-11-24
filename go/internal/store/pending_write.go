@@ -18,6 +18,15 @@ import (
 // expired). The caller rejects the confirm — it never "helpfully" executes.
 var ErrPendingWriteNotFound = errors.New("store: pending write not found")
 
+// ErrPendingWriteKeyGone is StagePendingWrite's answer when the staging key's
+// row is gone (deleted between the caller's authentication and the stage):
+// nothing is staged. Since migration 194 no foreign key ties a stage to its
+// key (issue #277); the stage reads the key row FOR KEY SHARE instead — the
+// lock the key's foreign key took — so a stage and the tenant prune's key
+// delete are ordered: the prune waits for a stage holding the key and then
+// deletes that stage too, a stage that comes second finds no key.
+var ErrPendingWriteKeyGone = errors.New("store: the key of the staged write is gone")
+
 // PendingWrite is one staged LLM-path write (context_pending_writes, 089).
 // Payload is the SERVER-HELD authoritative op payload: the confirm call
 // selects the row by hash only and can alter nothing (tamper-proof by
@@ -47,6 +56,11 @@ type PendingWrite struct {
 // ttl <= 0 stores expires_at = NULL — the stage never expires. Expiry is
 // deliberately DECOUPLED from eviction (writes.confirm_retention, D-E3).
 //
+// A new stage reads its key row FOR KEY SHARE and takes the principal from
+// it; a key row that is gone stages nothing (ErrPendingWriteKeyGone). The
+// re-arm of an open stage needs no key lock: the tenant prune deletes the
+// stages of a key before the key, under the key's row lock (PruneTenant).
+//
 // q is the pool, or the transaction of a staged block batch that reserves its
 // write budget in the same transaction (issue #211).
 func StagePendingWrite(ctx context.Context, q pgxdb.Rower, apiKeyID, scope, op, origin string, payload json.RawMessage, payloadHash string, ttl time.Duration) (*PendingWrite, error) {
@@ -63,11 +77,14 @@ func StagePendingWrite(ctx context.Context, q pgxdb.Rower, apiKeyID, scope, op, 
 		), ins AS (
 			INSERT INTO context_pending_writes
 			       (api_key_id, scope, op, origin, payload, payload_hash, expires_at, principal_id)
-			SELECT $1, $2, $3, $4, $5, $6,
+			SELECT k.id, $2, $3, $4, $5, $6,
 			       CASE WHEN $7 <= 0::double precision THEN NULL
 			            ELSE now() + make_interval(secs => $7) END,
-			       (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $1::uuid)
-			 WHERE NOT EXISTS (SELECT 1 FROM rearm)
+			       k.principal_id
+			  FROM context_api_keys k
+			 WHERE k.id = $1::uuid
+			   AND NOT EXISTS (SELECT 1 FROM rearm)
+			   FOR KEY SHARE OF k
 			RETURNING id, scope, op, origin, payload, created_at, expires_at
 		)
 		SELECT id, scope, op, origin, payload, created_at, expires_at FROM rearm
@@ -76,7 +93,11 @@ func StagePendingWrite(ctx context.Context, q pgxdb.Rower, apiKeyID, scope, op, 
 		apiKeyID, scope, op, origin, payload, payloadHash, ttl.Seconds())
 
 	pw := PendingWrite{APIKeyID: apiKeyID, PayloadHash: payloadHash}
-	if err := row.Scan(&pw.ID, &pw.Scope, &pw.Op, &pw.Origin, &pw.Payload, &pw.CreatedAt, &pw.ExpiresAt); err != nil {
+	err := row.Scan(&pw.ID, &pw.Scope, &pw.Op, &pw.Origin, &pw.Payload, &pw.CreatedAt, &pw.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("pending write: stage: %w", ErrPendingWriteKeyGone)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("pending write: stage: %w", err)
 	}
 	return &pw, nil
