@@ -720,6 +720,12 @@ func (h *ManageHandler) handleUpdate(w http.ResponseWriter, r *http.Request, ar 
 		return
 	}
 
+	// Issue #519: a patch that names no field ({"metadata": null} and the
+	// like) is the batch's missing_fields, not the store's "no fields".
+	if updatePatchEmpty(data) {
+		writeJSONReject(w, classMissingFields.reject(nothingToUpdateMsg))
+		return
+	}
 	// Issue #406: the field combinations an update cannot mean (content beside
 	// edits, metadata beside metadata_merge, a malformed edit) — the 400 of a
 	// payload this action does not take, before anything is resolved.

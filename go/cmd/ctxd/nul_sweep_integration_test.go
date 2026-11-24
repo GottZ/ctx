@@ -192,16 +192,30 @@ func nulSweepMCP(tool string, args map[string]any) string {
 		"params": map[string]any{"name": tool, "arguments": args}})
 }
 
+// nulSweepSSEData is the data line of a one-event SSE answer, or the body
+// as it came when it is plain JSON (a "data: " inside a JSON text, as in
+// "metadata: ", is no event).
+func nulSweepSSEData(body string) string {
+	i := strings.Index(body, "\ndata: ")
+	switch {
+	case strings.HasPrefix(body, "data: "):
+		i = 0
+	case i >= 0:
+		i++
+	default:
+		return body
+	}
+	s := body[i+6:]
+	if j := strings.Index(s, "\n"); j >= 0 {
+		s = s[:j]
+	}
+	return s
+}
+
 // nulSweepMCPAnswer extracts isError, the text and the structured code of a
 // /mcp answer (plain JSON or one SSE event).
 func nulSweepMCPAnswer(body string) (isError bool, text, code string) {
-	s := body
-	if i := strings.Index(s, "data: "); i >= 0 {
-		s = s[i+6:]
-		if j := strings.Index(s, "\n"); j >= 0 {
-			s = s[:j]
-		}
-	}
+	s := nulSweepSSEData(body)
 	var env struct {
 		Result *struct {
 			IsError bool `json:"isError"`
@@ -912,13 +926,7 @@ func nulSweepTools(t *testing.T, f *nulSweepFixture) []nulSweepTool {
 	req.Header.Set("Authorization", "Bearer "+f.keys["admin"])
 	rec := httptest.NewRecorder()
 	f.router.ServeHTTP(rec, req)
-	s := rec.Body.String()
-	if i := strings.Index(s, "data: "); i >= 0 {
-		s = s[i+6:]
-		if j := strings.Index(s, "\n"); j >= 0 {
-			s = s[:j]
-		}
-	}
+	s := nulSweepSSEData(rec.Body.String())
 	var env struct {
 		Result struct {
 			Tools []nulSweepTool `json:"tools"`
