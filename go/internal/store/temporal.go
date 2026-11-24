@@ -464,11 +464,11 @@ const temporalReviewGuardSQL = `SELECT ` + temporalReviewVersionCol + ` FROM con
 // from its first row, one statement later. FOR NO KEY UPDATE does not conflict with it — UpdateBlock
 // and the query path's failure memo (FOR NO KEY UPDATE SKIP LOCKED,
 // RecordEmbedFailureIfUnchanged) neither wait for this transaction nor skip
-// the block because of it. FOR UPDATE does, as it did before: the pre-read of
-// UpsertBlock and the lock pass of UpsertBlocks wait for the commit, and the
-// FOR UPDATE SKIP LOCKED picks of the embed arm, the dream and the embed
-// migration skip the block meanwhile; the guard batch picks FOR NO KEY UPDATE
-// SKIP LOCKED (issue #359) and does not. Before, the guard also took the row
+// the block because of it, and neither do the pre-read of UpsertBlock and
+// the lock pass of UpsertBlocks since issue #284 (FOR NO KEY UPDATE). FOR
+// UPDATE does, as it did before: the FOR UPDATE SKIP LOCKED picks of the embed
+// arm, the dream and the embed migration skip the block meanwhile; the guard
+// batch picks FOR NO KEY UPDATE SKIP LOCKED (issue #359) and does not. Before, the guard also took the row
 // lock FOR NO KEY UPDATE (the UPDATE of content_times) and held it to the
 // commit.
 //

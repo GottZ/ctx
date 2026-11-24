@@ -86,7 +86,7 @@ func DreamLinkResolve(ctx context.Context, pool *pgxpool.Pool, sourceID, targetI
 		write = writeSupersedesSource
 	}
 	if err := write(ctx, pool, pgxdb.At("store: dream link resolve"), func(tx pgx.Tx) error {
-		lockedScope, found, err := lockSupersedesResolve(ctx, tx, sourceID, writeScopes, supersedes)
+		lockedScope, found, err := lockSupersedesResolve(ctx, tx, sourceID, writeScopes, supersedes, resolution == "confirm")
 		if err != nil {
 			return err
 		}
@@ -95,11 +95,11 @@ func DreamLinkResolve(ctx context.Context, pool *pgxpool.Pool, sourceID, targetI
 		}
 		// Lock the link row so a concurrent dream replace sweep cannot delete it
 		// between classification and update (classifyGuardBatch pattern).
-		var pinned bool
+		var pinned, settles bool
 		var storedRationale *string
 		var sourceScope string
 		err = tx.QueryRow(ctx,
-			`SELECT dl.relationship, dl.pinned, dl.rationale, s.scope
+			`SELECT dl.relationship, dl.pinned, dl.rationale, s.scope, dl.confidence >= $5::real
 			 FROM context_dream_links dl
 			 JOIN context_blocks s ON s.id = dl.source_block_id
 			 WHERE dl.source_block_id = $1::uuid
@@ -107,8 +107,8 @@ func DreamLinkResolve(ctx context.Context, pool *pgxpool.Pool, sourceID, targetI
 			   AND dl.relationship = $3
 			   AND s.scope = ANY($4::text[])
 			 FOR UPDATE OF dl`,
-			sourceID, targetID, relationship, writeScopes,
-		).Scan(&storedRel, &pinned, &storedRationale, &sourceScope)
+			sourceID, targetID, relationship, writeScopes, supersedesSnapshotConfidence,
+		).Scan(&storedRel, &pinned, &storedRationale, &sourceScope, &settles)
 		if errors.Is(err, pgx.ErrNoRows) {
 			// (nil, nil) before the commit in the straight-line form —
 			// pgxdb.ErrRollback keeps that miss a rollback instead of a commit.
@@ -131,6 +131,18 @@ func DreamLinkResolve(ctx context.Context, pool *pgxpool.Pool, sourceID, targetI
 		}
 		switch resolution {
 		case "confirm":
+			// A pinned supersedes link at the snapshot confidence settles its
+			// target (SettledSupersedesSQL), as a declaration does, and a
+			// target has at most one settling superseder: the confirm runs
+			// the declaration's already-superseded gate and is refused like a
+			// second declaration, with the head of the chain (issue #284). A
+			// guess below that confidence settles nothing when pinned, and a
+			// confirm of a link that already settles adds nothing.
+			if supersedes && settles && !pinned {
+				if err := supersedesSettledByOther(ctx, tx, sourceID, targetID, lockedScope); err != nil {
+					return err
+				}
+			}
 			// rationale only overwrites when provided — confirm without text
 			// keeps an earlier justification instead of blanking it.
 			err = tx.QueryRow(ctx,
@@ -194,26 +206,28 @@ func DreamLinkResolve(ctx context.Context, pool *pgxpool.Pool, sourceID, targetI
 }
 
 // lockSupersedesResolve takes, for the resolve of a supersedes link
-// (supersedes true), the supersedes lock of the source's scope in SHARED mode
-// and returns that scope; for any other relationship it does nothing and
-// returns ("", true). Shared, like a dream batch, because both kinds of resolve must
-// not run beside the exclusive holders of the scope (issue #284):
+// (supersedes true), the supersedes lock of the source's scope and returns
+// that scope; for any other relationship it does nothing and returns ("",
+// true). Neither kind of resolve may run beside the exclusive holders of the
+// scope (issue #284):
 //
 //   - delete locks the link row and then the target in its reconcile, while
 //     a declaration locks the target and then writes the link row, and an
 //     archive or scope move locks the source and its targets and then, for a
-//     move, sweeps the link rows;
-//   - confirm pins the link, which settles the target, and a declaration's
-//     already-superseded check reads the pins of other blocks, which no row
-//     lock of its own covers: side by side, a declaration checked before the
-//     confirm committed and both settled the same target. Under the lock the
-//     declaration runs before or after the confirm, and after it sees the pin
-//     and is refused.
+//     move, sweeps the link rows. SHARED, like a dream batch, whose row-lock
+//     order it keeps;
+//   - confirm (exclusive true) pins the link, which settles the target, and
+//     runs the already-superseded gate first, which reads the pins of OTHER
+//     sources — no row lock of its own covers them, as for a declaration.
+//     Side by side with a declaration, or with another confirm on the same
+//     target, each checked before the other committed and both settled the
+//     target. EXCLUSIVE, like a declaration: one of them runs first, and the
+//     other's gate sees its pin and refuses.
 //
 // The scope is read without a lock, within writeScopes; a source outside them
 // answers found=false (not found, no lock taken, as before). The caller
 // compares the scope it then reads under the link lock with the returned one.
-func lockSupersedesResolve(ctx context.Context, tx pgx.Tx, sourceID string, writeScopes []string, supersedes bool) (scope string, found bool, err error) {
+func lockSupersedesResolve(ctx context.Context, tx pgx.Tx, sourceID string, writeScopes []string, supersedes, exclusive bool) (scope string, found bool, err error) {
 	if !supersedes {
 		return "", true, nil
 	}
@@ -226,7 +240,11 @@ func lockSupersedesResolve(ctx context.Context, tx pgx.Tx, sourceID string, writ
 	if err != nil {
 		return "", false, fmt.Errorf("store: dream link resolve: source scope: %w", err)
 	}
-	if err := ShareSupersedesScope(ctx, tx, scope); err != nil {
+	lock := ShareSupersedesScope
+	if exclusive {
+		lock = LockSupersedesScope
+	}
+	if err := lock(ctx, tx, scope); err != nil {
 		return "", false, err
 	}
 	return scope, true, nil

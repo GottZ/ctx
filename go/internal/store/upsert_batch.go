@@ -118,7 +118,7 @@ type BatchResult struct {
 //     order), declarations and the other batches of the scope. A scope without
 //     any supersedes item takes it as well, for exactly that reason;
 //  3. the items in (scope, category, title) order, every item: the identity
-//     row FOR UPDATE (with the no-op comparison, lockBatchMatch), and for a
+//     row FOR NO KEY UPDATE (with the no-op comparison, lockBatchMatch), and for a
 //     supersedes item the target FOR NO KEY UPDATE after it
 //     (lockSupersedesPair). Only then are the writes made, in the same order;
 //     they wait for no row lock this pass did not take, except an identity
@@ -126,16 +126,15 @@ type BatchResult struct {
 //
 // Paths that hold several block rows without the scope lock remain: the guard
 // run (its picked blocks FOR NO KEY UPDATE, then the key-share lock of a
-// matched neighbour at its audit insert), an operator's guard-resolve batch
-// (ids FOR UPDATE in scan order), a scope purge (blocks FOR UPDATE in scan
-// order) and the resolve of a dream link (the link row, then its target). A
-// batch that holds a block such a path wants next — the row of a no-op item
-// as well as a written one — while it waits for one that path holds meets it
-// in a cycle that PostgreSQL ends with 40P01 after deadlock_timeout — a cycle
-// one single
-// UpsertBlockSupersedes can meet already (identity row, then target). The
-// batch then answers the error with nothing written; all-or-none holds either
-// way.
+// matched neighbour at its audit insert; its archive verdict takes the scope
+// lock and its targets only when nobody holds them) and the resolve of a
+// dream link that is not a supersedes (the link row, then nothing). The
+// identity rows are locked FOR NO KEY UPDATE, not FOR UPDATE, for the first
+// of them (issue #284): FOR UPDATE refused the run's key-share lock on a
+// matched neighbour the batch held while the batch waited for a block the run
+// had picked — 97 to 100 of 200 rounds of a batch beside a guard run ended
+// in 40P01. A batch that meets a cycle anyway answers the error with nothing
+// written; all-or-none holds either way.
 func UpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, apiKeyID string, types *blocktype.Set, budget *WriteBudget) ([]BatchResult, error) {
 	var results []BatchResult
 	times := batchContentTimes(items)
@@ -268,10 +267,10 @@ func lockBatchItem(ctx context.Context, tx pgx.Tx, it BatchUpsert) (batchHold, e
 	return lockBatchMatch(ctx, tx, it)
 }
 
-// lockBatchMatch locks the item's identity row FOR UPDATE — the pre-read of
-// UpsertBlock's exec, same predicate — and compares it with the item in the
-// same statement (identicalContentCompare, IdenticalContentMatch's
-// comparison). Under READ COMMITTED a FOR UPDATE that waited for another
+// lockBatchMatch locks the item's identity row FOR NO KEY UPDATE — the
+// pre-read of UpsertBlock's exec, same predicate and lock — and compares it
+// with the item in the same statement (identicalContentCompare,
+// IdenticalContentMatch's comparison). Under READ COMMITTED a lock that waited for another
 // writer of the row returns the row as that writer committed it, the select
 // list evaluated on that version: the comparison is made on the row as it is
 // once this transaction holds it.
@@ -284,7 +283,7 @@ func lockBatchMatch(ctx context.Context, tx pgx.Tx, it BatchUpsert) (batchHold, 
 		`SELECT id::text, content_hash = encode(digest($1, 'sha256'), 'hex'), `+cols+`
 		   FROM context_blocks
 		  WHERE category = $3 AND title = $4 AND scope = $2 AND NOT is_archived
-		  FOR UPDATE`,
+		  FOR NO KEY UPDATE`,
 		args...,
 	).Scan(&id, &sameContent, &m.TagsEqual, &m.MetadataEqual, &m.SensitivityEqual, &m.TypeEqual)
 	if errors.Is(err, pgx.ErrNoRows) {
