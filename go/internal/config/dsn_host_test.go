@@ -57,6 +57,8 @@ func TestDSNReadsEveryHostForm(t *testing.T) {
 		{"localhost,[::1]", "hosts localhost:5432,::1:5432", true},
 		{"h1,[fd00::5],h3", "hosts h1:5432,fd00::5:5432,h3:5432", true},
 		{"h1:5433,h2", "hosts h1:5433,h2:5432", true},
+		{"[::1]:5433,h2", "hosts ::1:5433,h2:5432", true},
+		{"[fd00::5]:5433", "hosts fd00::5:5433", false},
 		{"h1,fd00::5", "hosts h1:5432,fd00::5:5432", false},
 		// The base refused these, or read another address.
 		{"fd00::5", "hosts fd00::5:5432", false},

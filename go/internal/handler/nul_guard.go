@@ -151,9 +151,11 @@ func valuesNULKey(values url.Values) (string, bool) {
 }
 
 // bodyNULField reads the body (at most limit+1 bytes), puts it back for the
-// handler and names the field that carries a NUL. A body that ends in an
-// error (its group's cap, a broken connection) or runs past limit is handed
-// on as it came, unscanned: the handler refuses it for that reason, as before.
+// handler and names the field that carries a NUL. A body that runs past
+// limit, and a form that ends in an error, is handed on as it came,
+// unscanned: the handler refuses it for that reason, as before. A JSON body
+// that ends in an error (a broken connection, fewer bytes than declared) is
+// scanned as far as it came and then handed on with its error.
 func bodyNULField(r *http.Request, body NULBody, limit int64) (string, bool) {
 	if r.Body == nil || r.Body == http.NoBody {
 		return "", false
@@ -166,11 +168,13 @@ func bodyNULField(r *http.Request, body NULBody, limit int64) (string, bool) {
 		return "", false
 	}
 	chunks, n, err := readUpTo(r.Body, limit, r.ContentLength)
-	if err != nil || n > limit {
-		r.Body = &replayBody{chunks: chunks, tail: err, rest: r.Body}
+	r.Body = &replayBody{chunks: chunks, tail: err, rest: r.Body}
+	if n > limit || (err != nil && body == NULBodyForm) {
 		return "", false
 	}
-	r.Body = &replayBody{chunks: chunks, rest: r.Body}
+	// A JSON body that ended in an error is scanned as far as it came: a
+	// decoder returns a complete object without reading on to the error, so
+	// the handler would take its values (review of PR #553).
 	if body == NULBodyForm {
 		return formNULField(r, joinChunks(chunks, n))
 	}

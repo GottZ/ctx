@@ -3338,7 +3338,8 @@ func (c *Config) GatewaySettings() oai.Settings {
 // connected with before issue #519: it keeps that reading (the "%25" is the
 // zone's percent; the URL escapes it again), with the port after it. A host
 // with exactly one colon carries its own port ("h1:5433" in a list, which
-// connected before #519) and stays as written; an IPv6 address has two colons
+// connected before #519) and stays as written, as a bracketed host with a
+// port after the bracket does ("[fd00::5]:5433"); an IPv6 address has two colons
 // or more. Any other host is the host itself: a name, an IPv4 address, a
 // socket directory, or a bare IPv6 address with or without a zone, which
 // net.JoinHostPort puts in brackets (a bracketed value it would bracket
@@ -3349,7 +3350,11 @@ func dbHostPort(host string, port int) string {
 	for i, h := range hosts {
 		switch {
 		case strings.HasPrefix(h, "["):
-			hosts[i] = strings.ReplaceAll(h, "%25", "%") + ":" + p
+			h = strings.ReplaceAll(h, "%25", "%")
+			if strings.HasSuffix(h, "]") {
+				h += ":" + p
+			} // else "[fd00::5]:5433": its own port, as written
+			hosts[i] = h
 		case strings.Count(h, ":") == 1 && !strings.HasPrefix(h, "/"):
 			// host:port as written
 		default:

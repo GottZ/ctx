@@ -359,3 +359,28 @@ func BenchmarkNULGuard(b *testing.B) {
 		}
 	}
 }
+
+// TestNULGuardScansABodyThatEndsInAnError (review of PR #553): a body whose
+// read ends in an error was handed on unscanned. A client that sends a
+// complete JSON object carrying a NUL and then ends the body early (a
+// Content-Length larger than what it sends) got it past the guard: the
+// handler's decoder returns the complete object without reading on, so it
+// never meets the error. The bytes that arrived are scanned; a truncated
+// body without a NUL still reaches the handler as it came.
+func TestNULGuardScansABodyThatEndsInAnError(t *testing.T) {
+	guard := RefuseNUL(NULBodyJSON, 1<<20)
+	cut := func(body string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/api/store", io.MultiReader(strings.NewReader(body), iotest.ErrReader(io.ErrUnexpectedEOF)))
+		req.ContentLength = int64(len(body)) + 100
+		return req
+	}
+	status, answer, _, ran := nulGuardServe(t, guard, http.MethodPost, "/api/store", cut(`{"content":"a`+nulEsc+`b"}`))
+	if ran || status != http.StatusBadRequest || !strings.Contains(answer, "content "+nulFieldMessage) {
+		t.Errorf("a complete object with a NUL, then a read error: want 400 naming content, got ran=%v %d %s", ran, status, answer)
+	}
+	body := `{"content":"no NUL here", "title":"cut of`
+	_, _, got, ran := nulGuardServe(t, guard, http.MethodPost, "/api/store", cut(body))
+	if !ran || string(got) != body {
+		t.Errorf("a truncated body without a NUL: ran=%v, the handler read %q, want it as it came", ran, got)
+	}
+}
