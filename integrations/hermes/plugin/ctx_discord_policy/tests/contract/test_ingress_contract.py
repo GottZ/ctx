@@ -36,7 +36,7 @@ async def setup(hermes, tmp_path, monkeypatch):
         f"        operators: [\"{OPERATOR}\"]\n", encoding="utf-8")
     import discord
     from discord.ext import commands
-    from gateway.config import Platform
+    from gateway.config import GatewayConfig, Platform
     from gateway.platforms.helpers import MessageDeduplicator
     from gateway.run import GatewayRunner
     from plugins.platforms.discord.adapter import DiscordAdapter
@@ -48,8 +48,8 @@ async def setup(hermes, tmp_path, monkeypatch):
     await bot.__aenter__()                      # binds the running loop; no login, no gateway
     model = DiscordWorld(bot)
     runner = GatewayRunner.__new__(GatewayRunner)
-    runner.config = SimpleNamespace(multiplex_profiles=False, profile_routes=[], group_sessions_per_user=True,
-                                    thread_sessions_per_user=False)
+    runner.config = GatewayConfig(multiplex_profiles=False, profile_routes=[], group_sessions_per_user=True,
+                                  thread_sessions_per_user=False)
     runner._resolve_profile_home_for_source = lambda source: homes.root
     runner._profile_name_for_source = lambda source, adapter_profile=None: None
     adapter = DiscordAdapter.__new__(DiscordAdapter)
