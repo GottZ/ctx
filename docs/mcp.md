@@ -107,8 +107,10 @@ run — additionally carry a machine code in `structuredContent`:
 The codes are the ones the HTTP API uses for the same class:
 `unauthorized`, `invalid_body`, `missing_fields`, `invalid_sensitivity`,
 `invalid_encoding`, `scope_denied`, `size_cap`, `unknown_type`, `reserved_type`,
-`parent_required`, `unknown_parent`, `reserved_category`, `provenance_protected`,
-`reserved_metadata`, `unknown_action`, `constraint`, `edit_mismatch`, `rate_limit`, `write_conflict`, `internal`.
+`parent_required`, `unknown_parent`, `unknown_supersedes`, `unknown_block`,
+`supersedes_conflict`, `supersedes_not_allowed`, `reserved_category`, `provenance_protected`,
+`reserved_metadata`, `unknown_action`, `constraint`, `edit_mismatch`, `rate_limit`, `write_conflict`, `internal`
+(`TestRejectClassesAreDocumented` holds this list and the one in [api](api.md) to the classes of the handler).
 Other errors (an unknown id, an invalid type filter, a failed lookup) carry text only,
 so a client must not rely on a code being present.
 

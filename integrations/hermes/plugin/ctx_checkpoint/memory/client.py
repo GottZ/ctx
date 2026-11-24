@@ -54,11 +54,14 @@ REJECT_CODES = (
     "unknown_action",
     "constraint",
     "rate_limit",
+    "write_conflict",
     "internal",
 )
 # Codes that are retried once (transient); everything else is permanent — repeating
-# the identical write yields the identical verdict.
-RETRYABLE_CODES = frozenset({"rate_limit"})
+# the identical write yields the identical verdict. write_conflict (409, GottZ/ctx#547): the
+# write met concurrent changes of the rows it needed and wrote nothing — the same write sent
+# again normally goes through.
+RETRYABLE_CODES = frozenset({"rate_limit", "write_conflict"})
 # Metadata keys the server owns (403 reserved_metadata) — rejected client-side.
 RESERVED_METADATA_KEYS = ("provenance",)
 # Replacement for an API key echoed back in any error text (server body, proxy, socket).
@@ -89,7 +92,8 @@ class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_RefuseRedirect)
 
 
-# The wait before the one retry of a 429 (per-key write rate limit). Clock and sleep are seams.
+# The wait before the one retry of a 429 (per-key write rate limit) or a 409 write_conflict.
+# Clock and sleep are seams.
 RATE_RETRY_WAIT_S = 1.0
 _monotonic = time.monotonic
 _sleep = time.sleep
@@ -270,7 +274,7 @@ class CtxClient:
         end = _monotonic() + t
         last_error: CtxApiError | None = None
 
-        for attempt in (0, 1):  # one retry on 429 (per-key write rate limit)
+        for attempt in (0, 1):  # one retry on 429 (per-key write rate limit) or 409 write_conflict
             failure: CtxApiError | None = None
             try:
                 with _urlopen(req, timeout=t) as resp:
@@ -298,10 +302,11 @@ class CtxClient:
                 return parsed
             except urllib.error.HTTPError as exc:
                 failure = self._http_failure(exc)
-                # Retry once only on a transient 429 (per-key write rate limit);
+                # Retry once only on a transient 429 (per-key write rate limit) or a
+                # write_conflict (the write met concurrent writes and wrote nothing);
                 # permanent rejection codes are never repeated.
                 if (
-                    exc.code == 429
+                    (exc.code == 429 or failure.code == "write_conflict")
                     and not failure.permanent
                     and attempt == 0
                     and _monotonic() + RATE_RETRY_WAIT_S < end
