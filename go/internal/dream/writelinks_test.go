@@ -137,7 +137,7 @@ func TestWriteLinks_CrossScope_Reject(t *testing.T) {
 	mock := newPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
 	expectTargetFetch(mock, targetID, "shared" /* != private */, false, 1.0, "decisions", tLate, tLate, "tgt")
@@ -161,7 +161,7 @@ func TestWriteLinks_TargetArchived_Reject(t *testing.T) {
 	mock := newPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
 	expectTargetFetch(mock, targetID, "private", true /* archived */, 1.0, "decisions", tLate, tLate, "tgt")
@@ -185,7 +185,7 @@ func TestWriteLinks_FactualSameCategory_CoercedToTopical(t *testing.T) {
 	mock := newPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
 	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tLate, tLate, "tgt")
@@ -224,7 +224,7 @@ func TestWriteLinks_Causal_SrcNotOlder_Reject(t *testing.T) {
 	mock := newPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tLate, tLate, "src")
 	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tEarly, tEarly, "tgt")
@@ -255,7 +255,7 @@ func TestWriteLinks_InsertError_LoopBreaksZeroWritten(t *testing.T) {
 	mock := newPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
 	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tLate, tLate, "tgt")
@@ -292,7 +292,7 @@ func TestWriteLinks_ReplaceSemantics_NotTriggered_OnZeroWritten(t *testing.T) {
 	mock := newPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
 	// Single link, archived target → 0 writes, no DELETE call.
@@ -333,7 +333,7 @@ func TestWriteLinks_SupersedesRevert_WritesKnowledge_NotNull(t *testing.T) {
 	mock := newPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectScopeLock(mock)
 	expectSourceFetch(mock, sourceID, "decisions", tEarly, tEarly, "src")
 	expectTargetFetch(mock, targetID, "private", false, 1.0, "decisions", tLate, tLate, "tgt")
@@ -382,7 +382,7 @@ func TestWriteLinks_BeginTxError_PropagatesWrapped(t *testing.T) {
 	mock := newPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin().WillReturnError(errors.New("pool exhausted"))
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions).WillReturnError(errors.New("pool exhausted"))
 
 	written, err := WriteLinks(context.Background(), mock, builtinTestSet, sourceID, "private", 1.0,
 		[]Link{{TargetID: targetID, Relationship: "topical", Confidence: 0.9}})
@@ -432,7 +432,7 @@ func TestWriteLinks_LinkClasses_CausalRejectedForTopicalOnlySource(t *testing.T)
 		Dream:     blocktype.DreamPolicy{Linkable: true, LinkClasses: []string{"topical"}},
 	})
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectScopeLock(mock)
 	expectSourceFetchTyped(mock, sourceID, "decisions", tEarly, tEarly, "src", "wf-topical-only")
 	// causal passes V9 (src older than tgt) — only the class gate rejects.
@@ -464,7 +464,7 @@ func TestWriteLinks_LinkClasses_TopicalAllowed(t *testing.T) {
 		Dream:     blocktype.DreamPolicy{Linkable: true, LinkClasses: []string{"topical"}},
 	})
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectScopeLock(mock)
 	expectSourceFetchTyped(mock, sourceID, "decisions", tEarly, tEarly, "src", "wf-topical-only")
 	expectTargetFetch(mock, targetID, "private", false, 1.0, "projects", tLate, tLate, "tgt")
@@ -510,7 +510,7 @@ func TestWriteLinks_UnknownSourceType_RejectsBatchFailClosed(t *testing.T) {
 	mock := newPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectScopeLock(mock)
 	expectSourceFetchTyped(mock, sourceID, "decisions", tEarly, tEarly, "src", "wf-unregistered")
 	// No further expectations: the batch stops at the source policy resolve.

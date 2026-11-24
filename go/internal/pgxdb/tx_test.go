@@ -203,8 +203,8 @@ func TestReadOeffnetReadOnlyUndWriteNicht(t *testing.T) {
 	if err := Write(context.Background(), db2, Stages{}, func(pgx.Tx) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if db2.gotOpts != (pgx.TxOptions{}) {
-		t.Fatalf("Write TxOptions = %+v, erwartet den Nullwert", db2.gotOpts)
+	if db2.gotOpts != (pgx.TxOptions{IsoLevel: pgx.ReadCommitted}) {
+		t.Fatalf("Write TxOptions = %+v, erwartet READ COMMITTED ohne weitere Optionen (issue #547)", db2.gotOpts)
 	}
 }
 

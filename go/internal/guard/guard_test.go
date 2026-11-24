@@ -13,6 +13,7 @@ import (
 	"github.com/pashagolub/pgxmock/v5"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // testSet is the compiled-in builtin policy set — thresholds and allowlists
@@ -223,7 +224,7 @@ func TestRunGuardBatch_NoPending(t *testing.T) {
 	mock := newMockPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	// Empty result set.
 	expectPendingFetch(mock)
 	mock.ExpectCommit()
@@ -248,7 +249,7 @@ func TestRunGuardBatch_HappyPath_ThreeBlocks(t *testing.T) {
 	mock := newMockPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectPendingFetch(mock, blockA, blockB, blockC)
 	expectFullBlockSuccess(mock, blockA)
 	expectFullBlockSuccess(mock, blockB)
@@ -275,7 +276,7 @@ func TestRunGuardBatch_MiddleBlockFails_OthersProceed(t *testing.T) {
 	mock := newMockPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectPendingFetch(mock, blockA, blockB, blockC)
 
 	// Block A: succeeds.
@@ -310,7 +311,7 @@ func TestRunGuardBatch_ApplyDecisionFails_RollsBack(t *testing.T) {
 	mock := newMockPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectPendingFetch(mock, blockA, blockB)
 
 	// Block A: savepoint OK, check OK, applyDecision fails → rollback.
@@ -346,7 +347,7 @@ func TestRunGuardBatch_AuditLogFails_RollsBack(t *testing.T) {
 	mock := newMockPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectPendingFetch(mock, blockA, blockB)
 
 	// Block A: everything up to audit-insert succeeds, then INSERT fails.
@@ -383,7 +384,7 @@ func TestRunGuardBatch_SavepointCreateFails_SkipsBlock(t *testing.T) {
 	mock := newMockPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectPendingFetch(mock, blockA, blockB)
 
 	// Block A: SAVEPOINT itself fails. No rollback (no savepoint to roll
@@ -414,7 +415,7 @@ func TestRunGuardBatch_BeginTxFails(t *testing.T) {
 	mock := newMockPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin().WillReturnError(errors.New("pool exhausted"))
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions).WillReturnError(errors.New("pool exhausted"))
 
 	processed, err := RunGuardBatch(context.Background(), mock, testSet, 10, testSearch)
 	if err == nil {
@@ -465,7 +466,7 @@ func TestRunGuardBatch_BatchCompleteLogOnlyWithWork(t *testing.T) {
 	const batchLine = "guard: batch complete"
 
 	empty := capture(t, func(mock pgxmock.PgxPoolIface) {
-		mock.ExpectBegin()
+		mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 		expectPendingFetch(mock)
 		mock.ExpectCommit()
 		expectGuardStateUpdate(mock)
@@ -475,7 +476,7 @@ func TestRunGuardBatch_BatchCompleteLogOnlyWithWork(t *testing.T) {
 	}
 
 	worked := capture(t, func(mock pgxmock.PgxPoolIface) {
-		mock.ExpectBegin()
+		mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 		expectPendingFetch(mock, blockA)
 		expectFullBlockSuccess(mock, blockA)
 		mock.ExpectCommit()
@@ -502,7 +503,7 @@ func TestRunGuardBatch_PickBacklogRelocksTheKeptBlocks(t *testing.T) {
 	mock := newMockPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectPickIndexReady(mock, true)
 	mock.ExpectExec(`^` + regexp.QuoteMeta("SAVEPOINT "+guardPickSavepoint+"; "+guardPickNoSort) + `$`).
 		WillReturnResult(pgxmock.NewResult("SET", 0))
@@ -543,7 +544,7 @@ func TestRunGuardBatch_PickWithoutTheTypeIndex(t *testing.T) {
 	mock := newMockPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectPickIndexReady(mock, false)
 	mock.ExpectQuery(`ORDER BY created_at ASC\s+LIMIT \$2\s+FOR NO KEY UPDATE SKIP LOCKED$`).
 		WithArgs(pgxmock.AnyArg(), 10).

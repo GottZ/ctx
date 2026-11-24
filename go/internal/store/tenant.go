@@ -732,7 +732,8 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 		// pendingWriteKeySQL): it waits for a writer that holds a key
 		// and then deletes that key, whose stage the next statement — a
 		// snapshot of its own — sees as the writer left it and deletes; a
-		// writer that comes after finds its key gone and writes nothing. So
+		// writer that comes after finds its key gone and writes nothing (the
+		// "snapshot of its own" is READ COMMITTED, which pgxdb.Write pins). So
 		// the stage delete never waits for a stage row: on this hypertable a
 		// delete that waited for an update of its row deleted nothing once
 		// the update committed (PostgreSQL 18.6, TimescaleDB 2.31.0), which
@@ -748,6 +749,12 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 		keyIDs, err := pgx.CollectRows(rows, pgx.RowTo[string])
 		if err != nil {
 			return err
+		}
+		if len(keyIDs) == 0 {
+			// No key, no stage (issue #547): an empty id list deletes
+			// nothing and would still lock the hypertable — and wait for
+			// whoever holds it.
+			return nil
 		}
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM context_pending_writes WHERE api_key_id = ANY($1::uuid[])`, keyIDs); err != nil {
