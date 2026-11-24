@@ -61,7 +61,8 @@ func TestEmbedMigrationView_GoldenKeys(t *testing.T) {
 // migrated − failed − skipped, floored at 0. This is the ANTI-count(*) invariant
 // — the status surface must NEVER scan the pending partial index (which holds
 // ~10M entries for most of a migration), so pending is pure arithmetic over the
-// batch-pflegten counters. The clamp guards ClearEmbedding re-pending drift from
+// batch-pflegten counters. The clamp guards the re-pending drift of a content
+// change (InvalidateEmbeddingTx nulls the _next pair) from
 // showing a negative count.
 func TestArithmeticPending(t *testing.T) {
 	cases := []struct {

@@ -2,9 +2,9 @@
 
 // Integration test for the Evokoa-Clean-Room-Plan Achse 04 W04-3 negative
 // probe (design/04-reembed-migration.md §3.2b / §4.3 "Konvergenz-Invariante"):
-// a Content-Update during an active re-embed migration MUST null BOTH vector
-// pairs (embedding/embed_model AND embedding_next/embed_model_next) — not
-// just the live pair. Without the _next nulling, a stale embedding_next
+// a Content-Update during an active re-embed migration MUST null the _next
+// pair (embedding_next/embed_model_next), not only touch the live pair (which
+// since issue #198 part B is kept, marked stale). Without the _next nulling, a stale embedding_next
 // vector would sit next to fresh content, the migration's pending predicate
 // (embedding_next IS NULL) would never re-pick the block, and Verify would
 // count it complete while serving a content-foreign vector after cutover.
@@ -16,7 +16,9 @@
 // embedding_next/embed_model_next columns) already exists at RED time —
 // the columns exist, ClearEmbedding just doesn't touch them yet.
 //
-// Run: `go test -tags=integration ./internal/store/ -run TestClearEmbedding_NextExtension -count=1 -v`.
+// The content-change path was ClearEmbedding then; it is InvalidateEmbeddingTx.
+//
+// Run: `go test -tags=integration ./internal/store/ -run TestInvalidateEmbedding_NextExtension -count=1 -v`.
 package store_test
 
 import (
@@ -29,7 +31,7 @@ import (
 	"github.com/GottZ/ctx/internal/testdb"
 )
 
-func TestClearEmbedding_NextExtension_Integration(t *testing.T) {
+func TestInvalidateEmbedding_NextExtension_Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
@@ -44,7 +46,7 @@ func TestClearEmbedding_NextExtension_Integration(t *testing.T) {
 		return v
 	}
 
-	t.Run("clear_embedding_nulls_both_vector_pairs", func(t *testing.T) {
+	t.Run("invalidation_nulls_the_next_pair_and_marks_the_live_one", func(t *testing.T) {
 		var id string
 		if err := pool.QueryRow(ctx,
 			`INSERT INTO context_blocks (category, title, content, scope)
@@ -110,7 +112,7 @@ func TestClearEmbedding_NextExtension_Integration(t *testing.T) {
 	// "parked until content changes" (design §4.4), and InvalidateEmbeddingTx
 	// IS the content-change path. Without the delete, a shrunk block stays parked forever
 	// even though it would now fit.
-	t.Run("clear_embedding_deletes_backfill_memo", func(t *testing.T) {
+	t.Run("invalidation_deletes_backfill_memo", func(t *testing.T) {
 		var id string
 		if err := pool.QueryRow(ctx,
 			`INSERT INTO context_blocks (category, title, content, scope)
