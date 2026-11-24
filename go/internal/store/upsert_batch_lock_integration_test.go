@@ -252,11 +252,14 @@ func TestUpsertBlocksAgainstADreamBatch(t *testing.T) {
 }
 
 // TestUpsertBlocksBudgetAcrossConcurrentBatches: two batches of one key in two
-// scopes, 4 writes each against a limit of 6. The first counts and then waits
-// for a row a third transaction holds; the second runs in the meantime. It
-// must count after the first committed its booking — under the key's budget
-// lock — and be refused: a count taken beside the first one would see 0 used
-// and let both through (8 writes against 6).
+// scopes, 4 writes each against a limit of 6. The first waits for a row a
+// third transaction holds; the second runs in the meantime. Whichever counts
+// second must count after the other committed its booking — under the key's
+// budget lock — and be refused: two counts taken side by side would both see
+// 0 used and let both through (8 writes against 6). Since the budget lock is
+// the last lock of a batch (issue #519), the first holds none while it waits
+// for its row: the second counts and commits first, and the first is refused
+// once its row is free.
 func TestUpsertBlocksBudgetAcrossConcurrentBatches(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -322,25 +325,32 @@ func TestUpsertBlocksBudgetAcrossConcurrentBatches(t *testing.T) {
 	if err := gate.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := ubAwait(t, "ub-budget-first", first); err != nil {
-		t.Fatalf("first batch: %v", err)
-	}
+	firstErr := ubAwait(t, "ub-budget-first", first)
 	if !secondDone {
 		secondErr = ubAwait(t, "ub-budget-second", second)
 	}
+	// Exactly one batch fits; the other is refused with what the first left.
+	through, refused, refusedScope := "second", firstErr, "ub-b1"
+	if firstErr == nil {
+		through, refused, refusedScope = "first", secondErr, "ub-b2"
+	}
+	if through == "second" && secondErr != nil {
+		t.Fatalf("both batches failed: first %v, second %v", firstErr, secondErr)
+	}
 	var over *store.WriteBudgetError
-	if !errors.As(secondErr, &over) || over.Used != 4 || over.Writes != 4 || over.Limit != 6 {
-		t.Fatalf("second batch: %v; want the budget refusal with 4 of 6 used", secondErr)
+	if !errors.As(refused, &over) || over.Used != 4 || over.Writes != 4 || over.Limit != 6 {
+		t.Fatalf("the %s batch went through, the other answered %v; want the budget refusal with 4 of 6 used", through, refused)
 	}
 	var booked, written int
 	if err := pool.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM context_access_log WHERE api_key_id = $1 AND action = 'write')::int,
-		(SELECT count(*) FROM context_blocks WHERE scope = 'ub-b2')::int`, key.ID).Scan(&booked, &written); err != nil {
+		(SELECT count(*) FROM context_blocks WHERE scope = $2 AND content LIKE '% rewritten')::int`, key.ID, refusedScope).Scan(&booked, &written); err != nil {
 		t.Fatal(err)
 	}
 	if booked != 4 || written != 0 {
 		t.Fatalf("booked %d writes and wrote %d blocks of the refused batch; want 4 and 0", booked, written)
 	}
+	t.Logf("the %s batch went through, the other was refused", through)
 }
 
 // pgxWriteSteps runs statements in one transaction and commits.

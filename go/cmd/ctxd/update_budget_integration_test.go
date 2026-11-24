@@ -214,10 +214,18 @@ func TestSingleUpdateBooksWrite(t *testing.T) {
 				t.Fatalf("spend %d: %d %s", i, r.status, r.answer)
 			}
 		}
-		// Hold the rows of the eight updates, so they all reach their
-		// budget step together once they are let go: with the key's budget
-		// lock the first holds it while it waits for its row and the others
-		// wait for the lock; without it all eight would count the same rest.
+		// A second ctxd instance on the same database: its own pool and
+		// router. Half the writes go through it.
+		pool2, err := pgxpool.NewWithConfig(context.Background(), f.pool.Config())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pool2.Close()
+		f2 := &nulSweepFixture{router: nulSweepInstance(t, context.Background(), pool2), pool: pool2, log: f.log, keys: f.keys}
+		// Hold the rows of the eight writes, so they all reach their
+		// budget step together once they are let go: each takes the key's
+		// budget lock after its row, counts and books under it; without it
+		// all eight would count the same rest.
 		// The holder and the monitor run on a pool of their own: the
 		// updates hold connections of the router's pool while they wait
 		// (the default pool has max(4, cores) connections — four on a
@@ -236,9 +244,9 @@ func TestSingleUpdateBooksWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = holder.Rollback(context.Background()) }()
-		// As many updates as the router's pool has connections can wait in
+		// As many writes as each router's pool has connections can wait in
 		// the database at once; the rest wait for a connection.
-		inDB := min(parallel, int(f.pool.Config().MaxConns))
+		inDB := min(parallel/2, int(f.pool.Config().MaxConns)) + min(parallel/2, int(pool2.Config().MaxConns))
 		raced := ids[updateBudgetLimit-1:]
 		if _, err := holder.Exec(context.Background(), `SELECT 1 FROM context_blocks WHERE id = ANY($1) FOR UPDATE`, raced); err != nil {
 			t.Fatal(err)
@@ -248,13 +256,23 @@ func TestSingleUpdateBooksWrite(t *testing.T) {
 		statuses := map[int]int{}
 		for i := range parallel {
 			wg.Add(1)
-			go func(id string) {
+			go func(i int, id string) {
 				defer wg.Done()
-				r := f.restUpdate(k, id, map[string]any{"content": "raced"})
+				via := f.nulSweepFixture
+				if i%2 == 1 {
+					via = f2
+				}
+				// Six single updates and two batches of one update item.
+				c := nulSweepCase{method: http.MethodPost, url: "/api/manage", cred: k,
+					body: nulSweepJSON(map[string]any{"action": "update", "id": id, "data": map[string]any{"content": "raced"}})}
+				if i >= parallel-2 {
+					c.url, c.body = "/api/store/batch", nulSweepJSON(map[string]any{"items": []any{map[string]any{"id": id, "content": "raced"}}})
+				}
+				r := via.do(t, c, false)
 				mu.Lock()
 				statuses[r.status]++
 				mu.Unlock()
-			}(ids[updateBudgetLimit-1+i])
+			}(i, ids[updateBudgetLimit-1+i])
 		}
 		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 			var waiting int
@@ -279,5 +297,148 @@ func TestSingleUpdateBooksWrite(t *testing.T) {
 			t.Errorf("%d blocks written, want 1", written)
 		}
 		check("race", k, updateBudgetLimit, updateBudgetLimit)
+	})
+}
+
+// updateBudgetSide is a pool of its own beside the router's, for a holder and
+// a monitor: the router's updates hold connections of its pool while they
+// wait.
+func updateBudgetSide(t *testing.T, f updateBudgetFixture) *pgxpool.Pool {
+	t.Helper()
+	cfg := f.pool.Config()
+	cfg.MaxConns = 3
+	side, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(side.Close)
+	return side
+}
+
+// waitForLock waits until n backends of the database wait for a lock of the
+// given wait_event ("" = any), and fails after 10 s.
+func waitForLock(t *testing.T, side *pgxpool.Pool, event string, n int) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		var waiting int
+		if err := side.QueryRow(context.Background(),
+			`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND ($1 = '' OR wait_event = $1)`,
+			event).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d backends wait for a lock (%q), want %d", waiting, event, n)
+		}
+	}
+}
+
+// TestSingleUpdateWaitingForARowHoldsNoOtherWrite (issue #519, review of PR
+// #553): an update took its key's budget lock FIRST and then waited for its
+// row, so while another transaction held that row every other update, batch
+// and stage of the key waited with it — on other blocks, no-ops included —
+// until their requests timed out. The budget lock is now taken after the rows,
+// right before the count: an update that waits for a row holds no budget
+// lock, and an update that changes nothing never takes it.
+func TestSingleUpdateWaitingForARowHoldsNoOtherWrite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := updateBudgetFixture{nulSweepRouter(t, map[string]string{"CTX_RATE_LIMIT_WRITE": "50"}), t}
+	side := updateBudgetSide(t, f)
+	k := f.key("ub-hol", false)
+	a, b, c := f.seed("ub hol a"), f.seed("ub hol b"), f.seed("ub hol c")
+	quick := func(c nulSweepCase) nulSweepResult {
+		c.cred, c.timeout = k, 5*time.Second
+		return f.do(t, c, false)
+	}
+	update := func(id string, data map[string]any) nulSweepCase {
+		return nulSweepCase{method: http.MethodPost, url: "/api/manage", body: nulSweepJSON(map[string]any{"action": "update", "id": id, "data": data})}
+	}
+
+	t.Run("an update waiting for its row lets the key's other writes through", func(t *testing.T) {
+		holder, err := side.Begin(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = holder.Rollback(context.Background()) }()
+		if _, err := holder.Exec(context.Background(), `SELECT 1 FROM context_blocks WHERE id = $1 FOR UPDATE`, a); err != nil {
+			t.Fatal(err)
+		}
+		waited := make(chan nulSweepResult, 1)
+		go func() { waited <- f.restUpdate(k, a, map[string]any{"content": "waited for its row"}) }()
+		waitForLock(t, side, "", 1)
+
+		for _, tc := range []struct {
+			name string
+			c    nulSweepCase
+		}{
+			{"an update of another block", update(b, map[string]any{"content": "b changed"})},
+			{"an unchanged update of another block", update(b, map[string]any{"content": "b changed"})},
+			{"a batch", nulSweepCase{method: http.MethodPost, url: "/api/store/batch", body: nulSweepJSON(map[string]any{"items": []any{
+				map[string]any{"category": "learnings", "title": "ub hol batch", "content": "new"},
+				map[string]any{"id": c, "content": "c changed"},
+			}})}},
+			{"an MCP update of another block", nulSweepCase{method: http.MethodPost, url: "/mcp", mcp: true, body: nulSweepMCP("update", map[string]any{"id": c, "title": "ub hol c2"})}},
+		} {
+			r := quick(tc.c)
+			if r.status != http.StatusOK || r.isError || strings.Contains(r.answer, `"success":false`) {
+				t.Errorf("%s while the key's update of %s waits for its row: %d %s", tc.name, a, r.status, r.answer)
+			}
+		}
+		select {
+		case r := <-waited:
+			t.Fatalf("the update of the held row ended before the holder let go: %d %s", r.status, r.answer)
+		default:
+		}
+		_ = holder.Rollback(context.Background())
+		if r := <-waited; r.status != http.StatusOK {
+			t.Errorf("the update of the held row after the holder let go: %d %s", r.status, r.answer)
+		}
+		// b, the batch's store item, c (by the batch and by MCP) and a.
+		if all, withBlock := f.bookings(k); all != 5 || withBlock != 5 {
+			t.Errorf("%d bookings (%d naming a block), want 5", all, withBlock)
+		}
+	})
+
+	t.Run("an unchanged update never waits for the budget lock", func(t *testing.T) {
+		holder, err := side.Begin(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = holder.Rollback(context.Background()) }()
+		if _, err := holder.Exec(context.Background(), `SELECT pg_advisory_xact_lock(hashtext('ctx:write-budget'), hashtext($1::text))`, f.keys[k+"#id"]); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := f.bookings(k)
+		for _, tc := range []struct {
+			name string
+			c    nulSweepCase
+		}{
+			// No MCP case here: a tool call is not ended by the request's
+			// bound, so on a regression it would wait for the holder for good.
+			{"an unchanged update", update(b, map[string]any{"content": "b changed"})},
+			{"an unchanged batch", nulSweepCase{method: http.MethodPost, url: "/api/store/batch", body: nulSweepJSON(map[string]any{"items": []any{
+				map[string]any{"category": "learnings", "title": "ub hol batch", "content": "new"},
+			}})}},
+		} {
+			r := quick(tc.c)
+			if r.status != http.StatusOK || r.isError || strings.Contains(r.answer, `"success":false`) {
+				t.Errorf("%s while the budget lock is held: %d %s", tc.name, r.status, r.answer)
+			}
+		}
+		// A changing update waits for the lock, and writes once it is free.
+		changed := make(chan nulSweepResult, 1)
+		go func() { changed <- f.restUpdate(k, b, map[string]any{"content": "b changed again"}) }()
+		waitForLock(t, side, "advisory", 1)
+		_ = holder.Rollback(context.Background())
+		if r := <-changed; r.status != http.StatusOK {
+			t.Errorf("a changing update after the lock was let go: %d %s", r.status, r.answer)
+		}
+		if all, _ := f.bookings(k); all != before+1 {
+			t.Errorf("%d bookings, want %d: the unchanged writes booked, or the changing one did not", all, before+1)
+		}
 	})
 }

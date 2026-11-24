@@ -2278,9 +2278,6 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, u blockUp
 		write = writeSupersedesSource // lockSupersedesSource may ask for a re-run
 	}
 	if err := write(ctx, pool, pgxdb.At("store: update block"), func(tx pgx.Tx) error {
-		if err := lockBudget(ctx, tx, budget); err != nil {
-			return err
-		}
 		var held updateHold
 		if scopeMove {
 			var err error
@@ -2302,7 +2299,7 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, u blockUp
 		if err != nil || !charged {
 			return err
 		}
-		return budget.book(ctx, tx, []string{u.id}, 0)
+		return budget.spend(ctx, tx, []string{u.id})
 	}); err != nil {
 		if errors.Is(err, pgxdb.ErrRollback) {
 			return false, false, nil

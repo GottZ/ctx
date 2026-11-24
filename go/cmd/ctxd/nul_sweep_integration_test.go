@@ -338,6 +338,20 @@ func nulSweepRouter(t *testing.T, env map[string]string) *nulSweepFixture {
 	}
 	applyEnv(t, full)
 	t.Setenv("CTX_OAUTH_DCR_MODE", "admin")
+	router := nulSweepInstance(t, ctx, pool)
+
+	const plaintext = "c7519000000000000000000000000000deadbeefdeadbeefdeadbeefdeadbeef"
+	created, _, err := store.BootstrapAdminKey(ctx, pool, plaintext, "nul-sweep-admin")
+	if err != nil || !created {
+		t.Fatalf("bootstrap admin key: created=%v err=%v", created, err)
+	}
+	return &nulSweepFixture{router: router, pool: pool, log: lg, keys: map[string]string{"admin": plaintext}}
+}
+
+// nulSweepInstance is the production router of one ctxd instance over pool,
+// configured from the environment as it stands.
+func nulSweepInstance(t *testing.T, ctx context.Context, pool *pgxpool.Pool) http.Handler {
+	t.Helper()
 	cc, issues := loadFromEnv()
 	if config.HasErrors(issues) {
 		t.Fatalf("env fixture invalid: %v", issues)
@@ -351,14 +365,7 @@ func nulSweepRouter(t *testing.T, env map[string]string) *nulSweepFixture {
 	d := dispatch.New(nil, dispatch.DefaultSettings())
 	t.Cleanup(d.Close)
 	scheduler.SetDispatcher(d)
-
-	const plaintext = "c7519000000000000000000000000000deadbeefdeadbeefdeadbeefdeadbeef"
-	created, _, err := store.BootstrapAdminKey(ctx, pool, plaintext, "nul-sweep-admin")
-	if err != nil || !created {
-		t.Fatalf("bootstrap admin key: created=%v err=%v", created, err)
-	}
-	router := NewRouter(ctx, pool, cfgStore, scheduler, backendPool, reg, projectHub, d)
-	return &nulSweepFixture{router: router, pool: pool, log: lg, keys: map[string]string{"admin": plaintext}}
+	return NewRouter(ctx, pool, cfgStore, scheduler, backendPool, reg, projectHub, d)
 }
 
 func nulSweepOne(t *testing.T, pool *pgxpool.Pool, q string, args ...any) string {
