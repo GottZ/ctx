@@ -340,7 +340,8 @@ func TestGuardReviewAgingIgnoresAStampOutsideTheRowsLifetime(t *testing.T) {
 }
 
 // laggingClockPool returns a pool on the database of pool whose clock runs the
-// interval lag behind the application's: now() and statement_timestamp() resolve to
+// interval lag behind the application's, in the session time zone
+// Asia/Kathmandu (UTC+05:45): now() and statement_timestamp() resolve to
 // functions of a schema ahead of pg_catalog in the search path (pg_catalog is
 // named last, so its functions no longer win) that subtract lag. Column
 // defaults keep the real clock — they were bound when the table was created.
@@ -358,7 +359,12 @@ func laggingClockPool(t *testing.T, pool *pgxpool.Pool, lag string) *pgxpool.Poo
 			t.Fatalf("lagging clock: %v", err)
 		}
 	}
-	p := testdb.WithSessionSettings(t, pool, map[string]string{"search_path": "ctx_lagging_clock, public, pg_catalog"})
+	// A session time zone far from UTC as well: the stamp is RFC 3339 UTC
+	// whatever the session's zone is.
+	p := testdb.WithSessionSettings(t, pool, map[string]string{
+		"search_path": "ctx_lagging_clock, public, pg_catalog",
+		"TimeZone":    "Asia/Kathmandu",
+	})
 	var lagging, real time.Time
 	if err := p.QueryRow(ctx, `SELECT now(), pg_catalog.now()`).Scan(&lagging, &real); err != nil {
 		t.Fatalf("lagging clock: %v", err)

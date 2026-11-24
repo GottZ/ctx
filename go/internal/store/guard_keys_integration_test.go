@@ -11,6 +11,9 @@ package store_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -92,8 +95,20 @@ func TestGuardKeysCallerSimilarityKeepsTheGuardList(t *testing.T) {
 		t.Fatalf("read similarity: %v", err)
 	}
 	if _, _, err := store.UpdateBlock(ctx, pool, ids[0],
-		store.UpdateBlockData{Metadata: map[string]any{"topic": "rewritten", "guard_similarity": "x"}}, []string{scope}); err != nil {
+		store.UpdateBlockData{Metadata: map[string]any{"topic": "rewritten", "guard_similarity": "x", "guardrail": "kept", "guard": "kept"}},
+		[]string{scope}); err != nil {
 		t.Fatalf("UpdateBlock: %v", err)
+	}
+	// Only the guard_ prefix is the guard's: a caller's key that merely
+	// starts with the word lands.
+	var topic, guardrail, guardKey string
+	if err := pool.QueryRow(ctx,
+		`SELECT COALESCE(metadata->>'topic', ''), COALESCE(metadata->>'guardrail', ''), COALESCE(metadata->>'guard', '') FROM context_blocks WHERE id = $1`,
+		ids[0]).Scan(&topic, &guardrail, &guardKey); err != nil {
+		t.Fatalf("read caller keys: %v", err)
+	}
+	if topic != "rewritten" || guardrail != "kept" || guardKey != "kept" {
+		t.Errorf("caller keys after the write: topic %q, guardrail %q, guard %q; want rewritten, kept, kept", topic, guardrail, guardKey)
 	}
 
 	for _, status := range []string{"", "needs_review"} {
@@ -390,5 +405,68 @@ func TestGuardKeysChunkRewriteKeepsTheTrace(t *testing.T) {
 	}
 	if topic != "second" {
 		t.Errorf("after the rewrite: topic %q, want the caller's %q", topic, "second")
+	}
+}
+
+// TestGuardKeysGuardListReadsTheSimilarityOncePerRow: the guard list sorts
+// every flagged row of the read scopes by its similarity, so the order key is
+// read once per row there, not only for the rows the list returns. Guarding
+// the cast (guardListOrderSQL) must not read the key twice: with metadata
+// stored out of line, every read is a TOAST fetch per row. The pin compares
+// the buffers of the list's own statement with those of the same statement
+// ordered by the bare cast the list ran before (one read), on blocks the guard
+// flagged through the production path, at both deployment values of
+// random_page_cost. A second read costs one TOAST fetch per row (four buffers
+// per row here); the slack is one buffer per row.
+func TestGuardKeysGuardListReadsTheSimilarityOncePerRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	const scope, pairs = "gk-toast", 20
+	for i := 0; i < pairs; i++ {
+		for j, vec := range [][]float32{gkVec(2*i, 1.0, 0, 0), gkVec(2*i, 0.96, 2*i+1, 0.28)} {
+			raw := make([]byte, 6000)
+			if _, err := rand.Read(raw); err != nil {
+				t.Fatalf("random: %v", err)
+			}
+			title := "gk-toast-" + string(rune('a'+i)) + string(rune('0'+j))
+			b, err := store.UpsertBlock(ctx, pool, "learnings", title, "toasted guard list body "+title, nil,
+				map[string]any{"blob": base64.StdEncoding.EncodeToString(raw)}, scope, true, store.SensitivityWrite{}, "knowledge")
+			if err != nil {
+				t.Fatalf("upsert %s: %v", title, err)
+			}
+			if err := store.StoreEmbedding(ctx, pool, b.ID, "guard-keys-model", vec); err != nil {
+				t.Fatalf("embed %s: %v", title, err)
+			}
+		}
+	}
+	processed, err := guard.RunGuardBatch(ctx, pool, blocktype.NewRegistry().Snapshot(), 4*pairs+10, guard.Search{EfSearch: 800, ExactMaxCandidates: 400} /* the guard.* defaults */)
+	if err != nil || processed != 2*pairs {
+		t.Fatalf("RunGuardBatch: processed %d, error %v; want %d", processed, err, 2*pairs)
+	}
+	if _, err := pool.Exec(ctx, `ANALYZE context_blocks`); err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	query, args := store.GuardListQueryForTest([]string{scope}, "", "", nil, 10)
+	if strings.Count(query, store.GuardListOrderSQLForTest) != 1 {
+		t.Fatalf("the list's statement does not carry its order key once:\n%s", query)
+	}
+	bare := strings.Replace(query, store.GuardListOrderSQLForTest, `(b.metadata->>'guard_similarity')::numeric`, 1)
+	rowsOutOfLine := int64(2 * pairs)
+	for _, rpc := range testdb.RandomPageCosts {
+		p := testdb.WithRandomPageCost(t, pool, rpc)
+		// One run of each first: the first execution on a connection also
+		// reads the catalog for the functions it calls.
+		testdb.ExplainCustom(t, p, query, args...)
+		testdb.ExplainCustom(t, p, bare, args...)
+		bList := testdb.ExplainCustom(t, p, query, args...).Buffers
+		bBare := testdb.ExplainCustom(t, p, bare, args...).Buffers
+		t.Logf("random_page_cost %s: buffers list %d, bare cast %d (%d rows out of line)", rpc, bList, bBare, rowsOutOfLine)
+		if bList > bBare+rowsOutOfLine {
+			t.Errorf("random_page_cost %s: the guard list reads %d buffers, the bare cast %d: the similarity is read more than once per row",
+				rpc, bList, bBare)
+		}
 	}
 }
