@@ -101,6 +101,19 @@ FIELDS: tuple[dict, ...] = (
         "group": "Mode",
     },
     {
+        "key": "mcp_grant",
+        "kind": "bool",
+        "label": "Let Hermes end a ctx call the checkpoint gives up on",
+        "description": (
+            "On: the checkpoint's ctx calls go through Hermes' call_mcp with the checkpoint's own time limit, so a "
+            "call it gives up on ends in Hermes as well instead of holding the ctx server entry until the next "
+            "checkpoint's first call fails (writes plugins.entries.ctx_checkpoint.mcp_allowlist; the plugin reaches "
+            "the same ctx server either way)."
+        ),
+        "default": False,
+        "group": "Connection",
+    },
+    {
         "key": "checkpoint_required",
         "kind": "bool",
         "label": "Wait for the checkpoint before compacting",

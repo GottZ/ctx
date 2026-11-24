@@ -63,7 +63,19 @@ context variables and is abandoned at the deadline (``code="timeout"``). The wor
 for the calling thread in Hermes' interrupt registry, so a ``/stop`` aimed at the caller
 ends a bounded call as it ends an unbounded one. Without a ``timeout``, the MCP
 transport's own timeout applies (300 s by default in Hermes). Hermes serializes calls per
-MCP server, so an abandoned call still completes before the next call is sent.
+MCP server, so an abandoned call still completes before the next call is sent: it holds the
+entry's RPC lock until the entry's own tool timeout, and the next call — the head search of
+the next compaction — waits behind it (GottZ/ctx#299).
+
+A bounded call goes through Hermes' ``PluginContext.call_mcp(server, tool, args, timeout)`` instead
+when the provider hands one over (``host_call``: the operator granted the entry in
+``plugins.entries.ctx_checkpoint.mcp_allowlist``, 0.17.0). Hermes builds that call's handler with
+the caller's timeout (``hermes_cli/plugins_context.py`` ``call_mcp``) and cancels the call on
+its MCP loop when it runs out (``tools/mcp_tool_loop.py`` ``_run_on_mcp_loop``), which releases
+the RPC lock. Its envelope (``{"ok", "result"|"error", …}``) is read as the dispatch's answer; an
+answer Hermes cut at its 64 KB plugin cap fails the call. A refused grant (``PermissionError``,
+raised before any transport work) sends that call and every later one of this client through
+the dispatch, as without a grant.
 """
 
 from __future__ import annotations
@@ -132,6 +144,12 @@ writer's read of the head the search found."""
 MIN_EXTRA_ASK_S = 0.5
 """The ask with ``types`` again is not sent with less time than this: the shortest timeout the chain
 writer gives a call (``ChainWriter._call``)."""
+HOST_CALL_MIN_TIMEOUT_S = 1.0
+"""Hermes clamps a ``call_mcp`` timeout to at least this (``PluginContext.call_mcp``: 1 to 600 s)."""
+HOST_CALL_GRACE_S = 1.0
+"""How long past its timeout a ``call_mcp`` call is waited for before it is abandoned: Hermes reads
+the grant and acquires the server before the timed part, and polls the call every 0.1 s. Inside
+the chain's margin before the host's wait (``checkpoint.HOST_WAIT_MARGIN_S``)."""
 
 
 def _refused_type(text: str, types: Iterable[str]) -> str | None:
@@ -288,6 +306,10 @@ def collision_text(server: str, others: list[str]) -> str:
     )
 
 
+_NOT_THROUGH_HOST = object()
+"""``McpClient._host_answer``: this call goes through the tool dispatch."""
+
+
 def _interrupt_acting_for() -> Any:
     """Hermes' ``tools.interrupt.acting_for_tid`` ContextVar; ``None`` on a host without it."""
     try:
@@ -351,11 +373,17 @@ class McpClient:
         timeout: float = 10.0,
         synthesis_timeout: float = 90.0,
         secrets: Callable[[], Iterable[str]] | None = None,
+        host_call: Callable[[], Callable[..., Any] | None] | None = None,
     ):
         if not _SERVER_NAME_RE.fullmatch(server_name or ""):
             raise ValueError(f"MCP server name {server_name!r} may only contain letters, digits, '_' and '-'")
         self._dispatch = dispatch
         self._server = server_name
+        # Hermes' call_mcp for bounded calls, asked per call: the provider returns it while the
+        # operator's grant lists this entry, else None (see the module docstring). A refusal of the
+        # grant by Hermes sends this client's calls through the dispatch from then on.
+        self._host_call = host_call
+        self._host_call_refused = False
         # The ctx keys the provider binds (read per error): foreign error texts are redacted with
         # them where they enter the plugin (#304). The client itself holds no credential.
         self._secrets = secrets
@@ -404,13 +432,15 @@ class McpClient:
             if timeout is None:
                 raw = self._dispatch(name, args)
             else:
-                finished, raw, error = _run_bounded(lambda: self._dispatch(name, args), timeout)
-                if not finished:
-                    raise CtxApiError(
-                        f"mcp {tool}: no answer within {timeout:.1f}s; the call was abandoned", code="timeout"
-                    )
-                if error is not None:
-                    raise error
+                raw = self._host_answer(tool, args, timeout)
+                if raw is _NOT_THROUGH_HOST:
+                    finished, raw, error = _run_bounded(lambda: self._dispatch(name, args), timeout)
+                    if not finished:
+                        raise CtxApiError(
+                            f"mcp {tool}: no answer within {timeout:.1f}s; the call was abandoned", code="timeout"
+                        )
+                    if error is not None:
+                        raise error
         except CtxApiError:
             raise
         except Exception as exc:
@@ -453,6 +483,47 @@ class McpClient:
             if "result" in payload and isinstance(payload["result"], str):
                 return payload, payload["result"]
         return payload, raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
+
+    def _granted_host_call(self) -> Callable[..., Any] | None:
+        if self._host_call is None or self._host_call_refused:
+            return None
+        try:
+            call_mcp = self._host_call()
+        except Exception:
+            logger.debug("ctx MCP: the grant for Hermes' call_mcp is not readable; the dispatch is used", exc_info=True)
+            return None
+        return call_mcp if callable(call_mcp) else None
+
+    def _host_answer(self, tool: str, args: dict[str, Any], timeout: float) -> Any:
+        """A bounded call through Hermes' ``call_mcp`` (see the module docstring) as the dispatch's
+        answer, or :data:`_NOT_THROUGH_HOST` when it is not to go that way: no grant, or Hermes refused
+        it (``PermissionError``, before any transport work) — then the dispatch takes the call."""
+        call_mcp = self._granted_host_call()
+        if call_mcp is None:
+            return _NOT_THROUGH_HOST
+        host_timeout = max(HOST_CALL_MIN_TIMEOUT_S, float(timeout))
+        finished, envelope, error = _run_bounded(
+            lambda: call_mcp(self._server, tool, dict(args), host_timeout), host_timeout + HOST_CALL_GRACE_S
+        )
+        if not finished:
+            raise CtxApiError(f"mcp {tool}: no answer within {timeout:.1f}s; the call was abandoned", code="timeout")
+        if isinstance(error, PermissionError):
+            self._host_call_refused = True
+            logger.info(
+                "ctx MCP: Hermes refused this plugin's grant for mcp_servers.%s; calls go through the tool "
+                "dispatch until the provider connects again",
+                self._server,
+            )
+            return _NOT_THROUGH_HOST
+        if error is not None:
+            raise error
+        if not isinstance(envelope, dict):
+            return envelope
+        if envelope.get("truncated"):
+            raise CtxApiError(f"mcp {tool}: the answer is longer than Hermes hands a plugin (64 KB); not read")
+        if envelope.get("ok") is False:
+            return {"error": envelope.get("error")}
+        return {key: envelope[key] for key in ("result", "structuredContent") if key in envelope}
 
     @staticmethod
     def _as_json(text: str) -> Any:
