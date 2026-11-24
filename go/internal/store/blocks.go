@@ -2571,7 +2571,10 @@ func searchBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, p
 	if err := RequireScopes(p.ReadScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, false, err
 	}
-	sql, args := searchBlocksSQL(p)
+	sql, args, err := searchStatement(ctx, pool, p) // issue #237: the browse walk while its index stands
+	if err != nil {
+		return nil, false, err
+	}
 	rows, err := runSearchBlocks(ctx, pool, set, sql, args, p.Compact)
 	if err != nil {
 		return nil, false, err
@@ -2585,7 +2588,8 @@ func searchBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, p
 // searchParams is the input of the statement builder. It exists so the §6.6
 // plan gate can EXPLAIN the very statement production runs instead of a
 // hand-copied approximation of it — a copy would drift and the gate would then
-// measure the copy.
+// measure the copy. A browse sends the walk of blocks_list.go while its
+// indexes stand (searchStatement).
 type searchParams struct {
 	Query           string
 	ReadScopes      []string
@@ -2864,7 +2868,10 @@ func RecentBlocks(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, r
 		return nil, err
 	}
 	limit = ClampLimit(limit, 10, 50)
-	q, args := recentBlocksSQL(readScopes, category, limit, types, typesExclude, grantedBlockIDs)
+	q, args, err := recentStatement(ctx, pool, readScopes, category, limit, types, typesExclude, grantedBlockIDs) // issue #237
+	if err != nil {
+		return nil, err
+	}
 
 	rows, err := pool.Query(ctx, q, args...)
 	if err != nil {
@@ -2896,7 +2903,7 @@ func recentBlocksSQL(readScopes []string, category string, limit int, types, typ
 	// archived block must not leak). category, if present, shifts to $3.
 	// A page subquery and the preview above it, like the compact search
 	// (compactPageCols).
-	q := `SELECT id, category, tags, title, scope, type_name, lifecycle_state, type_source, content, created_at, updated_at, untrusted_origin
+	q := `SELECT ` + recentPageCols + `
 	      FROM context_blocks
 	      WHERE NOT is_archived AND ( scope = ANY($1::text[]) OR id = ANY($2::uuid[]) )`
 	args := []any{readScopes, grantedBlockIDs}
@@ -2912,10 +2919,13 @@ func recentBlocksSQL(readScopes []string, category string, limit int, types, typ
 		args = append(args, typesExclude)
 		q += fmt.Sprintf(` AND NOT (type_name = ANY($%d::text[]))`, len(args))
 	}
+	// id DESC is the tiebreak among rows of one updated_at (issue #237), as
+	// in the browse order: without it they came in scan order, and the cut
+	// at the limit among them was the plan's.
 	args = append(args, limit)
-	q += fmt.Sprintf(` ORDER BY updated_at DESC LIMIT $%d`, len(args))
-	return `SELECT id, category, tags, title, scope, type_name, lifecycle_state, type_source, LEFT(content, 200), char_length(content), created_at, updated_at, ` + untrustedOriginCol + `
-	      FROM (` + q + `) page ORDER BY updated_at DESC`, args
+	q += fmt.Sprintf(` ORDER BY updated_at DESC, id DESC LIMIT $%d`, len(args))
+	return `SELECT ` + recentPreviewCols + `
+	      FROM (` + q + `) page ORDER BY updated_at DESC, id DESC`, args
 }
 
 // listCategoriesSQL is ListCategories' statement.

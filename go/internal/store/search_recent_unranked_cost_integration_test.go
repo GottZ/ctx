@@ -16,10 +16,11 @@
 // blocks of transcript width beside them (57 % of the rows, as on the
 // reference instance), one without. The newest blocks are ranked ones in both,
 // so the page itself is the same and the gate measures only the rows the page
-// does not show. What those rows may still cost is their heap tuples — the
-// sort on updated_at has no index (issue #237) — so the bound for recent and
-// browse is the cost on the store without them, scaled by the ratio of the two
-// heaps, plus a quarter. For the full-text path the bound is the full
+// does not show. What those rows may still cost the statements before 195 is
+// their heap tuples — the sort on updated_at had no index (issue #237) — so
+// the bound for recent and browse is the cost on the store without them,
+// scaled by the ratio of the two heaps, plus a quarter; the walk over the
+// indexes of 195 reads the page's rows on either store. For the full-text path the bound is the full
 // (non-compact) statement on the same store: it reads the same rows and ranks
 // them the same way, and never had the preview expressions.
 package store_test
@@ -229,24 +230,58 @@ func TestSearchRecentNeverRankedRowsCost(t *testing.T) {
 		sql  string
 		args []any
 	}
-	browse := func(after *store.SearchCursor) stmt {
-		sql, args := store.SearchBlocksSQLForTest(store.SearchBlocksParams{
-			ReadScopes: scopes, Limit: store.SearchDefaultLimit, Compact: true, After: after, ProbeNext: true,
-		})
-		return stmt{"browse", sql, args}
+	// Both statements production sends (issue #237): the walk over the
+	// indexes of migration 195, and the statement before 195, which it sends
+	// while they do not stand — so that one is measured without them. With
+	// the indexes standing the planner serves the statement before 195 from
+	// them as well, the reference without the never-ranked rows falls to
+	// about half, and the bound derived from it turns a few buffers of plan
+	// noise into a failure (2 of 4 runs on the production image) for a
+	// combination production never sends.
+	type measured struct {
+		stmt
+		with, alone map[string]testdb.PlanCost
 	}
-	recentSQL, recentArgs := store.RecentBlocksSQLForTest(scopes, "", 10, nil, nil, []string{})
-	deep := browse(&store.SearchCursor{UpdatedAt: deepAt, ID: deepID})
-	deep.name = "browse deep page"
-	pageStmts := []stmt{{"recent", recentSQL, recentArgs}, browse(nil), deep}
+	var pageStmts []measured
+	for _, walk := range []bool{true, false} {
+		form := " (walk)"
+		if !walk {
+			form = " (before 195)"
+			for _, db := range []*pgxpool.Pool{with, alone} {
+				if _, err := db.Exec(context.Background(),
+					`DROP INDEX idx_blocks_scope_updated, idx_blocks_scope_category_updated`); err != nil {
+					t.Fatalf("drop the indexes of migration 195: %v", err)
+				}
+			}
+		}
+		browse := func(after *store.SearchCursor) stmt {
+			sql, args := store.SearchStatementForTest(store.SearchBlocksParams{
+				ReadScopes: scopes, Limit: store.SearchDefaultLimit, Compact: true, After: after, ProbeNext: true,
+			}, walk, walk)
+			return stmt{"browse" + form, sql, args}
+		}
+		recentSQL, recentArgs := store.RecentStatementForTest(scopes, "", 10, nil, nil, []string{}, walk, walk)
+		deep := browse(&store.SearchCursor{UpdatedAt: deepAt, ID: deepID})
+		deep.name = "browse deep page" + form
+		// Measured here, while the indexes are as production has them for
+		// this form.
+		for _, s := range []stmt{{"recent" + form, recentSQL, recentArgs}, browse(nil), deep} {
+			m := measured{stmt: s, with: map[string]testdb.PlanCost{}, alone: map[string]testdb.PlanCost{}}
+			for _, plan := range []string{"custom", "generic"} {
+				explain := testdb.ExplainCustom
+				if plan == "generic" {
+					explain = testdb.ExplainGeneric
+				}
+				m.with[plan] = explain(t, with, s.sql, s.args...)
+				m.alone[plan] = explain(t, alone, s.sql, s.args...)
+			}
+			pageStmts = append(pageStmts, m)
+		}
+	}
 	for _, s := range pageStmts {
 		for _, plan := range []string{"custom", "generic"} {
-			explain := testdb.ExplainCustom
-			if plan == "generic" {
-				explain = testdb.ExplainGeneric
-			}
-			got := explain(t, with, s.sql, s.args...)
-			ref := explain(t, alone, s.sql, s.args...)
+			got := s.with[plan]
+			ref := s.alone[plan]
 			bound := int64(float64(ref.Buffers) * heapRatio * 1.25)
 			t.Logf("%s (%s plan): %d buffers with the never-ranked rows, %d without, bound %d", s.name, plan, got.Buffers, ref.Buffers, bound)
 			if got.Buffers > bound {
