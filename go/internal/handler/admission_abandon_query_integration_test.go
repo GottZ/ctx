@@ -142,7 +142,7 @@ func aaqRequestLog(t *testing.T, logs *rejectLogCapture, waited bool) {
 
 func aaqFixtureQuestion(t *testing.T) {
 	t.Helper()
-	if !llm.DetectGerman(aaqGermanQuery) || llm.HasTemporalIntent(aaqGermanQuery) {
+	if !llm.NeedsTranslation(aaqGermanQuery) || llm.HasTemporalIntent(aaqGermanQuery) {
 		t.Fatal("fixture question no longer takes the translation alone — the probe would test something else")
 	}
 }

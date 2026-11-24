@@ -350,9 +350,9 @@ func TestBuildPrompt(t *testing.T) {
 	})
 }
 
-// --- DetectGerman ---.
+// --- NeedsTranslation ---.
 
-func TestDetectGerman(t *testing.T) {
+func TestNeedsTranslation(t *testing.T) {
 	tests := []struct {
 		name string
 		query string
@@ -376,9 +376,9 @@ func TestDetectGerman(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DetectGerman(tt.query)
+			got := NeedsTranslation(tt.query)
 			if got != tt.want {
-				t.Errorf("DetectGerman(%q) = %v, want %v", tt.query, got, tt.want)
+				t.Errorf("NeedsTranslation(%q) = %v, want %v", tt.query, got, tt.want)
 			}
 		})
 	}

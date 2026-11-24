@@ -107,7 +107,8 @@ type confirmOutcome struct {
 	// block an item that changed nothing matches.
 	Batch []storeBatchItem
 	// Item names the card item of a staged batch whose scope a
-	// confirmScopeRejected refuses (batchItemPrefix), "" for every other card.
+	// confirmScopeRejected refuses, or whose block a drift or gone outcome
+	// names (batchItemPrefix), "" for every other card.
 	Item string
 }
 
@@ -284,7 +285,7 @@ func executeConfirm(ctx context.Context, pool *pgxpool.Pool, blocktypes *blockty
 	}
 	// A staged batch (#211): the claim re-check above, for each of its items
 	// (their scopes: confirmScopeReject) — on the un-consumed row, like theirs.
-	if out := confirmBatchReject(ctx, blocktypes, cw); out != nil {
+	if out := confirmBatchReject(ctx, pool, blocktypes, ar, cw); out != nil {
 		return *out
 	}
 
@@ -535,10 +536,10 @@ func confirmTOCTOUGoneMsg(op string) string {
 // status the drift has always had (409 on REST).
 func (o confirmOutcome) driftMsg() string {
 	if o.Kind == confirmExecDrift {
-		return confirmIdentityTakenPrefix + fmt.Sprintf(
+		return o.Item + confirmIdentityTakenPrefix + fmt.Sprintf(
 			"block %s changed while this update was confirmed (lost-update protection) — re-read the block and stage the update again", o.BlockID)
 	}
-	return confirmTOCTOUDriftMsg(o.Op, o.BlockID)
+	return o.Item + confirmTOCTOUDriftMsg(o.Op, o.BlockID)
 }
 
 func confirmTOCTOUDriftMsg(op, blockID string) string {

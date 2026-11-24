@@ -1023,7 +1023,7 @@ func validateQueryTranslate(c *Config) []Issue {
 	case "", llm.TranslateAuto, llm.TranslateOff:
 	default:
 		issues = append(issues, Issue{Field: "query.translate", Severity: SeverityError,
-			Msg: fmt.Sprintf("query.translate %q must be %q (translate a question the German heuristic matches) or %q (never translate) — empty reads as %q",
+			Msg: fmt.Sprintf("query.translate %q must be %q (translate a German or Nordic question) or %q (never translate) — empty reads as %q",
 				c.Query.Translate, llm.TranslateAuto, llm.TranslateOff, llm.TranslateAuto)})
 	}
 

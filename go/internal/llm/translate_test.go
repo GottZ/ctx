@@ -8,82 +8,82 @@ import (
 // These tests supplement the existing tests in llm_test.go with boundary
 // values, unusual inputs, and encoding edge cases for translate functions.
 
-// --- DetectGerman edge cases ---.
+// --- NeedsTranslation edge cases ---.
 
-func TestDetectGerman_NullByte(t *testing.T) {
-	if DetectGerman("\x00") {
+func TestNeedsTranslation_NullByte(t *testing.T) {
+	if NeedsTranslation("\x00") {
 		t.Error("null byte should not trigger German detection")
 	}
 }
 
-func TestDetectGerman_UTF8BOM(t *testing.T) {
+func TestNeedsTranslation_UTF8BOM(t *testing.T) {
 	// BOM followed by German umlaut.
-	if !DetectGerman("\xef\xbb\xbfÄnderung") {
+	if !NeedsTranslation("\xef\xbb\xbfÄnderung") {
 		t.Error("BOM + umlaut should still detect German")
 	}
 }
 
-func TestDetectGerman_AllStopwords(t *testing.T) {
+func TestNeedsTranslation_AllStopwords(t *testing.T) {
 	// Construct a query with many German stopwords.
-	if !DetectGerman("wie ist das und nicht wird") {
+	if !NeedsTranslation("wie ist das und nicht wird") {
 		t.Error("many German stopwords should trigger detection")
 	}
 }
 
-func TestDetectGerman_OnlyOneStopword(t *testing.T) {
+func TestNeedsTranslation_OnlyOneStopword(t *testing.T) {
 	// "die" is a German stopword but "hard movie cool" are all English.
 	// Only 1 stopword — should not trigger.
-	if DetectGerman("die hard movie cool") {
+	if NeedsTranslation("die hard movie cool") {
 		t.Error("single stopword should not trigger (false positive)")
 	}
 }
 
-func TestDetectGerman_ExactlyTwoStopwords(t *testing.T) {
+func TestNeedsTranslation_ExactlyTwoStopwords(t *testing.T) {
 	// Two stopwords should trigger.
-	if !DetectGerman("wie und something") {
+	if !NeedsTranslation("wie und something") {
 		t.Error("exactly two stopwords should trigger detection")
 	}
 }
 
-func TestDetectGerman_LongEnglishQuery(t *testing.T) {
-	if DetectGerman("What is the current status of the PostgreSQL database running on port 5432 with pgvector extension") {
+func TestNeedsTranslation_LongEnglishQuery(t *testing.T) {
+	if NeedsTranslation("What is the current status of the PostgreSQL database running on port 5432 with pgvector extension") {
 		t.Error("long English query should not trigger")
 	}
 }
 
-func TestDetectGerman_VeryLongInput(t *testing.T) {
+func TestNeedsTranslation_VeryLongInput(t *testing.T) {
 	// 100KB of English text should not trigger.
 	big := strings.Repeat("hello world test query ", 5000)
-	if DetectGerman(big) {
+	if NeedsTranslation(big) {
 		t.Error("100KB English should not trigger German detection")
 	}
 }
 
-func TestDetectGerman_VeryLongInputWithUmlautAtEnd(t *testing.T) {
+func TestNeedsTranslation_VeryLongInputWithUmlautAtEnd(t *testing.T) {
 	big := strings.Repeat("a", 100*1024) + "\u00e4"
-	if !DetectGerman(big) {
+	if !NeedsTranslation(big) {
 		t.Error("umlaut at end of 100KB should still trigger")
 	}
 }
 
-func TestDetectGerman_Emoji(t *testing.T) {
-	if DetectGerman("\U0001F600 \U0001F4A5") {
+func TestNeedsTranslation_Emoji(t *testing.T) {
+	if NeedsTranslation("\U0001F600 \U0001F4A5") {
 		t.Error("emoji-only should not trigger German detection")
 	}
 }
 
-func TestDetectGerman_SingleRune_SharpS(t *testing.T) {
-	if !DetectGerman("\u00df") {
+func TestNeedsTranslation_SingleRune_SharpS(t *testing.T) {
+	if !NeedsTranslation("\u00df") {
 		t.Error("single sharp-s should trigger detection")
 	}
 }
 
-func TestDetectGerman_TechTermCaseSensitivity(t *testing.T) {
+func TestNeedsTranslation_TechTermCaseSensitivity(t *testing.T) {
 	// Tech terms are checked case-insensitively via ToLower.
-	if !DetectGerman("KONFIGURATION check") {
+	if !NeedsTranslation("KONFIGURATION check") {
 		t.Error("uppercase tech term should trigger")
 	}
-	if !DetectGerman("Datenbank") {
+	if !NeedsTranslation("Datenbank") {
 		t.Error("capitalized tech term should trigger")
 	}
 }

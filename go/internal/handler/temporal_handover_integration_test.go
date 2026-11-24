@@ -429,9 +429,17 @@ func i434Doors() []i434Door {
 		{"mcp_store_batch", func(t *testing.T, f *i406Fixture, _ *i434Extractions, n int) []i434Written {
 			a := i434Written{"mcp batch a", i434Content("mcp batch a", n)}
 			b := i434Written{"mcp batch b", i434Content("mcp batch b", n+40)}
-			i434Tool(t)(mcpStoreBatchHandler(f.mcpCfg)(f.directCtx, nil, storeBatchInput{Items: []storeInput{
-				{Category: "i434", Title: a.title, Content: a.content}, {Category: "i434", Title: b.title, Content: b.content}}}))
+			i434Tool(t)(mcpStoreBatchHandler(f.mcpCfg)(f.directCtx, nil, storeBatchInput{Items: []storeBatchItemInput{
+				i434BatchItem(a), i434BatchItem(b)}}))
 			return []i434Written{a, b}
+		}},
+		{"mcp_store_batch_update", func(t *testing.T, f *i406Fixture, _ *i434Extractions, n int) []i434Written {
+			title := "mcp batch update"
+			id := seeded(t, f, title)
+			w := i434Written{title, i434Content(title, n)}
+			i434Tool(t)(mcpStoreBatchHandler(f.mcpCfg)(f.directCtx, nil, storeBatchInput{Items: []storeBatchItemInput{
+				{ID: id, Content: &w.content}}}))
+			return []i434Written{w}
 		}},
 		{"confirmed_store", func(t *testing.T, f *i406Fixture, c *i434Extractions, n int) []i434Written {
 			w := i434Written{"confirmed store", i434Content("confirmed store", n)}
@@ -452,12 +460,22 @@ func i434Doors() []i434Door {
 		{"confirmed_store_batch", func(t *testing.T, f *i406Fixture, c *i434Extractions, n int) []i434Written {
 			a := i434Written{"confirmed batch a", i434Content("confirmed batch a", n)}
 			b := i434Written{"confirmed batch b", i434Content("confirmed batch b", n+40)}
-			staged := i434Staged(t)(mcpStoreBatchHandler(f.mcpCfg)(f.flaggedCtx, nil, storeBatchInput{Items: []storeInput{
-				{Category: "i434", Title: a.title, Content: a.content}, {Category: "i434", Title: b.title, Content: b.content}}}))
+			staged := i434Staged(t)(mcpStoreBatchHandler(f.mcpCfg)(f.flaggedCtx, nil, storeBatchInput{Items: []storeBatchItemInput{
+				i434BatchItem(a), i434BatchItem(b)}}))
 			c.reset(t, a.content)
 			c.reset(t, b.content)
 			i434Confirm(t, f, staged)
 			return []i434Written{a, b}
+		}},
+		{"confirmed_store_batch_update", func(t *testing.T, f *i406Fixture, c *i434Extractions, n int) []i434Written {
+			title := "confirmed batch update"
+			id := seeded(t, f, title)
+			w := i434Written{title, i434Content(title, n)}
+			staged := i434Staged(t)(mcpStoreBatchHandler(f.mcpCfg)(f.flaggedCtx, nil, storeBatchInput{Items: []storeBatchItemInput{
+				{ID: id, Content: &w.content}}}))
+			c.reset(t, w.content)
+			i434Confirm(t, f, staged)
+			return []i434Written{w}
 		}},
 	}
 }
@@ -760,4 +778,10 @@ func TestTemporalHandoverLateAfterworkAtTheStoreDoor(t *testing.T) {
 		t.Fatalf("A's afterwork did not end within %s of its release", i414LockWait)
 	}
 	i434AssertRows(t, f.pool, "door-after-a", id, b)
+}
+
+// i434BatchItem is a store item of the store_batch tool for w.
+func i434BatchItem(w i434Written) storeBatchItemInput {
+	category := "i434"
+	return storeBatchItemInput{Category: &category, Title: &w.title, Content: &w.content}
 }
