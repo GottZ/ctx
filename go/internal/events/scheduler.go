@@ -1832,6 +1832,20 @@ func (s *Scheduler) runSixHourJanitor(ctx context.Context) {
 	s.runSSOStateGC(ctx)
 	s.runRecallRetention(ctx)
 	s.runDistillRetention(ctx)
+	s.runWriteLogRetention(ctx)
+}
+
+// runWriteLogRetention deletes context_write_log rows older than
+// scheduler.writelog_retention_days (issue #277), in batches. Shares the
+// embed-cache janitor tick. retention=0 makes EvictWriteLog a no-op (every
+// row kept, the shipped default).
+func (s *Scheduler) runWriteLogRetention(ctx context.Context) {
+	defer guardPanic("write log retention")
+	days := s.cfg.Snapshot().Scheduler.WriteLogRetentionDays //nolint:forbidigo // MT 06 background: write-log retention is a server-global janitor policy over a process-wide audit table, not tenant-scoped.
+	janitorArm(ctx, "write log retention", "scheduler: write log rows evicted", "rows",
+		func(ctx context.Context) (int64, error) {
+			return store.EvictWriteLog(ctx, s.pool, days)
+		}, "retention_days", days)
 }
 
 // runLLMLogRetention NULLs context_llm_log prompt/response bodies older than

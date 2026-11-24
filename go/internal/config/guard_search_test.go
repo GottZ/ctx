@@ -116,3 +116,41 @@ func TestWritesBatchMaxItemsCeiling(t *testing.T) {
 		}
 	}
 }
+
+// TestWriteLogRetentionFloor (#277): V69 keeps scheduler.writelog_retention_days
+// at 0 (keep every row, the default) or at least WriteLogRetentionFloorDays —
+// the daily synthesis report reads the last 24 hours of decisions from the
+// write log. A negative value is V35's report alone.
+func TestWriteLogRetentionFloor(t *testing.T) {
+	const key = "scheduler.writelog_retention_days"
+	for _, tc := range []struct {
+		val  int
+		want Severity
+	}{
+		{0, -1},
+		{1, SeverityError},
+		{WriteLogRetentionFloorDays - 1, SeverityError},
+		{WriteLogRetentionFloorDays, -1},
+		{30, -1},
+		{-1, SeverityError}, // V35
+	} {
+		c, _ := cfgFrom(t, map[string]string{key: strconv.Itoa(tc.val)})
+		issues := Validate(c)
+		if got := severityFor(issues, key); got != tc.want {
+			t.Errorf("%s=%d: severity %d, want %d (%v)", key, tc.val, got, tc.want, issues)
+		}
+		n := 0
+		for _, is := range issues {
+			if is.Field == key {
+				n++
+			}
+		}
+		if n > 1 {
+			t.Errorf("%s=%d: %d issues, want at most one (%v)", key, tc.val, n, issues)
+		}
+	}
+	c, _ := cfgFrom(t, map[string]string{})
+	if c.Scheduler.WriteLogRetentionDays != 0 {
+		t.Errorf("default %s = %d, want 0 (keep every row: an upgrade deletes nothing)", key, c.Scheduler.WriteLogRetentionDays)
+	}
+}

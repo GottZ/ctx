@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -146,6 +147,28 @@ func (h *SynthesizeHandler) dailyRouter(ctx context.Context) *dream.Router {
 	}
 }
 
+// pastWriteLogHorizon refuses a backfill whose window starts before the
+// write-log horizon (scheduler.writelog_retention_days, issue #277): the
+// retention has deleted, or will delete with its next run, decisions of that
+// window, and the upsert would replace the day's report with one whose
+// decision part is short or empty. It answers the refusal text, or "" when
+// the window lies inside the horizon or no horizon is set (0, the default).
+// A handler without config wiring sets no horizon.
+func (h *SynthesizeHandler) pastWriteLogHorizon(ctx context.Context, windowStart time.Time) string {
+	if h.cfg == nil {
+		return ""
+	}
+	days := h.cfg.SnapshotForRequest(ctx).Scheduler.WriteLogRetentionDays
+	if days <= 0 {
+		return ""
+	}
+	horizon := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+	if !windowStart.Before(horizon) {
+		return ""
+	}
+	return fmt.Sprintf("date window starts before the write-log horizon (scheduler.writelog_retention_days = %d): its guard and dream decisions are deleted, a backfill would replace the report with one without them", days)
+}
+
 // devmode is the caller tenant's resolved tenant.devmode (C6-C). Nil-safe like
 // reportLanguage: a handler without config wiring seals.
 func (h *SynthesizeHandler) devmode(ctx context.Context) bool {
@@ -164,7 +187,9 @@ func (h *SynthesizeHandler) devmode(ctx context.Context) bool {
 // its historical window [date-1 03:00 UTC, date 03:00 UTC) — the backfill
 // path (M103 wave). The upsert key replaces an existing report in place. A
 // date whose window has not closed yet (03:00 UTC still in the future) is a
-// 400: a partial re-synthesis would silently shadow the scheduler's run.
+// 400: a partial re-synthesis would silently shadow the scheduler's run. So
+// is a date whose window starts before the write-log horizon
+// (scheduler.writelog_retention_days, issue #277): its decisions are gone.
 func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	requestID := RequestIDFromContext(ctx)
@@ -200,6 +225,10 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 		windowEnd := time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 3, 0, 0, 0, time.UTC)
 		if windowEnd.After(time.Now().UTC()) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "date window not closed yet"})
+			return
+		}
+		if msg := h.pastWriteLogHorizon(ctx, windowEnd.Add(-24*time.Hour)); msg != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": msg})
 			return
 		}
 		day = parsed
