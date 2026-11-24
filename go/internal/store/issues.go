@@ -234,7 +234,7 @@ func InsertIssueBlock(ctx context.Context, tx pgx.Tx, f IssueFields, writableSco
 	if err != nil {
 		return nil, err
 	}
-	meta := f.Metadata
+	meta := stripGuardKeys(f.Metadata) // the guard's keys are not the caller's (issue #238)
 	if meta == nil {
 		meta = map[string]any{}
 	}
@@ -308,7 +308,7 @@ func InsertCommentBlock(ctx context.Context, tx pgx.Tx, parentID string, f Comme
 	if m := issuePrefixRe.FindStringSubmatch(parentTitle); m != nil {
 		prefix = m[1]
 	}
-	meta := f.Metadata
+	meta := stripGuardKeys(f.Metadata) // the guard's keys are not the caller's (issue #238)
 	if meta == nil {
 		meta = map[string]any{}
 	}
@@ -502,7 +502,7 @@ func UpdateIssueBlock(ctx context.Context, tx pgx.Tx, id string, u IssueUpdate, 
 		set2.bind("tags = %s", u.Tags)
 	}
 	if u.Metadata != nil {
-		set2.bind("metadata = metadata || %s::jsonb", u.Metadata)
+		set2.bind("metadata = metadata || %s::jsonb", stripGuardKeys(u.Metadata)) // issue #238
 	}
 	if len(set2.clauses) == 0 {
 		return nil, fmt.Errorf("store: update issue: no fields to update")

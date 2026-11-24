@@ -743,37 +743,62 @@ func checkBlock(ctx context.Context, tx pgx.Tx, blockID string, thresholdDuplica
 	}, nil
 }
 
-// FlaggedAtSQL is the SQL expression for the time the guard recorded its
-// decision on a context_blocks row: metadata.guard_checked_at, which
-// applyDecision writes as RFC 3339. It is what a reader of the review queue
-// ages a flagged block by, since recording the decision does not move
-// updated_at.
+// FlaggedSQL returns the derived table every reader of the review queue's age
+// reads (the /api/status rollup, the daily report): the live flagged rows of
+// context_blocks — not archived, guard_status needs_review, near_duplicate or
+// possible_duplicate — that also meet cond, with their id, scope,
+// guard_status and flagged_at, the time the guard recorded its decision on
+// the row. cond is "" or code-owned SQL text that starts with " AND ", never
+// input. The caller names the table (FROM FlaggedSQL(…) AS f).
 //
-// The value is metadata, and an update that leaves the content alone stores
-// the caller's metadata document as sent, so the expression takes the key only
-// when it can be a flag time of this row and falls back to updated_at
-// otherwise:
+// flagged_at is metadata.guard_checked_at, which applyDecision writes (see
+// flagStampSQL), since recording the decision does not move updated_at. The
+// key is taken only when it can be a flag time of the row, and updated_at
+// stands in otherwise: rows written before the write path kept the key to the
+// guard (issue #238) may carry anything a caller sent.
 //
-//   - absent or not a timestamp (a row older than the key, a repair
-//     migration, a hand edit). pg_input_is_valid, not a bare cast: one
-//     unreadable value would otherwise fail the whole aggregate it sits in;
-//   - 'infinity' and '-infinity', which are valid input but do not scan into
-//     a time.Time, so one such row would fail the read for every scope;
-//   - a time before the row existed or after now(): the minimum over all
+//   - Absent or not a timestamp (a row older than the key, a repair
+//     migration, a hand edit, a caller's value): pg_input_is_valid, not a bare
+//     cast, since one unreadable value would fail the whole aggregate.
+//   - A time before the row existed or after now(): the minimum over all
 //     scopes must not be something one row can set to an arbitrary date.
-//     created_at is cut to the second because guard_checked_at has second
-//     precision.
+//     created_at is cut to the second because the stamp has second
+//     precision. The two bounds also keep 'infinity' and '-infinity' out
+//     (valid input that does not scan into a time.Time, so one such row would
+//     fail the read for every scope): -infinity is before every created_at,
+//     infinity after every now().
 //
-// Nested CASE, because only CASE guarantees that the cast is not evaluated
-// before the validity test. Unqualified column names, so it is used in
-// queries that read context_blocks without an alias.
-const FlaggedAtSQL = `CASE WHEN pg_input_is_valid(metadata->>'guard_checked_at', 'timestamptz')
-		THEN CASE WHEN isfinite((metadata->>'guard_checked_at')::timestamptz)
-				AND (metadata->>'guard_checked_at')::timestamptz >= date_trunc('second', created_at)
-				AND (metadata->>'guard_checked_at')::timestamptz <= now()
-			THEN (metadata->>'guard_checked_at')::timestamptz
-			ELSE updated_at END
-		ELSE updated_at END`
+// The key is read once per row, and its text is cast once: the two inner
+// selects carry OFFSET 0, which keeps the planner from pulling them up and
+// writing the expression back into every place that names its column. A
+// metadata document stored out of line (TOAST) is fetched once per row
+// instead of once per reference (issue #238: five fetches per row before).
+// The CASE keeps the cast behind the validity test.
+func FlaggedSQL(cond string) string {
+	return `(SELECT id, scope, guard_status,
+		        CASE WHEN flag_stamp >= date_trunc('second', created_at) AND flag_stamp <= now()
+		             THEN flag_stamp ELSE updated_at END AS flagged_at
+		   FROM (SELECT id, scope, guard_status, created_at, updated_at,
+		                CASE WHEN pg_input_is_valid(flag_text, 'timestamptz') THEN flag_text::timestamptz END AS flag_stamp
+		           FROM (SELECT id, scope, guard_status, created_at, updated_at,
+		                        metadata->>'guard_checked_at' AS flag_text
+		                   FROM context_blocks
+		                  WHERE NOT is_archived
+		                    AND guard_status IN ('needs_review', 'near_duplicate', 'possible_duplicate')` + cond + `
+		                 OFFSET 0) AS flag_texts
+		         OFFSET 0) AS flag_stamps)`
+}
+
+// flagStampSQL is the stamp applyDecision writes into metadata.guard_checked_at:
+// the database's clock at the verdict's statement, cut to the second, in the
+// RFC 3339 UTC form the Go clock wrote before (2006-01-02T15:04:05Z, byte for
+// byte; GuardList hands the text to clients as checked_at). One clock with the
+// readers: FlaggedSQL bounds the stamp by the reader's now(), and a stamp from
+// an application clock that runs ahead of the database's made a fresh flag
+// fall back to updated_at for the length of the skew (issue #238).
+// statement_timestamp(), not now(): every block of a batch keeps the time of
+// its own verdict, not the start of the batch's transaction.
+const flagStampSQL = `to_char(statement_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`
 
 // applyDecision updates the block based on the guard decision and the per-type
 // persist mode (design/02 §4.7). mode == GuardModeArchive is the bestand: a
@@ -783,8 +808,6 @@ const FlaggedAtSQL = `CASE WHEN pg_input_is_valid(metadata->>'guard_checked_at',
 // duplicate issue is surfaced (guard-list / later issue-list) and never
 // silently removed. needs_review and clean are mode-independent.
 func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *GuardResult, mode string) error {
-	checkedAt := time.Now().UTC().Format(time.RFC3339)
-
 	matchedIDVal := ""
 	if result.MatchedID != nil {
 		matchedIDVal = *result.MatchedID
@@ -804,14 +827,14 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 				guard_status = 'archived_dup',
 				metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
 					'guard_status', $2::text,
-					'guard_checked_at', $3::text,
-					'guard_similarity', $4::float8,
-					'guard_matched_id', $5::text,
-					'guard_is_cross_scope', $6::bool
+					'guard_checked_at', `+flagStampSQL+`,
+					'guard_similarity', $3::float8,
+					'guard_matched_id', $4::text,
+					'guard_is_cross_scope', $5::bool
 				),
 				updated_at = now()
 			WHERE id = $1`,
-			blockID, result.Decision, checkedAt, result.Similarity, matchedIDVal, result.IsCrossScope,
+			blockID, result.Decision, result.Similarity, matchedIDVal, result.IsCrossScope,
 		)
 		if err != nil {
 			return fmt.Errorf("auto-archive: %w", err)
@@ -830,8 +853,8 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 		// last write as readers see it (browse order and its keyset cursor,
 		// age_days, the drift pin of a staged update), and one batch would
 		// otherwise stamp every block it checks with the same instant. The
-		// time of the decision is metadata.guard_checked_at; the readers of
-		// the review queue age a block by it (FlaggedAtSQL).
+		// time of the decision is metadata.guard_checked_at (flagStampSQL); the
+		// readers of the review queue age a block by it (FlaggedSQL).
 		statusVal := result.Decision
 		if result.Decision == "near_duplicate" {
 			statusVal = "possible_duplicate" // flag mode (archive took the branch above)
@@ -841,15 +864,15 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 				guard_status = $2::text,
 				metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
 					'guard_status', $2::text,
-					'guard_checked_at', $3::text,
-					'guard_similarity', $4::float8,
-					'guard_matched_id', $5::text,
-					'guard_is_cross_scope', $6::bool,
-					'guard_threshold_duplicate', $7::float8,
-					'guard_threshold_review', $8::float8
+					'guard_checked_at', `+flagStampSQL+`,
+					'guard_similarity', $3::float8,
+					'guard_matched_id', $4::text,
+					'guard_is_cross_scope', $5::bool,
+					'guard_threshold_duplicate', $6::float8,
+					'guard_threshold_review', $7::float8
 				)
 			WHERE id = $1`,
-			blockID, statusVal, checkedAt, result.Similarity, matchedIDVal, result.IsCrossScope,
+			blockID, statusVal, result.Similarity, matchedIDVal, result.IsCrossScope,
 			result.ThresholdDuplicate, result.ThresholdReview,
 		)
 		if err != nil {

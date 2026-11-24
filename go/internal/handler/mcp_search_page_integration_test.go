@@ -619,9 +619,18 @@ func i206RestParity(t *testing.T, f *i206Fixture) {
 	own := f.storeTool(t, "i206-parity", "i206 parity own", "own body")
 	untrusted := f.upsert(t, "private", "i206-parity", "i206 parity checkpoint", "checkpoint body", "checkpoint", nil)
 	redacted := f.upsert(t, "private", "i206-parity", "i206 parity redacted", "redacted body", "",
-		map[string]any{"guard_matched_id": foreignTarget, "other": "kept"})
+		map[string]any{"other": "kept"})
 	kept := f.upsert(t, "private", "i206-parity", "i206 parity kept", "kept body", "",
-		map[string]any{"guard_matched_id": own, "other": "kept"})
+		map[string]any{"other": "kept"})
+	// guard_matched_id is the guard's key, which no client write stores
+	// (issue #238); the guard's verdict is written here with SQL.
+	for id, match := range map[string]string{redacted: foreignTarget, kept: own} {
+		if _, err := f.pool.Exec(context.Background(),
+			`UPDATE context_blocks SET metadata = metadata || jsonb_build_object('guard_matched_id', $2::text) WHERE id = $1`,
+			id, match); err != nil {
+			t.Fatalf("guard match %s: %v", id, err)
+		}
+	}
 	granted := f.upsert(t, "i206-foreign", "i206-parity", "i206 parity granted", "granted body", "", nil)
 	ungranted := f.upsert(t, "i206-foreign", "i206-parity", "i206 parity ungranted", "ungranted body", "", nil)
 	archived := f.upsert(t, "i206-foreign", "i206-parity", "i206 parity archived", "archived body", "", nil)
