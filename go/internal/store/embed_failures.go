@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/GottZ/ctx/internal/httpx"
 	"github.com/GottZ/ctx/internal/pgxdb"
 )
@@ -66,6 +68,12 @@ const (
 	// ordinary backoff.
 	EmbedFailureCallerTimeout EmbedFailureClass = "caller_timeout"
 )
+
+// regularBackfillClasses are the classes the regular backfill (migration_id
+// IS NULL) writes, in its two paths: wire and oversize (RecordEmbedFailure,
+// RecordEmbedFailureIfUnchanged), caller_timeout (the query path's cut).
+// sensitivity_ineligible is a migration's class only, and store is reserved.
+var regularBackfillClasses = []EmbedFailureClass{EmbedFailureWire, EmbedFailureOversize, EmbedFailureCallerTimeout}
 
 // maxLastErrorLen mirrors migration 113's documented last_error contract:
 // normalized, ≤500 chars, never a raw wire error (Embed-TEXT content must
@@ -534,3 +542,135 @@ const EmbedFailureQueryPathExcludedPredicate = `
 		  AND f.migration_id IS NULL
 		  AND (f.next_attempt_at > now() OR f.last_class = 'caller_timeout')
 	)`
+
+// BackfillReleaseMaxLimit is the most regular memos one
+// embed-backfill-release call deletes (one statement, one page). A fixed
+// bound, not a policy: it keeps the statement's hold on the memo rows it
+// takes short and its WAL bounded; a larger set is released page by page.
+const BackfillReleaseMaxLimit = 1000
+
+// ErrBackfillReleaseSelector is a release that does not name exactly one of
+// a block or a class the regular backfill writes, or names a page size out
+// of range.
+var ErrBackfillReleaseSelector = errors.New("store: backfill release: exactly one of a block id or a regular backfill class (wire, oversize, caller_timeout), a limit of 1 to 1000")
+
+// ErrBackfillReleaseConfirmMismatch is a confirmed release whose fresh count
+// differs from the number it confirms: nothing was deleted.
+var ErrBackfillReleaseConfirmMismatch = errors.New("store: backfill release: the memos in range are not the confirmed number")
+
+// BackfillRelease is one release of regular backfill memos (issue #236):
+// the memo of one block (BlockID) or the memos of one failure class (Class),
+// in the reader's range. The reader is part of it and its zero value reaches
+// nothing, as in PurgeQuery: a server-admin sets AllTenants (every memo);
+// every other caller sets TenantID and reaches only the memos of blocks in
+// the scopes that tenant owns (context_tenant_scopes), so a block of another
+// tenant and a block that does not exist count alike: zero. Confirm nil is a
+// dry run; otherwise the release deletes only when the fresh count equals it.
+// Limit is the page size (0 = BackfillReleaseMaxLimit).
+type BackfillRelease struct {
+	BlockID    string
+	Class      EmbedFailureClass
+	AllTenants bool
+	TenantID   string
+	Limit      int
+	Confirm    *int64
+}
+
+// BackfillReleaseResult is what a release counted and did. Counted is the
+// number of memos in range when the call counted; Released the number it
+// deleted; Remaining what is left in range after it as far as this call
+// knows (Counted - Released: memos it skipped because another transaction
+// held them, and memos past the page).
+type BackfillReleaseResult struct {
+	DryRun    bool
+	Counted   int64
+	Released  int64
+	Remaining int64
+}
+
+// ReleaseBackfillMemos deletes regular backfill memos (migration_id IS NULL)
+// so the backfill takes their blocks again: the next pick of the block's
+// class reads it, embeds it when it fits now (a raised
+// embed_backfill.max_tokens, an embed backend with a larger context, a
+// backend that is up again), and parks it again after one attempt when it
+// does not. Without it a parked block came back only through a change of its
+// title or content (InvalidateEmbeddingTx); a write that re-sends the same
+// text does not release it (#216). A migration's memos (migration_id set)
+// are that migration's bookkeeping and are never taken.
+//
+// Locks: memo rows only, and none it would have to wait for — the page is
+// taken FOR UPDATE SKIP LOCKED, so a memo another transaction holds (the
+// backfill writing its verdict on a block it holds, a content writer
+// releasing the memo of a block it changes) is skipped and stays in
+// Remaining. The release never waits on a row lock, so it cannot be part of
+// a wait cycle: not with the backfill and the content writers, which take a
+// block's row before its memo row, nor with a batch writer that holds the
+// memo of one block while it waits for the next block. It reads the block
+// rows of the reader rule without a lock.
+func ReleaseBackfillMemos(ctx context.Context, pool *pgxpool.Pool, r BackfillRelease) (BackfillReleaseResult, error) {
+	where, args, err := r.where()
+	if err != nil {
+		return BackfillReleaseResult{}, err
+	}
+	res := BackfillReleaseResult{DryRun: r.Confirm == nil}
+	if !r.AllTenants && r.TenantID == "" {
+		return res, nil // the zero reader reaches nothing
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_embed_failures f WHERE `+where, args...).Scan(&res.Counted); err != nil {
+		return res, fmt.Errorf("store: backfill release: count: %w", err)
+	}
+	if res.DryRun {
+		res.Remaining = res.Counted
+		return res, nil
+	}
+	if res.Counted != *r.Confirm {
+		res.Remaining = res.Counted
+		return res, ErrBackfillReleaseConfirmMismatch
+	}
+	limit := r.Limit
+	if limit == 0 {
+		limit = BackfillReleaseMaxLimit
+	}
+	tag, err := pool.Exec(ctx, fmt.Sprintf(`WITH page AS (
+		SELECT f.block_id FROM context_embed_failures f
+		 WHERE %s
+		 LIMIT $%d
+		 FOR UPDATE SKIP LOCKED)
+		DELETE FROM context_embed_failures d USING page
+		 WHERE d.block_id = page.block_id AND d.migration_id IS NULL`, where, len(args)+1),
+		append(args, limit)...)
+	if err != nil {
+		return res, fmt.Errorf("store: backfill release: %w", err)
+	}
+	res.Released = tag.RowsAffected()
+	res.Remaining = max(res.Counted-res.Released, 0)
+	return res, nil
+}
+
+// where is the condition of r's memos on context_embed_failures f, and its
+// arguments: the regular memos of the block or of the class, and for a
+// tenant reader only those of blocks in the tenant's scopes.
+func (r BackfillRelease) where() (string, []any, error) {
+	if (r.BlockID == "") == (r.Class == "") || r.Limit < 0 || r.Limit > BackfillReleaseMaxLimit {
+		return "", nil, ErrBackfillReleaseSelector
+	}
+	where := `f.migration_id IS NULL AND `
+	var args []any
+	if r.BlockID != "" {
+		where += `f.block_id = $1::uuid`
+		args = append(args, r.BlockID)
+	} else {
+		if !slices.Contains(regularBackfillClasses, r.Class) {
+			return "", nil, ErrBackfillReleaseSelector
+		}
+		where += `f.last_class = $1`
+		args = append(args, string(r.Class))
+	}
+	if !r.AllTenants {
+		where += `
+		   AND EXISTS (SELECT 1 FROM context_blocks b JOIN context_tenant_scopes ts ON ts.scope = b.scope
+		                WHERE b.id = f.block_id AND ts.tenant_id = $2::uuid)`
+		args = append(args, r.TenantID)
+	}
+	return where, args, nil
+}

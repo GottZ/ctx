@@ -33,6 +33,9 @@ func TestActionTier_Classification(t *testing.T) {
 		{"tenant-quota-get", "", tierTenantAdmin}, // read own quota (transparency)
 		// purge (#202): own-tenant scopes only, by the store's reader rule.
 		{"purge", "", tierTenantAdmin},
+		// embed-backfill-release (#236): the memos of the own tenant's blocks
+		// only, by the store's reader rule.
+		{"embed-backfill-release", "", tierTenantAdmin},
 		// model-alias-* (W02-04): tenant-admin tier; the field tiers
 		// (_global/foreign scope 404-equivalent, lowering a sensitivity
 		// server-admin + confirm, tenant ceiling) live in the handler.

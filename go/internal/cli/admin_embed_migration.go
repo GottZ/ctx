@@ -18,16 +18,108 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// adminCmd is the server-admin operator namespace. Today it carries only the
-// embed-migration surface; it is a parent so future server-admin operator tools
-// (schema, corpus maintenance) attach without a new top-level command each.
+// adminCmd is the operator namespace. It carries the embed-migration surface
+// (server-admin) and the embed backfill's memo release (tenant-admin capable);
+// it is a parent so future operator tools (schema, corpus maintenance) attach
+// without a new top-level command each.
 func adminCmd(getClient func() (*Client, error)) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "admin",
-		Short: "Server-admin operator tools (admin key required)",
-		Long:  "Operator-level controls that act across the whole process, not within one tenant.",
+		Short: "Operator tools (admin key required)",
+		Long:  "Operator-level controls: the embed migration acts across the whole process (server-admin), the embed\nbackfill release within the key's tenant (tenant-admin) or every tenant (server-admin).",
 	}
 	cmd.AddCommand(embedMigrationCmd(getClient))
+	cmd.AddCommand(embedBackfillCmd(getClient))
+	return cmd
+}
+
+// embedBackfillCmd is the regular embed backfill's operator surface. Its
+// release verb is tenant-admin capable: the server binds it to the blocks of
+// the key's own tenant (a server-admin key reaches every tenant's).
+func embedBackfillCmd(getClient func() (*Client, error)) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "embed-backfill",
+		Short: "Steer the regular embed backfill (its failure memos)",
+	}
+	cmd.AddCommand(embedBackfillReleaseCmd(getClient))
+	return cmd
+}
+
+// embedBackfillReleaseCmd is `ctx admin embed-backfill release` over
+// `manage embed-backfill-release` (issue #236): without --confirm a dry run
+// that counts, with --confirm N the release of one page bound to that count.
+func embedBackfillReleaseCmd(getClient func() (*Client, error)) *cobra.Command {
+	var block, class string
+	var limit int
+	var confirm int64 = -1
+	cmd := &cobra.Command{
+		Use:   "release",
+		Short: "Drop backfill failure memos so the backfill takes the blocks again (dry run without --confirm)",
+		Long: "Drop the regular backfill memos of one block (--block) or of one failure class (--class wire|oversize|caller_timeout)\n" +
+			"in the key's range, so the next backfill pick embeds those blocks when they fit now and parks them again after one\n" +
+			"attempt when they do not — after raising embed_backfill.max_tokens, moving to an embed backend with a larger context,\n" +
+			"or the end of a backend outage. Without --confirm it only counts; --confirm takes the count it printed and releases\n" +
+			"one page (--limit, at most 1000). A re-embed migration's own memos are never touched.",
+		Example: `  ctx admin embed-backfill release --class oversize
+  ctx admin embed-backfill release --class oversize --confirm 42
+  ctx admin embed-backfill release --block 01a2...`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := getClient()
+			if err != nil {
+				return err
+			}
+			data := map[string]any{}
+			if block != "" {
+				data["block_id"] = block
+			}
+			if class != "" {
+				data["class"] = class
+			}
+			if limit > 0 {
+				data["limit"] = limit
+			}
+			if confirm >= 0 {
+				data["confirm_memos"] = confirm
+			}
+			resp, _, err := c.Do(http.MethodPost, "/api/manage", map[string]any{"action": "embed-backfill-release", "data": data})
+			if err != nil {
+				return err
+			}
+			var r struct {
+				DryRun       bool  `json:"dry_run"`
+				Counted      int64 `json:"counted"`
+				Released     int64 `json:"released"`
+				Remaining    int64 `json:"remaining"`
+				ConfirmMemos int64 `json:"confirm_memos"`
+			}
+			_ = json.Unmarshal(resp, &r)
+			if err := checkEnvelope(resp, envelopeRequired); err != nil {
+				// A refused confirm carries the fresh count to confirm instead.
+				var refused struct {
+					Counted *int64 `json:"counted"`
+				}
+				if json.Unmarshal(resp, &refused) == nil && refused.Counted != nil {
+					return fmt.Errorf("%w (counted now: %d)", err, *refused.Counted)
+				}
+				return err
+			}
+			return renderOrJSON(resp, func([]byte) error {
+				if r.DryRun {
+					fmt.Printf("%d memo(s) in range; release them with --confirm %d\n", r.Counted, r.ConfirmMemos)
+					return nil
+				}
+				fmt.Printf("released %d memo(s), %d remaining\n", r.Released, r.Remaining)
+				if r.Remaining > 0 {
+					fmt.Printf("next page: --confirm %d\n", r.ConfirmMemos)
+				}
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&block, "block", "", "the block whose memo to release")
+	cmd.Flags().StringVar(&class, "class", "", "the failure class to release: wire, oversize or caller_timeout")
+	cmd.Flags().IntVar(&limit, "limit", 0, "page size (default and maximum 1000)")
+	cmd.Flags().Int64Var(&confirm, "confirm", -1, "the count of the dry run (or the remaining count of the page before)")
 	return cmd
 }
 
