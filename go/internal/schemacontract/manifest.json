@@ -3,7 +3,7 @@
   "generated_against": {
     "migration_max": 194,
     "migration_count": 82,
-    "migration_chain_sha256": "766996a90bdeb852ba8ab946acbf974223ae49696172b22b1d6096dfde96730a",
+    "migration_chain_sha256": "8c3783e568ad81cd5a0c82eaef50b22f07ef2c81f7c94abe7c980b3a60472e42",
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -1901,6 +1901,12 @@
         {
           "name": "pending_count",
           "type": "integer",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "write_log_evicted_before",
+          "type": "timestamp with time zone",
           "not_null": false,
           "storage": "p"
         }

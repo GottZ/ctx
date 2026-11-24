@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -487,3 +488,89 @@ func TestEvictWriteLogGoesOnAfterABatchThatDeletedLessThanItSelected(t *testing.
 		t.Errorf("%d rows past the horizon left, want the kept one: the run stopped after the batch that deleted one row less than it selected", got)
 	}
 }
+
+// wlBoundary reads the write log's eviction boundary (nil: none recorded).
+func wlBoundary(t *testing.T, pool *pgxpool.Pool) *time.Time {
+	t.Helper()
+	var b *time.Time
+	if err := pool.QueryRow(context.Background(), `SELECT write_log_evicted_before FROM context_guard_state WHERE id = true`).Scan(&b); err != nil {
+		t.Fatalf("read the eviction boundary: %v", err)
+	}
+	return b
+}
+
+// TestEvictWriteLogRecordsItsBoundaryBeforeItDeletes: a run records the
+// horizon it deletes below as the write log's eviction boundary before its
+// first batch (the report backfill refuses a window that starts before it,
+// whatever the setting says later); the boundary is the maximum over every
+// run, so a run with a longer horizon does not lower it; 0 records nothing;
+// and a run that stops after one batch has recorded it already.
+func TestEvictWriteLogRecordsItsBoundaryBeforeItDeletes(t *testing.T) {
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	near := func(got *time.Time, days int) {
+		t.Helper()
+		var want time.Time
+		if err := pool.QueryRow(ctx, `SELECT now() - make_interval(days => $1)`, days).Scan(&want); err != nil {
+			t.Fatal(err)
+		}
+		if got == nil || want.Sub(*got) < 0 || want.Sub(*got) > time.Minute {
+			t.Fatalf("boundary %v, want the horizon of %d days (%s) recorded by the run", got, days, want)
+		}
+	}
+
+	if _, err := store.EvictWriteLog(ctx, pool, 0); err != nil {
+		t.Fatal(err)
+	}
+	if b := wlBoundary(t, pool); b != nil {
+		t.Fatalf("retention 0 recorded a boundary %s", b)
+	}
+
+	// A run that stops after its first batch (the scheduler's context ends).
+	wlInsert(t, pool, store.WriteLogRetentionBatch+5000, "40 days", nil)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cfg.ConnConfig.Tracer = &wlStopTracer{cancel: cancel}
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	n, err := store.EvictWriteLog(rctx, traced, 30)
+	if err == nil || n != int64(store.WriteLogRetentionBatch) {
+		t.Fatalf("a run stopped after one batch: deleted %d (err %v), want %d and the cancellation", n, err, store.WriteLogRetentionBatch)
+	}
+	near(wlBoundary(t, pool), 30)
+
+	if _, err := store.EvictWriteLog(ctx, pool, 2); err != nil {
+		t.Fatal(err)
+	}
+	near(wlBoundary(t, pool), 2)
+	if _, err := store.EvictWriteLog(ctx, pool, 30); err != nil {
+		t.Fatal(err)
+	}
+	near(wlBoundary(t, pool), 2)
+}
+
+// wlStopTracer cancels the run's context once the first batch statement of
+// the retention has returned.
+type wlStopTracer struct {
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (s *wlStopTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	return context.WithValue(ctx, wlStopKey{}, strings.Contains(d.SQL, "DELETE FROM context_write_log"))
+}
+
+func (s *wlStopTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	if batch, _ := ctx.Value(wlStopKey{}).(bool); batch {
+		s.once.Do(s.cancel)
+	}
+}
+
+type wlStopKey struct{}

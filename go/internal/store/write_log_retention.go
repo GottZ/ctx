@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // WriteLogRetentionBatch is how many context_write_log rows one statement of
@@ -15,9 +17,38 @@ import (
 // measured in docs/operations.md, "Write-log retention".
 const WriteLogRetentionBatch = 10000
 
-// writeLogHorizonSQL fixes the horizon of one run on the database's clock:
-// every batch of the run deletes below the same instant, so a run ends.
-const writeLogHorizonSQL = `SELECT now() - make_interval(days => $1)`
+// writeLogHorizonSQL fixes the horizon of one run on the database's clock —
+// every batch of the run deletes below the same instant, so a run ends — and
+// records it as the write log's eviction boundary
+// (context_guard_state.write_log_evicted_before, migration 194) before the
+// first batch deletes a row: the maximum over every run of every instance,
+// so a run that stops after a batch has recorded the horizon it deleted
+// below, and a run with a longer horizon does not lower it. The report
+// backfill refuses a window that starts before it (WriteLogEvictedBefore).
+// The upsert writes the seed row back should it be missing; the statement
+// holds the row lock of the one row for itself only.
+const writeLogHorizonSQL = `INSERT INTO context_guard_state (id, write_log_evicted_before)
+	VALUES (true, now() - make_interval(days => $1))
+	ON CONFLICT (id) DO UPDATE
+	   SET write_log_evicted_before = GREATEST(context_guard_state.write_log_evicted_before, EXCLUDED.write_log_evicted_before)
+	RETURNING now() - make_interval(days => $1)`
+
+// writeLogEvictedBeforeSQL reads the eviction boundary; no row reads as none.
+const writeLogEvictedBeforeSQL = `SELECT (SELECT write_log_evicted_before FROM context_guard_state WHERE id = true)`
+
+// WriteLogEvictedBefore returns the write log's eviction boundary: the
+// latest horizon below which the write-log retention has deleted rows, or
+// nil when it has deleted none (issue #277). A row created before it may be
+// gone; every row at or after it stands. It is recorded by EvictWriteLog
+// before its first delete and never lowered, so it holds across changes of
+// scheduler.writelog_retention_days (also back to 0) and restarts.
+func WriteLogEvictedBefore(ctx context.Context, q pgxdb.Rower) (*time.Time, error) {
+	var b *time.Time
+	if err := q.QueryRow(ctx, writeLogEvictedBeforeSQL).Scan(&b); err != nil {
+		return nil, fmt.Errorf("store: write log eviction boundary: %w", err)
+	}
+	return b, nil
+}
 
 // writeLogEvictBatchSQL deletes the oldest rows of the write log below the
 // horizon $1, from the keyset $2 on (created_at of the previous batch's last
@@ -52,10 +83,12 @@ const writeLogEvictBatchSQL = `WITH s AS (
 
 // EvictWriteLog deletes the context_write_log rows older than retentionDays
 // days (scheduler.writelog_retention_days, issue #277) and returns how many
-// it deleted. retentionDays <= 0 deletes nothing — the default keeps every
-// row. It deletes in statements of at most WriteLogRetentionBatch rows until
-// one selects fewer; the horizon is taken once, from the database's
-// clock, before the first batch. Rows without a created_at are never
+// it deleted. retentionDays <= 0 deletes nothing and records nothing — the
+// default keeps every row. It deletes in statements of at most
+// WriteLogRetentionBatch rows until one selects fewer; the horizon is taken
+// once, from the database's clock, and recorded as the eviction boundary
+// before the first batch (writeLogHorizonSQL): a run that cannot record it
+// deletes nothing. Rows without a created_at are never
 // deleted. Several ctxd instances may run it side by side (see
 // writeLogEvictBatchSQL); a cancelled ctx stops it between batches with the
 // count so far.

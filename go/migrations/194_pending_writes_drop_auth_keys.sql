@@ -1,7 +1,8 @@
 -- =============================================================================
 -- 194_pending_writes_drop_auth_keys.sql — the dream queue count reads the
--- eligible rows from one index (issue #271), and the staged writes keep no
--- foreign key on context_api_keys and context_principals (issue #277)
+-- eligible rows from one index (issue #271), the write log records how far
+-- its retention deleted, and the staged writes keep no foreign key on
+-- context_api_keys and context_principals (issue #277)
 -- Part of ctx by GottZ (https://github.com/GottZ/ctx)
 -- =============================================================================
 -- PART 1: idx_blocks_dream_eligible.
@@ -93,7 +94,30 @@
 -- heap page; compact a heap far larger than its rows first, or build the
 -- index by the runbook before the upgrade.
 --
--- PART 2: the foreign keys of context_pending_writes.
+-- PART 2: the write log's eviction boundary.
+--
+-- context_guard_state.write_log_evicted_before (TIMESTAMPTZ, NULL = nothing
+-- evicted yet) is the horizon below which the write-log retention
+-- (scheduler.writelog_retention_days, store.EvictWriteLog) has deleted rows:
+-- every run records its horizon there before its first batch, as the
+-- maximum over every run of every instance, so a run that stops after a
+-- batch has recorded what it deleted below and a run with a longer horizon
+-- does not lower it. A report backfill (POST /api/synthesize/daily?date=)
+-- refuses every window that starts before it, whatever the setting says at
+-- the time — raising the retention or setting it to 0 brings no deleted
+-- decision back, and a backfill would replace the day's report with one
+-- without them. The 03:00 report never meets it (its window starts 24 h
+-- back, the boundary at least 48 h). context_guard_state is the state row of
+-- the scheduler's guard, the main writer of the write log, and the only
+-- state a background job of the scheduler keeps in the database; the
+-- column is its second writer beside the guard's last_guard_at.
+-- ADD COLUMN of a nullable column without a default changes the catalog
+-- only: ACCESS EXCLUSIVE on the one-row table until the file commits (the
+-- guard's end-of-run stamp and guard-stats wait that long). Way back: DROP
+-- COLUMN; this release's retention then fails before its first delete and
+-- its backfill gate refuses every backfill (fail-closed).
+--
+-- PART 3: the foreign keys of context_pending_writes.
 --
 -- context_pending_writes (migration 089) is a TimescaleDB hypertable of 1 h
 -- chunks with two foreign keys onto the tables every authentication reads:
@@ -220,6 +244,10 @@
 -- default) it starts and /health reports schema_contract attention; in mode
 -- enforce it refuses to start until CTX_CONTRACT_MODE=warn or off is set. The
 -- manifest lists no constraints, so the keys' absence is no finding of it.
+-- It does not know the write-log retention, so it deletes no write-log row
+-- and records no boundary, and its report backfill has no gate: beside this
+-- release, or after a rollback, a backfill it serves of a day the retention
+-- emptied replaces that day's report.
 --
 -- WAY BACK (forward-only tree; to undo temporarily). Re-adding the keys
 -- validates every chunk and brings the chunk locks back:
@@ -239,16 +267,17 @@
 -- with the same statement; its schema-contract check reports the index it
 -- does not know (param) beside _migrations:194.
 --
--- No table or column: the test.sh T07 counts stay. The schema-contract
--- manifest gains idx_blocks_dream_eligible and migration_max 193 -> 194 (it
--- lists no constraints). Idempotent, forward-only. Registration by the runner
+-- No table, one column on context_guard_state: the test.sh T07 counts (the
+-- tables, the columns of context_blocks) stay. The schema-contract manifest
+-- gains idx_blocks_dream_eligible, context_guard_state.write_log_evicted_before
+-- and migration_max 193 -> 194 (it lists no constraints). Idempotent, forward-only. Registration by the runner
 -- (store.RunMigrations).
 -- =============================================================================
 
 SET LOCAL lock_timeout = '3s';
 
 -- Part 1: the dream queue index (issue #271). First, so the ACCESS EXCLUSIVE
--- of part 2 on the tables every authentication reads is taken last and held
+-- of part 3 on the tables every authentication reads is taken last and held
 -- only for the drop.
 DO $do$
 DECLARE
@@ -293,7 +322,11 @@ BEGIN
 END
 $do$;
 
--- Part 2: the foreign keys of the staged writes (issue #277).
+-- Part 2: the write log's eviction boundary (issue #277). Before part 3, so
+-- its lock is not waited for while part 3 holds the authentication tables.
+ALTER TABLE context_guard_state ADD COLUMN IF NOT EXISTS write_log_evicted_before TIMESTAMPTZ;
+
+-- Part 3: the foreign keys of the staged writes (issue #277).
 DO $do$
 DECLARE
     -- Measured: the drop and the authentications waiting for it per chunk

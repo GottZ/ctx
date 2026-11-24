@@ -13,6 +13,7 @@ import (
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/dream"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -149,14 +150,15 @@ func (h *SynthesizeHandler) dailyRouter(ctx context.Context) *dream.Router {
 
 // pastWriteLogHorizon refuses a backfill whose window starts before the
 // write-log horizon (scheduler.writelog_retention_days, issue #277): the
-// retention has deleted, or will delete with its next run, decisions of that
-// window, and the upsert would replace the day's report with one whose
-// decision part is short or empty. It answers the refusal text, or "" when
-// the window lies inside the horizon or no horizon is set (0, the default).
-// A handler without config wiring sets no horizon. The horizon is taken on
-// the application's clock, the janitor's on the database's: a backfill whose
-// window starts within their difference of the horizon passes here while the
-// janitor may have reached its first minutes.
+// retention will delete decisions of that window with its next run, and the
+// upsert would replace the day's report with one whose decision part is
+// short or empty. It answers the refusal text, or "" when the window lies
+// inside the horizon or no horizon is set (0, the default). A handler without
+// config wiring sets no horizon. The horizon is taken on the application's
+// clock, the janitor's on the database's: a backfill whose window starts
+// within their difference of the horizon passes here while the janitor may
+// have reached its first minutes. What the retention HAS deleted, under this
+// setting or an earlier one, pastWriteLogBoundary refuses.
 func (h *SynthesizeHandler) pastWriteLogHorizon(ctx context.Context, windowStart time.Time) string {
 	if h.cfg == nil {
 		return ""
@@ -170,6 +172,27 @@ func (h *SynthesizeHandler) pastWriteLogHorizon(ctx context.Context, windowStart
 		return ""
 	}
 	return fmt.Sprintf("date window starts before the write-log horizon (scheduler.writelog_retention_days = %d): its guard and dream decisions are deleted, a backfill would replace the report with one without them", days)
+}
+
+// pastWriteLogBoundary refuses a backfill whose window starts before the
+// write log's eviction boundary (store.WriteLogEvictedBefore, issue #277):
+// the retention has deleted decisions of that window, under whatever setting
+// it ran with — raising scheduler.writelog_retention_days or setting it to 0
+// brings none back — and the upsert would replace the day's report with one
+// without them. It answers the refusal text, or "" when no boundary is
+// recorded or the window starts at or after it. A boundary it cannot read is
+// an error, and the caller refuses the backfill (fail-closed). The 03:00
+// report and a report without ?date= never come here.
+func (h *SynthesizeHandler) pastWriteLogBoundary(ctx context.Context, windowStart time.Time) (string, error) {
+	boundary, err := store.WriteLogEvictedBefore(ctx, h.pool)
+	if err != nil {
+		return "", err
+	}
+	if boundary == nil || !windowStart.Before(*boundary) {
+		return "", nil
+	}
+	return fmt.Sprintf("date window starts before the write-log eviction boundary (%s): the write-log retention deleted its guard and dream decisions, a backfill would replace the report with one without them",
+		boundary.UTC().Format(time.RFC3339)), nil
 }
 
 // devmode is the caller tenant's resolved tenant.devmode (C6-C). Nil-safe like
@@ -192,7 +215,8 @@ func (h *SynthesizeHandler) devmode(ctx context.Context) bool {
 // date whose window has not closed yet (03:00 UTC still in the future) is a
 // 400: a partial re-synthesis would silently shadow the scheduler's run. So
 // is a date whose window starts before the write-log horizon
-// (scheduler.writelog_retention_days, issue #277): its decisions are gone.
+// (scheduler.writelog_retention_days, issue #277) or before the eviction
+// boundary of earlier runs: its decisions are gone.
 func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	requestID := RequestIDFromContext(ctx)
@@ -230,7 +254,18 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "date window not closed yet"})
 			return
 		}
-		if msg := h.pastWriteLogHorizon(ctx, windowEnd.Add(-24*time.Hour)); msg != "" {
+		windowStart := windowEnd.Add(-24 * time.Hour)
+		if msg := h.pastWriteLogHorizon(ctx, windowStart); msg != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": msg})
+			return
+		}
+		msg, err := h.pastWriteLogBoundary(ctx, windowStart)
+		if err != nil {
+			slog.Error("synthesize: daily backfill: write-log eviction boundary unreadable", "request_id", requestID, "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write-log eviction boundary unreadable; backfill refused"})
+			return
+		}
+		if msg != "" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": msg})
 			return
 		}

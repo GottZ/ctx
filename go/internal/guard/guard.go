@@ -335,8 +335,10 @@ func relockKept(ctx context.Context, tx pgx.Tx, kept []lockedPick, checkTypes []
 	return blocks, nil
 }
 
-// lastGuardAtSQL stamps the end of a committed guard run. It is the only
-// write of context_guard_state left (issue #341, migration 181).
+// lastGuardAtSQL stamps the end of a committed guard run. It is the guard's
+// only write of context_guard_state left (issue #341, migration 181); the
+// write-log retention records its eviction boundary in the same row
+// (store.EvictWriteLog, migration 194), in a statement of its own.
 const lastGuardAtSQL = `UPDATE context_guard_state SET last_guard_at = now() WHERE id = true`
 
 // pendingStatsSQL counts what the pick would take, within the read scopes in
