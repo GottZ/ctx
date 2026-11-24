@@ -352,10 +352,19 @@ the plugin and runs over either transport.
 - Pacing (0.10.0): at most `checkpoint_max_parts` + 2 writes inside one 60 s window; a
   longer chain waits for the next window (the user is told before), and its deadline
   grows by 61 s per window after the first. A refused write (other writers on the key)
-  waits until a slot is free — when the chain's own oldest write in the window ages out,
-  else a whole window — at the latest until just before the deadline, and then tries once
-  more; the second refusal in a row ends the chain with `CtxCheckpointError` (Hermes opens
-  its per-server circuit breaker at the third error answer in a row).
+  waits until a slot is free — when the oldest write in the window ages out, else a whole
+  window — at the latest until just before the deadline, and then tries once more; the
+  second refusal in a row ends the chain with `CtxCheckpointError` (Hermes opens its
+  per-server circuit breaker at the third error answer in a row).
+- One state per server entry (0.17.0, GottZ/ctx#299): the window's writes and the error
+  answers in a row are counted per entry for every chain of the process
+  (`checkpoint.EntryState`: the MCP entry by profile, name and a digest of its configuration,
+  REST by base URL and key digest). A call goes out only while the entry's error answers in a
+  row plus the calls in flight stay below `MAX_RATE_REFUSALS`, a write only while fewer than
+  `checkpoint_max_parts` + 2 writes are booked or in flight in the window; any answer ends the
+  run. Two chains side by side share `checkpoint_max_parts` + 2 writes per window and never show
+  the entry more error answers in a row than one chain alone; a chain's plan counts the writes
+  the entry already holds in the window. Several Hermes processes of one profile share nothing.
 - Idempotent (0.10.0): the checkpoint id is `sha256(root \0 transcript digest)[:16]`, so a
   retry of the same transcript writes the same titles; parts carry no time of their own
   (`evidence_date` is on manifest and head only), so ctx answers a part that is already
@@ -472,8 +481,10 @@ serve several profiles without mixing their stores.
   use `sensitivity_default`; downgrades require server-side confirmation.
 - **Rate limit:** the server allows 100 writes per 60 s per key; a large checkpoint plus
   facts and mirror writes share that budget. The chain paces itself to `checkpoint_max_parts`
-  + 2 writes per window; required facts after it are not paced (a refused fact is reported
-  and left for a later compaction; the checkpoint stands).
+  + 2 writes per window, and since 0.17.0 the required facts after it are stored in the chain's
+  run: planned with it, paced against the same window and its count of error answers (a refused
+  fact is reported and left for a later compaction; the checkpoint stands). Best-effort facts,
+  the mirror and digests are not paced.
 
 ## Development
 

@@ -48,6 +48,17 @@ Setup asks for your ctx server URL and API key, and whether to turn the memory
 features on. Everything else has a working default. The key goes into Hermes'
 `.env` as `CTX_API_KEY`; `config.yaml` only references it.
 
+**Let Hermes end a ctx call the checkpoint gives up on** (all three setup surfaces,
+off by default; 0.17.0). The checkpoint bounds every ctx call by the time it has
+left. Through Hermes' tool dispatch it can only stop waiting: Hermes keeps running
+the call under the server entry's lock until the entry's own tool timeout (300 s by
+default), and the next checkpoint's first call fails behind it. With this switch on,
+setup adds the entry to `plugins.entries.ctx_checkpoint.mcp_allowlist`, and the
+checkpoint's calls go through Hermes' `call_mcp` with their own time limit: Hermes
+cancels a call that runs out and frees the entry. The grant gives the plugin no other
+server than the one it already reaches. Recall and the agent tools keep the dispatch.
+Without the grant, or on a Hermes without `call_mcp`, nothing changes.
+
 **Connection test.** Setup checks that the server answers before it keeps your
 settings: it connects the way Hermes does (`hermes mcp test` runs the same test),
 lists the server's tools and needs the ctx tools `search`, `get` and `store`. A
@@ -99,6 +110,7 @@ compression:
 plugins:
   entries:
     ctx_checkpoint:
+      mcp_allowlist: [ctx]           # optional grant (0.17.0): checkpoint calls through Hermes' call_mcp
       settings:                      # written by Settings → Plugins → ctx_checkpoint
         budget_s: 60
         max_parts: 80
@@ -244,12 +256,26 @@ A store that ctx refuses for its write limit (other
 writers on the same key) waits for a free slot — the first refusal adds one
 minute to the budget — at the latest until just before the deadline, and stops
 at the second refusal in a row: the third would open Hermes' circuit breaker
-for the ctx server. Every title of a checkpoint derives from the root session
+for the ctx server. Since 0.17.0 both counts belong to the server entry, not to
+one checkpoint: the checkpoints of one Hermes process (several sessions of a
+gateway, a compaction and its retry) share `max_parts` + 2 writes per minute, and
+together they draw no more than two error answers in a row from the entry: after
+two, no checkpoint of the process writes until an answer of the entry ends the run
+(Hermes' breaker resets on it too) — a checkpoint that starts then sends only its
+head search first, alone, and stops if that fails. A checkpoint that finds the
+minute used by another one waits for the next, inside its budget, and says so; the
+required facts after a checkpoint count against the same minute and the same run
+of errors. Several Hermes processes of one profile (two terminals on one profile)
+do not share this state: each counts its own writes, and ctx's limit of 100 per
+key and minute, of which a checkpoint takes `max_parts` + 2, is what is left between
+them. Every title of a checkpoint derives from the root session
 and the transcript's SHA-256, so a retry of the same transcript (Hermes' retry of a
 stalled compaction, `/compress` without new messages) meets the parts an earlier one
 stored and ctx confirms them without a write (since 0.6.1 every single call over MCP is bounded by the remaining
 budget too, so a hanging ctx no longer holds the compaction for Hermes' 300 s MCP
-timeout). A ctx key with `confirm_writes` is refused with that reason: ctx stages
+timeout; Hermes itself still runs such a call to that timeout and holds the server
+entry meanwhile, unless the grant above lets the checkpoint call through `call_mcp`).
+A ctx key with `confirm_writes` is refused with that reason: ctx stages
 its writes instead of storing them, and the plugin never confirms them on your
 behalf. A batch with no direct user/assistant text — only tool rows or
 compaction envelopes — has nothing to archive and never blocks: the provider

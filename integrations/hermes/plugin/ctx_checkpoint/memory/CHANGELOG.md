@@ -6,6 +6,52 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.17.0] — 2026-11-24
+
+The chains of one process share one state per ctx server entry, the required facts pace against
+it, and with the operator's grant a call the checkpoint gives up on ends in Hermes as well
+(GottZ/ctx#299, points 2, 3 and 5).
+
+- **One state per server entry.** Each chain counted its own refusals in a row and its own
+  writes in the rate window. Two chains of one process at the write limit (two sessions of a
+  gateway, a compaction and its retry) therefore showed the entry up to four error answers in a
+  row — Hermes opens its circuit breaker at the third (`_CIRCUIT_BREAKER_THRESHOLD`) and refuses
+  every call to the entry for 60 s — and booked `2 × (max_parts + 2)` writes in one window.
+  `checkpoint.EntryState`, one per entry and process (`entry_state`; MCP: the profile, the
+  entry's name and a digest of its configuration — Hermes connects anew when that changes; REST:
+  base URL and key digest), admits a call only while the entry's error answers in a row plus the
+  calls in flight stay below `MAX_RATE_REFUSALS` (2), and a write only while fewer than
+  `max_parts + 2` writes are booked or in flight in the window; any answer ends the run, as in
+  Hermes. At the limit no write goes out; a read still does, alone (every chain starts with the
+  head search, whose answer ends the run). A chain alone behaves as before (one wait, one retry,
+  then it stops). A chain plans the windows the entry's booked writes take together with its own
+  (its deadline grows by them, still never past Hermes' wait), and a chain that waits for writes
+  of another checkpoint before its own fill a window tells the user why. Not covered: several
+  Hermes processes of one profile share nothing; each keeps its own state.
+- **Required facts.** They were stored after the chain unpaced and outside its count of error
+  answers. They are stored in the chain's run now (`ChainWriter.store_paced`, `ChainReceipt.run`):
+  the chain's plan holds their windows, each fact waits for a slot of the entry's window and counts
+  in its error answers, and none runs past the chain's deadline (so none past Hermes' wait). A
+  refused fact still ends the facts at once, logged, its claim released for a later compaction.
+- **A call the checkpoint gives up on.** Through the tool dispatch the plugin could only stop
+  waiting: Hermes' MCP handler kept running the call under the entry's RPC lock until the entry's
+  own tool timeout (300 s by default), and the next compaction's head search failed behind it
+  (`head search failed [timeout]`) although the server would answer at once. When the operator
+  lists the entry in `plugins.entries.ctx_checkpoint.mcp_allowlist`, the checkpoint's bounded calls
+  go through `PluginContext.call_mcp(server, tool, args, timeout)` with their own timeout; Hermes
+  cancels such a call on its MCP loop when it runs out (`tools/mcp_tool_loop.py`
+  `_run_on_mcp_loop`), which releases the lock. A memory provider's `register()` receives Hermes'
+  provider collector, which forwards only `register_*` calls: `call_mcp` is taken from the context
+  where it has one, else from the `PluginContext` the collector holds for the plugin
+  (`_plugin_context()`). An answer Hermes cut at its 64 KB plugin cap fails the call (the largest
+  head and manifest reads stay far below it). Without the grant, on a Hermes without `call_mcp`
+  and after Hermes refused the grant (`PermissionError`, before any transport work; remembered
+  until the provider connects again) the calls go through the dispatch as before. Recall and the
+  agent tools are unbounded calls and keep the dispatch.
+- **Setup** offers the grant on every surface ("Let Hermes end a ctx call the checkpoint gives up
+  on": the Desktop memory form, the web dashboard form, `hermes memory setup`), writes or removes
+  only this entry in the list, and the terminal setup's summary names it.
+
 ## [ctx_checkpoint 0.16.2] — 2026-11-19
 
 A checkpoint ends inside Hermes' wait for the compaction, a retry adds no window it does not
