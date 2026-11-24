@@ -4,8 +4,8 @@
 // wait for another transaction) left only an INFO line per block. guard-stats
 // carries the count: deferred_verdicts {since_start, last_run} of this
 // process. Here the run defers a block whose matched neighbour another
-// transaction holds FOR UPDATE (a purge or a prune would): the count moves by
-// one, and the next quiet run decides the block.
+// transaction holds FOR UPDATE (a purge or a prune would): two blocks, the
+// count moves by two (blocks, not runs), and the next quiet run decides them.
 package handler
 
 import (
@@ -62,7 +62,10 @@ func TestGuardStatsCountsDeferredVerdicts(t *testing.T) {
 	if _, err := guard.RunGuardBatch(f.ctx, f.pool, set, 100, config.Defaults().GuardSearch()); err != nil {
 		t.Fatal(err)
 	}
+	// Two blocks to review against the neighbour, so a count of runs and a
+	// count of blocks differ (review round 1 of #547).
 	write("q547 review", gdVec(5, 0.96, 6, 0.28)) // needs_review against the neighbour
+	write("q547 review two", gdVec(5, 0.96, 7, 0.28)) // nearer to the neighbour (0.96) than to the first (0.92)
 	before, _ := f.deferred(t, raw)
 
 	holder, err := f.pool.Begin(f.ctx)
@@ -79,12 +82,12 @@ func TestGuardStatsCountsDeferredVerdicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	since, last := f.deferred(t, raw)
-	if since != before+1 || last != 1 {
-		t.Errorf("deferred_verdicts after a run beside a held neighbour = {since_start %v, last_run %v}, want {%v, 1}", since, last, before+1)
+	if since != before+2 || last != 2 {
+		t.Errorf("deferred_verdicts after a run beside a held neighbour = {since_start %v, last_run %v}, want {%v, 2}", since, last, before+2)
 	}
 	n, err := guard.RunGuardBatch(f.ctx, f.pool, set, 100, config.Defaults().GuardSearch())
-	if err != nil || n != 1 {
-		t.Errorf("the next quiet run processed %d (%v), want the deferred block", n, err)
+	if err != nil || n != 2 {
+		t.Errorf("the next quiet run processed %d (%v), want the two deferred blocks", n, err)
 	}
 	if since2, last2 := f.deferred(t, raw); since2 != since || last2 != 0 {
 		t.Errorf("deferred_verdicts after the quiet run = {%v, %v}, want {%v, 0}", since2, last2, since)

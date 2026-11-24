@@ -285,6 +285,13 @@ func TestConcurrentGuardRuns_MutualPairAuditInsertsDoNotWait(t *testing.T) {
 	if rx.err != nil || ry.err != nil {
 		t.Errorf("run errors: X=%v Y=%v", rx.err, ry.err)
 	}
+	// Y decided B in its own run: its audit row names A, which X's pick
+	// holds FOR NO KEY UPDATE — a lock the foreign key's key-share lock
+	// passes (#359). Under a pick FOR UPDATE Y would defer B instead of
+	// waiting (issue #547), so "Y went through" alone no longer pins it.
+	if yThrough && ry.n != 1 {
+		t.Errorf("run Y processed %d blocks while X held A, want B decided (1): its audit insert must pass X's pick", ry.n)
+	}
 	drain(t, f)
 	v := assertSettled(t, f.pool, []string{x0, a, b})
 	if n := archivedOf(v, a, b); n != 1 {
