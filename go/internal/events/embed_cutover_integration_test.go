@@ -556,7 +556,7 @@ func TestEmbedCutover_Integration(t *testing.T) {
 		}
 
 		// Fresh dual pair present and empty (§3.2b invariant holds at every
-		// instant — ClearEmbeddingTx/create/purge stay valid post-cutover).
+		// instant — InvalidateEmbeddingTx/create/purge stay valid post-cutover).
 		if !columnExistsT(t, pool, "embedding_next") || !columnExistsT(t, pool, "embed_model_next") {
 			t.Fatal("fresh embedding_next pair missing after confirm")
 		}

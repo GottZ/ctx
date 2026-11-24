@@ -105,7 +105,7 @@ func bw2Config() *config.Config {
 		Server:         config.ServerConfig{DBPass: "test-password"},
 		Graph:          config.GraphConfig{HopDepth: 1},
 		Query:          config.QueryConfig{Timezone: time.UTC, LowConfidenceMaxSources: config.Defaults().Query.LowConfidenceMaxSources, MaxSourceRunes: config.Defaults().Query.MaxSourceRunes}, // #226/#208: V62/V63 floors
-		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
+		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour, ReleaseHold: config.Defaults().EmbedBackfill.ReleaseHold},                          // #236: V70 refuses a zero release hold
 		EmbedMigration: config.EmbedMigrationConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
 		Distill:        config.Defaults().Distill,
 		Status:         config.Defaults().Status,     // W06-8: V37 floors

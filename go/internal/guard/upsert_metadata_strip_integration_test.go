@@ -182,9 +182,9 @@ func TestVW3UpsertStripsGuardCheckedAt(t *testing.T) {
 	})
 
 	// RED #2 — UPDATE path (ON CONFLICT DO UPDATE). Content stays IDENTICAL on
-	// the second write on purpose: a content change would clear the embedding
-	// (blocks.go W04-8 ClearEmbeddingTx) and the block would drop out of the
-	// pending set for the wrong reason, contaminating the probe.
+	// the second write on purpose: a content change would invalidate the
+	// vector (blocks.go W04-8, InvalidateEmbeddingTx) and the block would drop
+	// out of the pending set for the wrong reason, contaminating the probe.
 	t.Run("update_path_key_is_stripped", func(t *testing.T) {
 		const content = "stable update content"
 		b := upsert(t, "vw3-update", content, map[string]any{"source": "vw3"})

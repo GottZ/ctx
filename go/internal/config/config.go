@@ -1912,6 +1912,15 @@ type EmbedBackfillConfig struct {
 	// it as "retry immediately", a tight loop against a failing backend.
 	BackoffBase time.Duration `key:"embed_backfill.backoff_base" env:"CTX_EMBED_BACKFILL_BACKOFF_BASE" default:"60" mut:"hot" tenancy:"global-only"`
 	BackoffCap  time.Duration `key:"embed_backfill.backoff_cap" env:"CTX_EMBED_BACKFILL_BACKOFF_CAP" default:"86400" mut:"hot" tenancy:"global-only"`
+	// ReleaseHold bounds a tenant-admin's repeat of manage
+	// embed-backfill-release (issue #236): an oversize memo a tenant-admin
+	// released, whose block was parked again, is released by a tenant-admin
+	// again only ReleaseHold * 2^(attempts-2) after that release, at most
+	// BackoffCap. A first release stays unbounded, and a server-admin's is
+	// never held. Without it a tenant-admin releasing its blocks in a loop
+	// while they kept not fitting held one turn of the background arm in
+	// every round of the tenants for good. Bare seconds; 0 is refused (V70).
+	ReleaseHold time.Duration `key:"embed_backfill.release_hold" env:"CTX_EMBED_BACKFILL_RELEASE_HOLD" default:"3600" mut:"hot" tenancy:"global-only"`
 }
 
 // EmbedMigrationConfig is the Achse-04 W04-4 knob surface for the re-embed

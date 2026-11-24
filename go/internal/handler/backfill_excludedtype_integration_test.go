@@ -10,7 +10,7 @@
 // Vorfall 2026-07-25: 33 Hermes-"Compaction source"-Parts (type=checkpoint,
 // je ~36,5 kB) fluteten den CPU-Embed-Server über Stunden; der Digest-Rebuild
 // schreibt topic-map-private (type=system-meta, 73,7 kB ≈ real ~32k Token)
-// nach JEDEM Boot neu → ClearEmbedding → ~60 min CPU-Embed für einen toten
+// nach JEDEM Boot neu → Embedding verworfen → ~60 min CPU-Embed für einen toten
 // Vektor, wiederkehrend.
 //
 // Der Test läuft durch die ECHTE Produktionsfunktion (h.backfillPending) mit

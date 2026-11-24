@@ -104,7 +104,7 @@ func w023Config(enabled bool) *config.Config {
 		// carry fatal floors (V62, V63).
 		// V21 (#38): the embed back-off bases must be > 0 to pass Validate —
 		// registry defaults, not wire-active here.
-		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
+		EmbedBackfill:  config.EmbedBackfillConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour, ReleaseHold: config.Defaults().EmbedBackfill.ReleaseHold}, // #236: V70 refuses a zero release hold
 		EmbedMigration: config.EmbedMigrationConfig{BackoffBase: 60 * time.Second, BackoffCap: 24 * time.Hour},
 		// A03-W03-3: the distiller group has fatal floors on its sizing keys
 		// (V25), so a zero-valued group fails Validate the same way

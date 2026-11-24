@@ -133,6 +133,8 @@ func Validate(c *Config) []Issue {
 	// V69 (#277): scheduler.writelog_retention_days is 0 or at least
 	// WriteLogRetentionFloorDays.
 	issues = append(issues, validateWriteLogRetention(c)...)
+	// V70 (#236): embed_backfill.release_hold above 0.
+	issues = append(issues, validateEmbedBackfillReleaseHold(c)...)
 	// V35 runs LAST, and the position is the mechanism, not a style choice.
 	// Three of the int keys are served by NORMALIZING passes that write the
 	// value back into the struct (v6 for dream.backoff_grace and
@@ -1714,6 +1716,23 @@ func validateWriteLogRetention(c *Config) []Issue {
 	return []Issue{{Field: "scheduler.writelog_retention_days", Severity: SeverityError,
 		Msg: fmt.Sprintf("scheduler.writelog_retention_days (%d) must be 0 (keep every row) or between %d and %d: the daily synthesis report reads the guard and dream decisions of the 24 hours before its run from the write log, and a longer horizon leaves the range the database computes it in",
 			d, WriteLogRetentionFloorDays, WriteLogRetentionCeilingDays)}}
+}
+
+// validateEmbedBackfillReleaseHold is V70 (issue #236):
+// embed_backfill.release_hold must be above 0. It bounds a tenant-admin's
+// repeat of manage embed-backfill-release: an oversize memo released, whose
+// block was parked again, is released by a tenant-admin again only after
+// release_hold * 2^(attempts-2). At 0 a tenant-admin that released its blocks
+// in a loop while they kept not fitting would hold one turn of the background
+// arm in every round of the tenants for good — no reading of 0 is safe, so
+// the class is fatal like V21 (boot drops the override, the settings PUT is
+// a 422). The negative half stays V17's (generic duration walk).
+func validateEmbedBackfillReleaseHold(c *Config) []Issue {
+	if c.EmbedBackfill.ReleaseHold != 0 {
+		return nil
+	}
+	return []Issue{{Field: "embed_backfill.release_hold", Severity: SeverityError,
+		Msg: "embed_backfill.release_hold must be > 0 — at 0 a tenant-admin's release loop over blocks that keep not fitting would take a turn of the background arm in every round of the tenants"}}
 }
 
 // validateDreamDecideTieOdds is V36: dream.decide_tie_odds is an odds RATIO
