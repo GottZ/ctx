@@ -22,7 +22,13 @@ import (
 // runner's lock wait); the pool notes every connection that ran a statement
 // naming lock_timeout and, before it hands that connection out again, sends
 // it one empty statement that takes a held 55P03 (PrepareAfterLockTimeout).
-// A connection that never set one pays a map lookup per acquire.
+// A connection that never set one pays a map lookup per acquire. The mark is
+// per hand-out and needs the name in the statement's text: a session-wide SET
+// (not SET LOCAL) would be covered at the first return of its connection
+// only, and a lock_timeout from the role, the database or a function's SET
+// clause not at all. ctx sets none of those — every lock_timeout it sets is
+// transaction-local (SET LOCAL, set_config with is_local) in a statement whose
+// text names it (review of PR #553).
 
 // lockTimeoutConns holds the connections of the pool that ran a statement
 // naming lock_timeout since they were last handed out.

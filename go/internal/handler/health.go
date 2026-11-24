@@ -246,15 +246,15 @@ var healthProbeBudget = 4 * time.Second
 // 2026-10-31 §3). Server health is the operator's pool; a tenant's rows answer
 // for themselves on its own chain calls.
 //
-// The candidates of one role stay in order and the role stops at the first
-// reachable one, as before: a role never requests more than its own ordered
+// The candidates of one role are probed in their order and none starts once
+// one answered (probeInTurn): a role never requests more than its own ordered
 // walk, and the bound of a call stays the operator rows of the probed roles.
-// probes only removes repeats — a base URL another role of the same round
-// already probed is not requested again, unless that probe ran out of a
-// shorter share than this role's. Each candidate probes with its share of
-// what is left of the budget (budgetShare, issue #519): a first candidate
-// that hangs no longer leaves a later one "probed" with a spent budget and
-// logged as failed without having been requested.
+// Every probe runs on the round's whole budget (issue #519), so a first
+// candidate that hangs no longer leaves a later one "probed" with a spent
+// budget, and probes only removes repeats — a base URL another role of the
+// same round already probed is not requested again; the answer is the one
+// this role would have got itself. A probe that hangs is waited for until the
+// budget ends, wherever it stands in the order.
 func (n *healthNotice) roleReachable(ctx context.Context, seq uint64, snap []backends.Backend, role string, probes *hostProbes) string {
 	rows := 0
 	var candidates []*backends.Backend
