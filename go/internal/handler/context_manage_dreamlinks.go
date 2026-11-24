@@ -11,8 +11,11 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/dream"
@@ -55,8 +58,10 @@ func (h *ManageHandler) handleDreamBackoffRestamp(w http.ResponseWriter, r *http
 
 // handleDreamLinkResolve resolves ONE dream link (confirm|delete). Wire shape
 // mirrors guard-resolve: 400 on malformed input, 200 {success:false, "Link
-// not found"} for foreign/invisible/absent links (uniform, no oracle), 200
-// with the resolution record on success.
+// not found"} for foreign/invisible/absent links (uniform, no oracle), 409
+// supersedes_conflict for the confirm of a supersedes guess whose target
+// another block already settles (dreamLinkConfirmReject), 200 with the
+// resolution record on success.
 func (h *ManageHandler) handleDreamLinkResolve(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	ctx := r.Context()
 	reqID := RequestIDFromContext(ctx)
@@ -94,6 +99,10 @@ func (h *ManageHandler) handleDreamLinkResolve(w http.ResponseWriter, r *http.Re
 	resolved, err := store.DreamLinkResolve(ctx, h.pool,
 		data.SourceID, data.TargetID, data.Relationship, data.Resolution, data.Rationale,
 		writableBlockScopes(ar))
+	if rej := dreamLinkConfirmReject(err); rej != nil {
+		writeJSONReject(w, rej)
+		return
+	}
 	if err != nil {
 		logRequestError(ctx, "manage: dream-link-resolve error", "error", err, "write_outcome", writeOutcome(err), "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -114,4 +123,23 @@ func (h *ManageHandler) handleDreamLinkResolve(w http.ResponseWriter, r *http.Re
 		"resolved":   resolved,
 		"resolution": resolved.Resolution,
 	})
+}
+
+// dreamLinkConfirmReject renders the refused confirm of a supersedes guess
+// whose target another live block of the scope already settles (issue #284):
+// 409 supersedes_conflict with the head of the chain, as a second declaration
+// of that target is refused. nil when err is no such refusal.
+func dreamLinkConfirmReject(err error) *writeReject {
+	var c *store.SupersedesConflictError
+	if !errors.As(err, &c) || c.Kind != store.SupersedesSuperseded {
+		return nil
+	}
+	head := "the chain above it is " + strconv.Itoa(store.SupersedesChainDepth) + " links or longer, so no head is named"
+	if c.Head != "" {
+		head = "the current head of its chain is " + c.Head
+	}
+	return classSupersedesConflict.reject(fmt.Sprintf(
+		"dream-link-resolve: block %s is already superseded by another block (a declaration or a confirmed guess); %s — "+
+			"a target keeps one settled superseder: delete this guess, or delete the other supersedes link first",
+		c.Target, head))
 }

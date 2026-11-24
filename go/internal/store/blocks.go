@@ -1102,20 +1102,28 @@ func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
 	// vector next to its own content, and replace a derivative's content and
 	// provenance; the statement sees the row it updates.
 	//
-	// The pre-read still locks the conflicting row (if any) with FOR UPDATE
-	// before the upsert runs, using the exact (category, title, scope) WHERE
-	// NOT is_archived predicate of the ON CONFLICT target. Two things hang on
-	// it: a row it sees stays the row the upsert conflicts with (nobody can
-	// archive, move or rename it meanwhile), so the gate's INSERT half — the
-	// probe for an archived claim — is skipped only when the upsert cannot
-	// insert; and the block row is locked before the statement's BEFORE INSERT
+	// The pre-read still locks the conflicting row (if any) before the upsert
+	// runs, using the exact (category, title, scope) WHERE NOT is_archived
+	// predicate of the ON CONFLICT target. Two things hang on it: a row it
+	// sees stays the row the upsert conflicts with (nobody can archive, move,
+	// rename or delete it meanwhile), so the gate's INSERT half — the probe
+	// for an archived claim — is skipped only when the upsert cannot insert;
+	// and the block row is locked before the statement's BEFORE INSERT
 	// triggers take theirs (trg_block_embed_excluded's advisory locks), the
 	// order every conflicting write has always had.
+	//
+	// FOR NO KEY UPDATE, the lock the upsert's own UPDATE takes (it changes no
+	// key column): it holds off every UPDATE and DELETE as FOR UPDATE did, and
+	// lets the foreign key's key-share lock of a link insert or an audit row
+	// through (issue #284). A declaration and a block batch take the same
+	// lock first (lockSupersedesPair, lockBatchMatch) and hold it while they
+	// wait for their next row; under FOR UPDATE a guard run that held that row
+	// and inserted an audit row naming this block waited for them in turn.
 	hadRow := false
 	if err := tx.QueryRow(ctx,
 		`SELECT true FROM context_blocks
 		 WHERE category = $1 AND title = $2 AND scope = $3 AND NOT is_archived
-		 FOR UPDATE`,
+		 FOR NO KEY UPDATE`,
 		category, title, scope,
 	).Scan(&hadRow); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("store: upsert block: pre-read: %w", err)
@@ -1124,7 +1132,7 @@ func (u upsertStatement) exec(ctx context.Context, tx pgx.Tx) (*Block, error) {
 }
 
 // execHeld is exec after its pre-read: the caller's transaction holds the
-// identity row FOR UPDATE under the pre-read's predicate (or found none,
+// identity row FOR NO KEY UPDATE under the pre-read's predicate (or found none,
 // hadRow false) — exec's own pre-read, or the locked comparison of a block
 // batch (lockBatchMatch), which takes the same lock with the same predicate.
 func (u upsertStatement) execHeld(ctx context.Context, tx pgx.Tx, hadRow bool) (*Block, error) {
@@ -1674,36 +1682,59 @@ func readBlockByID(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 // the daily link sweep (issue #197).
 func DeleteBlock(ctx context.Context, pool *pgxpool.Pool, id string, writeScopes []string) (*Block, error) {
 	b := &Block{}
-	err := writeSupersedesSource(ctx, pool, pgxdb.At("store: delete block"), func(tx pgx.Tx) error {
-		targets, err := lockSupersedesSource(ctx, tx, id, writeScopes)
+	found, err := archiveSupersedesSource(ctx, pool, "store: delete block", id, writeScopes,
+		`UPDATE context_blocks SET is_archived = true, updated_at = now()
+		 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
+		   AND `+notDerivedSQL+`
+		 RETURNING id, category, title, scope, created_at, updated_at`,
+		&b.ID, &b.Category, &b.Title, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, updateBlockMissReason(ctx, pool, id, writeScopes)
+	}
+	return b, nil
+}
+
+// archiveSupersedesSource runs one by-id archive — archiveSQL, which binds the
+// id as $1 and the write scopes as $2 and returns one row into dest — as an
+// archive of a supersedes source (DeleteBlock, GuardResolve 'archive'): the
+// lock pass first (lockSupersedesSource: the scope's supersedes lock, the
+// block and its targets), then the statement, then the reconcile of the
+// targets, in one transaction run through writeSupersedesSource. found=false
+// (no error) when the statement changed no row.
+//
+// A statement that changed a row the lock pass missed — no live block of the
+// write scopes had the id when it read the scope — archived a block that
+// entered a write scope between the two statements, unlocked, with targets
+// nobody read; the transaction then runs again (errSupersedesSourceChanged),
+// and the next lock pass finds the block where it is now (issue #284).
+func archiveSupersedesSource(ctx context.Context, pool *pgxpool.Pool, op, id string, writeScopes []string, archiveSQL string, dest ...any) (found bool, err error) {
+	err = writeSupersedesSource(ctx, pool, pgxdb.At(op), func(tx pgx.Tx) error {
+		targets, missed, err := lockSupersedesSource(ctx, tx, id, writeScopes)
 		if err != nil {
 			return err
 		}
-		err = tx.QueryRow(ctx,
-			`UPDATE context_blocks SET is_archived = true, updated_at = now()
-			 WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived
-			   AND `+notDerivedSQL+`
-			 RETURNING id, category, title, scope, created_at, updated_at`,
-			id, writeScopes,
-		).Scan(&b.ID, &b.Category, &b.Title, &b.Scope, &b.CreatedAt, &b.UpdatedAt)
+		err = tx.QueryRow(ctx, archiveSQL, id, writeScopes).Scan(dest...)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return pgxdb.ErrRollback
 		}
 		if err != nil {
-			return fmt.Errorf("store: delete block: %w", err)
+			return fmt.Errorf("%s: %w", op, err)
+		}
+		if missed {
+			return errSupersedesSourceChanged
 		}
 		if _, err := ReconcileSupersedesTargets(ctx, tx, targets, ""); err != nil {
-			return fmt.Errorf("store: delete block: %w", err)
+			return fmt.Errorf("%s: %w", op, err)
 		}
 		return nil
 	})
 	if errors.Is(err, pgxdb.ErrRollback) {
-		return nil, updateBlockMissReason(ctx, pool, id, writeScopes)
+		return false, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	return b, nil
+	return err == nil, err
 }
 
 // UpdateBlockData holds the fields that can be updated on a block.
@@ -2179,7 +2210,9 @@ func updateBlockMissReason(ctx context.Context, pool *pgxpool.Pool, id string, w
 // moveScopes is nil unless the update names a scope (a possible scope move);
 // then it carries the caller's write scopes, and the block and the targets of
 // its supersedes links are locked before the update (lockSupersedesSource), so
-// the supersedes state the sweep ends can be reconciled in this transaction.
+// the supersedes state the sweep ends can be reconciled in this transaction;
+// a statement that moved a block the lock pass missed runs the transaction
+// again, as an archive does (archiveSupersedesSource).
 //
 // identitySent says the query returns identityMovedCol as its last column (the
 // update names a category, a title or a scope); when the identity moved, the
@@ -2198,9 +2231,10 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 	}
 	if err := write(ctx, pool, pgxdb.At("store: update block"), func(tx pgx.Tx) error {
 		var supersedesTargets []string
+		var missed bool
 		if scopeMove {
 			var err error
-			if supersedesTargets, err = lockSupersedesSource(ctx, tx, id, moveScopes); err != nil {
+			if supersedesTargets, missed, err = lockSupersedesSource(ctx, tx, id, moveScopes); err != nil {
 				return err
 			}
 		}
@@ -2222,14 +2256,14 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 			// instead of a commit.
 			return pgxdb.ErrRollback
 		}
-		if refusedKey, ok := blockIdentityViolation(err); ok {
-			return &BlockIdentityTakenError{refusedKey: refusedKey}
-		}
-		if retypeBound(err) {
-			return ErrRetypeBound
-		}
 		if err != nil {
-			return fmt.Errorf("store: update block: %w", err)
+			return blockUpdateError(err)
+		}
+		if missed {
+			// The lock pass found no live block of the write scopes, yet the
+			// statement changed one: it entered a write scope in between,
+			// unlocked (archiveSupersedesSource; issue #284). Run again.
+			return errSupersedesSourceChanged
 		}
 		if moved {
 			if err := guardIdentityMove(ctx, tx, b); err != nil {
@@ -2283,6 +2317,19 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 		slog.Info("store: scope move swept divergent links", "block_id", id, "new_scope", b.Scope, "links_deleted", swept)
 	}
 	return true, needsReEmbed, nil
+}
+
+// blockUpdateError is runBlockUpdate's answer to an error of its statement
+// other than a miss: a taken identity and a bound retype are the caller's
+// refusals, anything else a fault.
+func blockUpdateError(err error) error {
+	if refusedKey, ok := blockIdentityViolation(err); ok {
+		return &BlockIdentityTakenError{refusedKey: refusedKey}
+	}
+	if retypeBound(err) {
+		return ErrRetypeBound
+	}
+	return fmt.Errorf("store: update block: %w", err)
 }
 
 // sweepScopeMoveLinks restores the link tables' row-scope invariant after a
@@ -3204,6 +3251,12 @@ func GetGuardStats(ctx context.Context, pool *pgxpool.Pool, readScopes []string)
 
 // GuardResolve resolves a flagged block with either "archive" or "keep". The
 // block must live in one of the caller's write-eligible scopes.
+//
+// 'archive' is an archive like DeleteBlock's and runs the same way
+// (archiveSupersedesSource): the lock pass, the statement, the reconcile of
+// the targets of the block's supersedes links (issue #284) — a target no other
+// live block supersedes is knowledge again at once. 'keep' changes no
+// supersedes state and stays one statement on one row.
 func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution string, writeScopes []string) (*Block, error) {
 	var query string
 	switch resolution {
@@ -3241,17 +3294,24 @@ func GuardResolve(ctx context.Context, pool *pgxpool.Pool, id, resolution string
 	}
 
 	b := &Block{}
-	err := pool.QueryRow(ctx, query, id, writeScopes).Scan(
-		&b.ID, &b.Title, &b.Category, &b.Scope, &b.GuardStatus, &b.CreatedAt, &b.UpdatedAt,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
+	dest := []any{&b.ID, &b.Title, &b.Category, &b.Scope, &b.GuardStatus, &b.CreatedAt, &b.UpdatedAt}
+	found := true
+	var err error
+	if resolution == "archive" {
+		found, err = archiveSupersedesSource(ctx, pool, "store: guard resolve", id, writeScopes, query, dest...)
+	} else if err = pool.QueryRow(ctx, query, id, writeScopes).Scan(dest...); errors.Is(err, pgx.ErrNoRows) {
+		found, err = false, nil
+	} else if err != nil {
+		err = fmt.Errorf("store: guard resolve: %w", err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !found {
 		// 'keep' cannot be refused by the S3 conjunct (it does not carry one),
 		// so this diagnosis only ever fires for 'archive' — the same shape
 		// UpdateBlock and DeleteBlock use.
 		return nil, updateBlockMissReason(ctx, pool, id, writeScopes)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("store: guard resolve: %w", err)
 	}
 	return b, nil
 }
@@ -3287,20 +3347,99 @@ func dedupeGuardBatchIDs(ids []string) (valid []string, skipped []GuardSkip) {
 	return valid, skipped
 }
 
+// guardBatchLockSQL locks the rows of a guard resolve batch ($1, the ids) in
+// the scopes whose supersedes locks the transaction holds ($2), together with
+// the targets of their supersedes links in the same scope when $3 (an
+// archive), in ONE statement and id order — lockSupersedesSourceSQL over an id
+// array. FOR NO KEY UPDATE, the lock the resolve's UPDATE takes anyway (it
+// changes no key column): it holds off every UPDATE and DELETE of the rows —
+// an archive, a scope move, a content write, the guard's verdict — as FOR
+// UPDATE did, and lets the foreign key's key-share lock of a link insert or an
+// audit row through, which FOR UPDATE refused while the inserter held the next
+// block the batch wanted (issue #284). requested tells the batch's rows from
+// the targets.
+const guardBatchLockSQL = `SELECT b.id::text, b.is_archived, COALESCE(b.guard_status, ''), b.id = ANY($1::uuid[])
+	   FROM context_blocks b
+	  WHERE b.id = ANY($1::uuid[] || ARRAY(
+	          SELECT dl.target_block_id
+	            FROM context_dream_links dl
+	            JOIN context_blocks s ON s.id = dl.source_block_id
+	           WHERE $3::boolean
+	             AND dl.source_block_id = ANY($1::uuid[])
+	             AND dl.relationship = 'supersedes'
+	             AND s.scope = ANY($2::text[])))
+	    AND b.scope = ANY($2::text[])
+	  ORDER BY b.id
+	  FOR NO KEY UPDATE OF b`
+
+// lockGuardBatchScopes takes the supersedes lock of every scope of the batch's
+// ids within writeScopes, in sorted scope order (the order UpsertBlocks takes
+// several, batchScopes), before any row lock: EXCLUSIVE for an archive, which
+// ends the supersedes of the archived blocks like any archive
+// (lockSupersedesSource), SHARED for a keep, which changes no supersedes state
+// but holds several rows and must not run beside the paths whose row-lock
+// order differs from the id order (a declaration: source before target; a
+// block batch; a purge). It returns, per id, the scope it read, without a
+// lock: the lock pass then answers errSupersedesSourceChanged for an id that
+// left these scopes meanwhile.
+func lockGuardBatchScopes(ctx context.Context, tx pgx.Tx, valid, writeScopes []string, archive bool) (map[string]string, []string, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT id::text, scope FROM context_blocks WHERE id = ANY($1::uuid[]) AND scope = ANY($2::text[])`,
+		valid, writeScopes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: guard resolve batch: scopes: %w", err)
+	}
+	read := make(map[string]string, len(valid))
+	var scopes []string
+	for rows.Next() {
+		var id, scope string
+		if err := rows.Scan(&id, &scope); err != nil {
+			rows.Close()
+			return nil, nil, fmt.Errorf("store: guard resolve batch: scopes: %w", err)
+		}
+		read[id] = scope
+		if !slices.Contains(scopes, scope) {
+			scopes = append(scopes, scope)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("store: guard resolve batch: scopes: %w", err)
+	}
+	slices.Sort(scopes)
+	for _, scope := range scopes {
+		lock := ShareSupersedesScope
+		if archive {
+			lock = LockSupersedesScope
+		}
+		if err := lock(ctx, tx, scope); err != nil {
+			return nil, nil, err
+		}
+	}
+	return read, scopes, nil
+}
+
 // classifyGuardBatch locks the candidate rows (so a concurrent guard run
 // cannot re-stamp guard_status between classification and update) and splits
 // them into resolvable ids and skips. A row invisible in writeScopes yields
 // not_found — indistinguishable from nonexistent (no existence oracle).
-func classifyGuardBatch(ctx context.Context, tx pgx.Tx, valid, writeScopes []string, skipped []GuardSkip) (resolvable []string, _ []GuardSkip, err error) {
-	rows, err := tx.Query(ctx,
-		`SELECT id, is_archived, guard_status
-		 FROM context_blocks
-		 WHERE id = ANY($1::uuid[]) AND scope = ANY($2::text[])
-		 FOR UPDATE`,
-		valid, writeScopes,
-	)
+//
+// Lock order (issue #284): the scopes' supersedes locks (lockGuardBatchScopes),
+// then the rows in one id-ordered statement (guardBatchLockSQL), for an
+// archive the rows' supersedes targets with them. For an archive it also
+// returns the targets to reconcile after the update: those of the resolvable
+// ids, read again under the held locks (lockLateSupersedesTargets), as the
+// single-block lock pass does. An id read in one of the locked scopes but not
+// locked there left it meanwhile; the transaction runs again
+// (errSupersedesSourceChanged, writeSupersedesSource).
+func classifyGuardBatch(ctx context.Context, tx pgx.Tx, valid, writeScopes []string, skipped []GuardSkip, archive bool) (resolvable, targets []string, _ []GuardSkip, err error) {
+	read, scopes, err := lockGuardBatchScopes(ctx, tx, valid, writeScopes, archive)
 	if err != nil {
-		return nil, nil, fmt.Errorf("store: guard resolve batch: select: %w", err)
+		return nil, nil, nil, err
+	}
+	rows, err := tx.Query(ctx, guardBatchLockSQL, valid, scopes, archive)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("store: guard resolve batch: select: %w", err)
 	}
 	defer rows.Close()
 	type rowState struct {
@@ -3308,16 +3447,25 @@ func classifyGuardBatch(ctx context.Context, tx pgx.Tx, valid, writeScopes []str
 		status   string
 	}
 	states := make(map[string]rowState, len(valid))
+	var locked []string
 	for rows.Next() {
 		var id, status string
-		var archived bool
-		if err := rows.Scan(&id, &archived, &status); err != nil {
-			return nil, nil, fmt.Errorf("store: guard resolve batch: scan: %w", err)
+		var archived, requested bool
+		if err := rows.Scan(&id, &archived, &status, &requested); err != nil {
+			return nil, nil, nil, fmt.Errorf("store: guard resolve batch: scan: %w", err)
 		}
-		states[id] = rowState{archived: archived, status: status}
+		locked = append(locked, id)
+		if requested {
+			states[id] = rowState{archived: archived, status: status}
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("store: guard resolve batch: rows: %w", err)
+		return nil, nil, nil, fmt.Errorf("store: guard resolve batch: rows: %w", err)
+	}
+	for id := range read {
+		if _, ok := states[id]; !ok {
+			return nil, nil, nil, errSupersedesSourceChanged
+		}
 	}
 
 	resolvable = make([]string, 0, len(valid))
@@ -3334,7 +3482,13 @@ func classifyGuardBatch(ctx context.Context, tx pgx.Tx, valid, writeScopes []str
 			resolvable = append(resolvable, id)
 		}
 	}
-	return resolvable, skipped, nil
+	if !archive || len(resolvable) == 0 {
+		return resolvable, nil, skipped, nil
+	}
+	if targets, err = lockLateSupersedesTargets(ctx, tx, resolvable, scopes, locked); err != nil {
+		return nil, nil, nil, err
+	}
+	return resolvable, targets, skipped, nil
 }
 
 // execGuardBatchUpdate applies one resolution to the pre-classified ids and
@@ -3391,21 +3545,34 @@ func GuardResolveBatch(ctx context.Context, pool *pgxpool.Pool, ids []string, re
 		return nil, nil, fmt.Errorf("store: guard resolve batch: %d ids exceed the cap of %d", len(ids), guardResolveBatchMax)
 	}
 
-	valid, skipped := dedupeGuardBatchIDs(ids)
+	valid, invalid := dedupeGuardBatchIDs(ids)
 	resolved := make([]Block, 0, len(valid))
 	if len(valid) == 0 {
-		return resolved, skipped, nil
+		return resolved, invalid, nil
 	}
 
-	if err := pgxdb.Write(ctx, pool, pgxdb.At("store: guard resolve batch"), func(tx pgx.Tx) error {
-		resolvable, sk, err := classifyGuardBatch(ctx, tx, valid, writeScopes, skipped)
-		skipped = sk
+	// An archive ends the supersedes of every block it archives: the targets
+	// of their supersedes links are reconciled in the same transaction, as
+	// DeleteBlock's are (issue #284). The lock pass may ask for a re-run
+	// (writeSupersedesSource), which starts over from the id list.
+	archive := resolution == "archive"
+	var skipped []GuardSkip
+	if err := writeSupersedesSource(ctx, pool, pgxdb.At("store: guard resolve batch"), func(tx pgx.Tx) error {
+		resolvable, targets, sk, err := classifyGuardBatch(ctx, tx, valid, writeScopes, slices.Clone(invalid), archive)
 		if err != nil {
 			return err
 		}
-		if len(resolvable) > 0 {
-			if resolved, err = execGuardBatchUpdate(ctx, tx, resolvable, writeScopes, resolution); err != nil {
-				return err
+		skipped = sk
+		resolved = resolved[:0]
+		if len(resolvable) == 0 {
+			return nil
+		}
+		if resolved, err = execGuardBatchUpdate(ctx, tx, resolvable, writeScopes, resolution); err != nil {
+			return err
+		}
+		if archive {
+			if _, err := ReconcileSupersedesTargets(ctx, tx, targets, ""); err != nil {
+				return fmt.Errorf("store: guard resolve batch: %w", err)
 			}
 		}
 		return nil

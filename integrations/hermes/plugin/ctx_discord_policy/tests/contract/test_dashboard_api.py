@@ -153,23 +153,25 @@ def test_a_disabled_plugin_answers_not_found(dash):
 
 def test_the_plugin_host_admission_is_checked_by_the_router_itself(dash, tmp_path):
     """M11: in a plugin-host child the router runs on a bare FastAPI app without Hermes' middleware."""
-    from hermes_cli.plugin_host import PluginHost
+    from hermes_cli.plugins import PluginManager
 
     host_home = tmp_path / "host-home"
     host_home.mkdir()
-    host = PluginHost(SimpleNamespace(home_path=host_home, _plugins={}))
+    # The host comes from a real plugin manager through the manager's own factory (``_plugin_host()``, which
+    # Hermes' hosted mounts call on ``get_plugin_manager()``): host and manager are of the same Hermes, so every
+    # attribute the host reads of its manager is there.
+    host = PluginManager(scope_key=str(host_home))._plugin_host()
     args = (PLUGIN, str(dash.plugin_dir / "dashboard"), "plugin_api.py", "GET", "/v1/meta", "",
             [("Accept", "application/json")], b"")
     try:
         refused = host.asgi_request(*args, authenticated=False)
         admitted = host.asgi_request(*args, authenticated=True)
     finally:
-        try:
-            host.stop()
-        except Exception:
-            pass
+        host.shutdown()
     assert refused["status"] == 401, refused
+    assert json.loads(refused["body"])["error"]["code"] == "unauthorized", refused     # the plugin's own refusal
     assert admitted["status"] == 200, admitted
+    assert json.loads(admitted["body"])["process"] == "plugin_host", admitted          # served in the child
     _report(dash, "dashboard-plugin-host", {"refused": refused["status"], "admitted": admitted["status"]})
 
 
