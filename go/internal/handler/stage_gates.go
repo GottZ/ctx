@@ -482,11 +482,17 @@ func retypeBoundReject(err error) *writeReject {
 
 // updateFailureReject is the refusal of a failed store.UpdateBlock on every
 // update surface (REST manage update, the MCP update tool, the confirm of a
-// staged update): the I7/S3 sentinel, an identity collision (#227) or a
-// re-type of a comment or an issue (#280). nil = an unexpected fault.
+// staged update): the I7/S3 sentinel, an identity collision (#227), a
+// re-type of a comment or an issue (#280), a sensitivity downgrade without
+// its confirm decided under the row lock (#547) or a write conflict (#547,
+// through provenanceRejectOr). nil = an unexpected fault.
 func updateFailureReject(err error) *writeReject {
 	if rej := retypeBoundReject(err); rej != nil {
 		return rej
+	}
+	var downgrade *store.SensitivityDowngradeError
+	if errors.As(err, &downgrade) {
+		return sensitivityDowngradeReject(downgrade.From, downgrade.To)
 	}
 	if rej := contentEditReject(err); rej != nil {
 		return rej

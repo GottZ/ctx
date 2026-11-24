@@ -15,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/backends"
 )
 
 // readBatchUpdateTargets reads, without a lock, the identity each update
@@ -111,16 +113,18 @@ func (u *blockUpdate) pinSQL() string {
 // a scope whose supersedes lock the batch holds (held: the scope it read for
 // the item, and the one an earlier run found the block in). In the same statement the row is compared with what the update
 // writes (changedSQL): an update that changes nothing is the item's no-op.
-// Edits resolve on the content of the held row first (the content read with
-// the lock, the comparison a statement after it). A scope move then locks the
+// Edits resolve on the content of the held row first, and a sensitivity's
+// downgrade guard decides on its level (sensitivityPlan, issue #547) — read
+// with the lock, the comparison a statement after it. A scope move then locks the
 // targets of the block's supersedes links, in id order, so the reconcile after
 // its sweep waits for no row lock (lockSupersedesSource's discipline).
 func lockBatchUpdate(ctx context.Context, tx pgx.Tx, u *blockUpdate, held []string) (batchHold, error) {
-	var rowID, content string
+	var rowID, content, sens string
 	var ident batchIdentity
 	var changed bool
 	var err error
-	if u.edits == nil {
+	deferred := u.edits != nil || u.sens != nil // decided on the held row, compared after
+	if !deferred {
 		args := append(slices.Clone(u.args), held)
 		err = tx.QueryRow(ctx, fmt.Sprintf(
 			`SELECT id::text, scope, category, title, %s FROM context_blocks
@@ -136,10 +140,10 @@ func lockBatchUpdate(ctx context.Context, tx pgx.Tx, u *blockUpdate, held []stri
 			pin = " AND updated_at = $4"
 		}
 		err = tx.QueryRow(ctx,
-			`SELECT id::text, scope, category, title, content FROM context_blocks
+			`SELECT id::text, scope, category, title, content, sensitivity FROM context_blocks
 			  WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived AND `+notDerivedSQL+pin+` AND scope = ANY($3::text[])
 			  FOR NO KEY UPDATE`, args...,
-		).Scan(&rowID, &ident.scope, &ident.category, &ident.title, &content)
+		).Scan(&rowID, &ident.scope, &ident.category, &ident.title, &content, &sens)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return batchHold{}, batchUpdateMiss(ctx, tx, u, held)
@@ -153,6 +157,13 @@ func lockBatchUpdate(ctx context.Context, tx pgx.Tx, u *blockUpdate, held []stri
 			return batchHold{}, editErr
 		}
 		u.args[u.contentArg], u.args[u.contentArg+1] = edited, times
+	}
+	if u.sens != nil {
+		if err := u.sens.decide(backends.Sensitivity(sens), u.args); err != nil {
+			return batchHold{}, err
+		}
+	}
+	if deferred {
 		if err := tx.QueryRow(ctx, fmt.Sprintf(
 			`SELECT %s FROM context_blocks WHERE id = $%d AND scope = ANY($%d::text[])%s`,
 			u.changedSQL(), u.idIdx, u.scopeIdx, u.pinSQL()), u.args...).Scan(&changed); err != nil {
