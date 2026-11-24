@@ -325,7 +325,7 @@ services:
       CTX_LLMLOG_RETENTION_DAYS: ${CTX_LLMLOG_RETENTION_DAYS:-}
       # Days the six-hour janitor keeps context_write_log rows (guard and dream
       # audit) before it deletes them in batches. 0 (default) = keep every row;
-      # otherwise at least 2 (the daily report reads the last 24 h).
+      # otherwise 2 to 36500 (the daily report reads the last 24 h).
       CTX_WRITELOG_RETENTION_DAYS: ${CTX_WRITELOG_RETENTION_DAYS:-}
       # Seconds between block-counter reconcile passes (stats / guard-stats /
       # list-categories numbers recounted per scope, drift corrected and
