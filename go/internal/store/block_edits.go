@@ -278,21 +278,27 @@ func applyEditsAndDates(content string, edits []ContentEdit) (string, []time.Tim
 // guard_checked_at strip of a content write and the sensitivity_audit of a
 // confirmed downgrade compose into a single expression.
 //
+// The caller's document and merge carry no guard_ key (stripGuardKeys, issue
+// #238): the replacement keeps the stored guard keys on top
+// (keptGuardKeysSQL), the merge does not name them, so an update neither sets
+// nor removes one — whether the content changes or not. A content write still
+// drops guard_checked_at, which puts the block up for a check of its new
+// vector.
+//
 // The merge (issue #406) reads the column of the row the statement locked:
 // (stored || set) - removed. A NULL metadata merges as {}.
 func updateMetadataExpr(data UpdateBlockData, contentSent bool, args []any) (string, []any) {
 	metaExpr := ""
 	switch {
 	case data.Metadata != nil:
+		metaExpr = keptGuardKeysSQL("metadata", fmt.Sprintf("$%d::jsonb", len(args)+1))
 		if contentSent {
-			// Merge provided metadata AND strip guard_checked_at in one expression.
-			metaExpr = fmt.Sprintf("$%d::jsonb - 'guard_checked_at'", len(args)+1)
-		} else {
-			metaExpr = fmt.Sprintf("$%d::jsonb", len(args)+1)
+			// The replacement AND the guard_checked_at strip in one expression.
+			metaExpr += " - 'guard_checked_at'"
 		}
-		args = append(args, data.Metadata)
+		args = append(args, stripGuardKeys(data.Metadata))
 	case data.MetadataMerge != nil:
-		set, drop := splitMetadataMerge(data.MetadataMerge)
+		set, drop := splitMetadataMerge(stripGuardKeys(data.MetadataMerge))
 		metaExpr = fmt.Sprintf("(COALESCE(metadata, '{}'::jsonb) || $%d::jsonb) - $%d::text[]", len(args)+1, len(args)+2)
 		args = append(args, set, drop)
 		if contentSent {

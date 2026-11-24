@@ -409,6 +409,53 @@ func guardVerdictSQL(doc string) string {
 		ELSE '{}'::jsonb END`
 }
 
+// guardKeyPrefix is the prefix of the duplicate guard's metadata keys: the
+// verdict applyDecision writes (guard_status, guard_checked_at,
+// guard_similarity, guard_matched_id, guard_is_cross_scope, the thresholds),
+// the trace GuardResolve writes (guard_resolution, guard_resolved_at) and the
+// repair marks of M121/M156/M157 (guard_repair). guardVerdictSQL selects the
+// same keys.
+const guardKeyPrefix = "guard_"
+
+// stripGuardKeys returns m without the keys that carry guardKeyPrefix — the
+// metadata a client write may store (issue #238). The guard, guard-resolve and
+// the repair migrations write these keys with statements of their own; every
+// writer of a caller's metadata document drops them from it: the upsert paths
+// (prepareUpsert, identicalContentCompare), UpdateBlock (updateMetadataExpr),
+// InsertChunk and the issue domain's three writers. A caller that sends a
+// document it read (get, then update) sends the guard's keys back; they are
+// dropped, not refused, and the stored ones stay (keptGuardKeysSQL), so such a
+// write keeps working and changes nothing of them.
+//
+// A copy, never an edit of the caller's map; m itself when it carries no such
+// key, and nil stays nil.
+func stripGuardKeys(m map[string]any) map[string]any {
+	for k := range m {
+		if !strings.HasPrefix(k, guardKeyPrefix) {
+			continue
+		}
+		out := make(map[string]any, len(m))
+		for k, v := range m {
+			if !strings.HasPrefix(k, guardKeyPrefix) {
+				out[k] = v
+			}
+		}
+		return out
+	}
+	return m
+}
+
+// keptGuardKeysSQL is the metadata a client write stores in place of the
+// document stored: incoming, which carries no guard key (stripGuardKeys), with
+// the stored guard keys on top (guardVerdictSQL). Without them a write that
+// replaces the document would remove the guard's verdict and a person's
+// guard-resolve trace, which a caller cannot write back either. stored is a
+// column reference and incoming an already-typed jsonb expression; both are
+// code-owned SQL text.
+func keptGuardKeysSQL(stored, incoming string) string {
+	return `(` + incoming + ` || ` + guardVerdictSQL(stored) + `)`
+}
+
 // identicalMetadataSQL is the metadata an upsert writes when the stored
 // content is IDENTICAL to the incoming one (issue #64): the incoming document,
 // minus guard_checked_at, MERGED into the stored one, with the stored guard
@@ -569,6 +616,7 @@ func identicalContentCompare(content, scope, category, title string,
 		tags = []string{}
 	}
 	sens, md, _ := ApplyWriteDetector(content, sens, maps.Clone(metadata))
+	md = stripGuardKeys(md)
 	if md == nil {
 		md = map[string]any{}
 	}
@@ -917,20 +965,14 @@ func prepareUpsert(category, title, content string, tags []string, metadata map[
 	// single metadata key.
 	sens, metadata, _ = ApplyWriteDetector(content, sens, metadata)
 
-	// Reserved metadata keys are stripped from caller-supplied metadata on
-	// BOTH upsert paths (Wissens-Ebenen V-W3, design/05 §2.2 row S3): today
-	// exactly `guard_checked_at`, in the same expression form UpdateBlock
-	// already uses (:715-732). guardPendingWhere (guard/guard.go:65-70) takes
-	// a block out of the guard batch as soon as that key is non-NULL — an
-	// unfiltered write-through would let any client, and every future derived
-	// writer (they all go through UpsertBlock), silently remove its own block
-	// from the duplicate check. Fail-open.
-	//
-	// The INSERT value carries the strip because a fresh block takes the
-	// INSERT branch and never sees the ON CONFLICT clause. EXCLUDED.metadata
-	// is the already-evaluated insert value, so the conflict clause's strip is
-	// belt-and-braces: it keeps the invariant local to the assignment that
-	// actually writes the conflicting row.
+	// The duplicate guard's keys are dropped from caller-supplied metadata on
+	// BOTH upsert paths (stripGuardKeys; Wissens-Ebenen V-W3 dropped
+	// guard_checked_at alone, issue #238 every guard_ key):
+	// guardPendingWhere (guard/guard.go) takes a block out of the guard batch
+	// as soon as guard_checked_at is non-NULL, and the other keys are the
+	// verdict the review queue's readers order and age the scope's flagged
+	// blocks by. No server writer sends one through here: the guard writes its
+	// verdict with a statement of its own.
 	//
 	// On a conflict whose content is IDENTICAL the metadata is merged, not
 	// replaced, and the stored guard verdict wins (identicalMetadataSQL, issue
@@ -940,9 +982,12 @@ func prepareUpsert(category, title, content string, tags []string, metadata map[
 	// clause routinely. `context_blocks.content` in a SET expression is the
 	// stored row's value, whatever the content assignment next to it says. A
 	// content change keeps the replace below: the annotations then describe a
-	// content that is gone, and the next guard batch re-checks the new vector.
+	// content that is gone. The stored guard keys stay (keptGuardKeysSQL), as
+	// on every client write, but guard_checked_at: the next guard batch
+	// re-checks the new vector, and its verdict replaces the keys it writes.
+	metadata = stripGuardKeys(metadata)
 	insertCols := "category, tags, title, content, metadata, scope"
-	insertVals := "$1, $2, $3, $4, $5::jsonb - 'guard_checked_at', $6"
+	insertVals := "$1, $2, $3, $4, $5::jsonb, $6"
 	args := []any{category, tags, title, content, metadata, scope}
 
 	setClauses := []string{
@@ -950,7 +995,7 @@ func prepareUpsert(category, title, content string, tags []string, metadata map[
 		"tags = EXCLUDED.tags",
 		"metadata = CASE WHEN context_blocks.content = EXCLUDED.content THEN " +
 			identicalMetadataSQL("context_blocks.metadata", "EXCLUDED.metadata") +
-			" ELSE EXCLUDED.metadata - 'guard_checked_at' END",
+			" ELSE " + keptGuardKeysSQL("context_blocks.metadata", "EXCLUDED.metadata") + " - 'guard_checked_at' END",
 		"updated_at = now()",
 	}
 	if scopeExplicit {
@@ -3008,15 +3053,57 @@ func AttributeAccessBlob(ctx context.Context, pool *pgxpool.Pool, logID, blobID 
 	return nil
 }
 
+// guardListOrderSQL is the guard list's order key: the guard's similarity,
+// read once per row. The value is metadata, and a row written before the
+// write path kept the guard's keys to the guard (stripGuardKeys, issue #238)
+// can hold any JSON a caller sent, so the cast sits behind pg_input_is_valid:
+// a value that is no number is NULL and sorts last, like a missing one,
+// instead of failing the statement — which the list answered with no rows for
+// every reader of the scope. The sort evaluates the key for every row of the
+// read scopes, not only for the rows it returns, so the key is read in a
+// sub-select whose inner select carries OFFSET 0: once per row, as the bare
+// cast before it read it, and not once for the test and once for the cast.
+const guardListOrderSQL = `(SELECT CASE WHEN pg_input_is_valid(s.v, 'numeric') THEN s.v::numeric END
+		  FROM (SELECT b.metadata->>'guard_similarity' AS v OFFSET 0) AS s)`
+
 // GuardList returns flagged blocks for guard review. types is an optional
 // server-side type_name filter (bind parameter, WF-T10 line — never a client
 // filter over paginated lists at target scale).
+//
+// The order is the guard's similarity, highest first (guardListOrderSQL). A
+// fault that still ends the statement is returned (rows.Err), not an empty
+// list.
 func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, category, status string, types []string, limit int) ([]GuardListItem, error) {
 	if err := RequireScopes(readScopes); err != nil { // T07 fail-closed (design/01 §5.4)
 		return nil, err
 	}
-	limit = ClampLimit(limit, 50, 200)
+	query, args := guardListQuery(readScopes, category, status, types, ClampLimit(limit, 50, 200))
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: guard list: %w", err)
+	}
+	defer rows.Close()
 
+	results := make([]GuardListItem, 0)
+	for rows.Next() {
+		var item GuardListItem
+		if err := rows.Scan(
+			&item.ID, &item.Title, &item.Category, &item.Scope, &item.Type, &item.GuardStatus,
+			&item.Similarity, &item.MatchedID, &item.MatchedTitle,
+			&item.CheckedAt, &item.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("store: guard list scan: %w", err)
+		}
+		results = append(results, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: guard list: %w", err)
+	}
+	return results, nil
+}
+
+// guardListQuery is GuardList's statement and its arguments.
+func guardListQuery(readScopes []string, category, status string, types []string, limit int) (string, []any) {
 	whereClauses := []string{
 		"NOT b.is_archived",
 		"b.scope = ANY($1::text[])",
@@ -3071,30 +3158,11 @@ func GuardList(ctx context.Context, pool *pgxpool.Pool, readScopes []string, cat
 	FROM context_blocks b
 	LEFT JOIN context_blocks mb ON mb.id::text = b.metadata->>'guard_matched_id'
 	WHERE %s
-	ORDER BY (b.metadata->>'guard_similarity')::numeric DESC NULLS LAST
+	ORDER BY `+guardListOrderSQL+` DESC NULLS LAST
 	LIMIT $%d`,
 		scopeCheckIdx, scopeCheckIdx, whereClause, limitIdx,
 	)
-
-	rows, err := pool.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("store: guard list: %w", err)
-	}
-	defer rows.Close()
-
-	results := make([]GuardListItem, 0)
-	for rows.Next() {
-		var item GuardListItem
-		if err := rows.Scan(
-			&item.ID, &item.Title, &item.Category, &item.Scope, &item.Type, &item.GuardStatus,
-			&item.Similarity, &item.MatchedID, &item.MatchedTitle,
-			&item.CheckedAt, &item.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("store: guard list scan: %w", err)
-		}
-		results = append(results, item)
-	}
-	return results, nil
+	return query, args
 }
 
 // guardStatsSQL is GetGuardStats' statement. The block numbers are sums over

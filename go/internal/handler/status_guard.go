@@ -50,17 +50,16 @@ const guardGenSlowBuildMs = 250
 // tenant see do not change; only their lifetime does.
 //
 // The fourth aggregate is the queue's aging signal: the oldest FLAG time over
-// the set (guard.FlaggedAtSQL). A guard pass does not move updated_at, so the
-// time a block was flagged is read from metadata.guard_checked_at, with
+// the set (flagged_at of guard.FlaggedSQL, which also carries the set's
+// predicate). A guard pass does not move updated_at, so the time a block was
+// flagged is read from metadata.guard_checked_at, once per row, with
 // updated_at as the fallback for a row that carries no readable one.
-const guardGenRollupSQL = `SELECT scope, GROUPING(scope) AS is_total,
+var guardGenRollupSQL = `SELECT scope, GROUPING(scope) AS is_total,
 		(count(*) FILTER (WHERE guard_status = 'needs_review'))::int,
 		(count(*) FILTER (WHERE guard_status = 'near_duplicate'))::int,
 		(count(*) FILTER (WHERE guard_status = 'possible_duplicate'))::int,
-		min(` + guard.FlaggedAtSQL + `)
-	FROM context_blocks
-	WHERE NOT is_archived
-	  AND guard_status IN ('needs_review', 'near_duplicate', 'possible_duplicate')
+		min(flagged_at)
+	FROM ` + guard.FlaggedSQL("") + ` AS f
 	GROUP BY ROLLUP (scope)`
 
 // guardGenScopesSQL loads the scope UNIVERSE in the same refresh. Without it a

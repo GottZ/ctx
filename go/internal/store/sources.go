@@ -48,6 +48,9 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 		metadata = map[string]any{}
 	}
 	sens, metadata, _ := ApplyWriteDetector(content, SensitivityWrite{}, metadata)
+	// The guard's keys are not the caller's (stripGuardKeys, issue #238); a
+	// rewrite of the chunk keeps the stored ones (keptGuardKeysSQL).
+	metadata = stripGuardKeys(metadata)
 
 	insertCols := "category, tags, title, content, metadata, scope, source_id, chunk_index, lifecycle_state"
 	selectVals := "$1::text, $2::text[], $3::text, $4::text, $5::jsonb, $6::text, $7::uuid, $8::int, 'chunk'"
@@ -57,7 +60,7 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 		"tags = EXCLUDED.tags",
 		"title = EXCLUDED.title",
 		"content = EXCLUDED.content",
-		"metadata = EXCLUDED.metadata",
+		"metadata = " + keptGuardKeysSQL("context_blocks.metadata", "EXCLUDED.metadata"),
 		"updated_at = now()",
 	}
 	if sens.Detector {

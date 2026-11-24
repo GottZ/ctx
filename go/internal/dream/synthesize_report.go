@@ -582,26 +582,28 @@ func fetchDailyStructuralLinks(ctx context.Context, pool *pgxpool.Pool, scope st
 	return out, rows.Err()
 }
 
+// dailyGuardReviewSQL is fetchDailyGuardReview's statement ($1 = the report
+// scope): the flagged set and its flag time come from guard.FlaggedSQL, the
+// derived table the /api/status rollup reads too.
+var dailyGuardReviewSQL = `SELECT
+		(count(*) FILTER (WHERE guard_status = 'needs_review'))::int,
+		(count(*) FILTER (WHERE guard_status = 'near_duplicate'))::int,
+		(count(*) FILTER (WHERE guard_status = 'possible_duplicate'))::int,
+		min(flagged_at)
+	 FROM ` + guard.FlaggedSQL(" AND scope = $1") + ` AS f`
+
 // fetchDailyGuardReview reads the open guard review-queue STAND for the report
 // scope (guard W2): flagged counts per state + queue-head age in whole days,
 // measured against the window end. The age counts from the time the guard
-// flagged the block (guard.FlaggedAtSQL), not from the block's last write: a
-// guard pass does not move updated_at. Single-scope (GD3 line — deliberately NOT
-// store.GetGuardStats, whose ReadScopes-array semantics belong to the manage
-// pull path). Returns nil when the queue is empty, so an empty queue keeps the
-// prompt bytes identical (omission semantics).
+// flagged the block (flagged_at of guard.FlaggedSQL), not from the block's last
+// write: a guard pass does not move updated_at. Single-scope (GD3 line —
+// deliberately NOT store.GetGuardStats, whose ReadScopes-array semantics belong
+// to the manage pull path). Returns nil when the queue is empty, so an empty
+// queue keeps the prompt bytes identical (omission semantics).
 func fetchDailyGuardReview(ctx context.Context, pool *pgxpool.Pool, scope string, asOf time.Time) (*dailyGuardStat, error) {
 	g := &dailyGuardStat{}
 	var oldest *time.Time
-	err := pool.QueryRow(ctx,
-		`SELECT
-			(count(*) FILTER (WHERE guard_status = 'needs_review'))::int,
-			(count(*) FILTER (WHERE guard_status = 'near_duplicate'))::int,
-			(count(*) FILTER (WHERE guard_status = 'possible_duplicate'))::int,
-			min(`+guard.FlaggedAtSQL+`)
-		 FROM context_blocks
-		 WHERE scope = $1 AND NOT is_archived
-		   AND guard_status IN ('needs_review', 'near_duplicate', 'possible_duplicate')`,
+	err := pool.QueryRow(ctx, dailyGuardReviewSQL,
 		scope,
 	).Scan(&g.NeedsReview, &g.NearDuplicate, &g.PossibleDuplicate, &oldest)
 	if err != nil {
