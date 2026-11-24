@@ -525,11 +525,12 @@ func drainBatched(ctx context.Context, pool *pgxpool.Pool, sql string, args ...a
 	}
 }
 
-// pruneScopeDeletes lists the scope-carried data tables to drain, IN FK ORDER.
-// Each statement is fully static (no string interpolation → no gosec G201). $1 =
-// the tenant's scopes (text[]), $2 = the batch limit. The ctid sub-select is the
-// table-agnostic "DELETE a bounded slice" idiom (works for context_dream_links,
-// whose PK is composite). ORDER IS LOAD-BEARING:
+// pruneScopeDeletes lists the scope-carried data tables drained after the
+// dream links and the blocks (pruneScopeBlocks), IN FK ORDER. Each statement
+// is fully static (no string interpolation → no gosec G201). $1 = the
+// tenant's scopes (text[]), $2 = the batch limit. The ctid sub-select is the
+// table-agnostic "DELETE a bounded slice" idiom (pruneLinksSQL uses it for
+// context_dream_links, whose PK is composite). ORDER IS LOAD-BEARING:
 //
 //	context_dream_links FIRST — {source,target}_block_id → context_blocks is
 //	NO ACTION (016:18-19), so the links must go before the blocks they reference
@@ -561,8 +562,6 @@ func drainBatched(ctx context.Context, pool *pgxpool.Pool, sql string, args ...a
 // to a 300 000-row write log; since 172 every FK on context_blocks has a serving
 // index, pinned by TestBlockForeignKeysHaveAServingIndex.)
 var pruneScopeDeletes = []struct{ table, sql string }{
-	{"context_dream_links", `DELETE FROM context_dream_links WHERE ctid IN (SELECT ctid FROM context_dream_links WHERE scope = ANY($1) LIMIT $2)`},
-	{"context_blocks", `DELETE FROM context_blocks WHERE ctid IN (SELECT ctid FROM context_blocks WHERE scope = ANY($1) LIMIT $2)`},
 	{"context_blobs", `DELETE FROM context_blobs WHERE ctid IN (SELECT ctid FROM context_blobs WHERE scope = ANY($1) LIMIT $2)`},
 	{"context_sources", `DELETE FROM context_sources WHERE ctid IN (SELECT ctid FROM context_sources WHERE scope = ANY($1) LIMIT $2)`},
 	{"context_chat_sessions", `DELETE FROM context_chat_sessions WHERE ctid IN (SELECT ctid FROM context_chat_sessions WHERE scope = ANY($1) LIMIT $2)`},
@@ -612,6 +611,19 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 // scope '_global': server-admin-only history of a tenant-admin's grants) — so
 // they are deleted first, in a statement of their own, under the same lock.
 //
+// LOCKS (issue #547): the dream links and the blocks go per scope, in sorted
+// scope order, each batch in a transaction that takes the scope's supersedes
+// lock exclusively first (pruneScopeBlocks), as a scope purge batch does —
+// every other path that deletes, archives or moves blocks of a scope, writes
+// its supersedes links or locks several of its blocks takes that lock, so a
+// batch runs alone in its scope against them and holds no row any of them
+// waits for while it waits for one of theirs. Without it a declaration (its
+// source, then its target), a block batch (its identity rows in order) and a
+// dream link batch (each link's ends, link by link) met the prune's delete in
+// a lock cycle (40P01) — the prune lost and left the tenant half pruned. A
+// batch holds one scope lock, never two, so no order among scope locks is
+// needed; it holds it for one batch of at most pruneBatchSize rows.
+//
 // STAGED WRITES (issue #277): step 7 deletes the staged writes of the keys
 // it deletes (context_pending_writes, which hold block content), right after
 // them and in the same transaction; every writer of a stage holds its key
@@ -636,9 +648,14 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 	if err != nil {
 		return fmt.Errorf("store: prune tenant scopes: %w", err)
 	}
-	// 1-5: drain the scope-carried tables in FK order (skip if the tenant owns no
-	// scope — nothing scope-discriminated can belong to it then).
+	// 1-2: the dream links and the blocks, per scope and batch under the
+	// scope's supersedes lock (pruneScopeBlocks); 3-5: the other scope-carried
+	// tables in FK order (skip if the tenant owns no scope — nothing
+	// scope-discriminated can belong to it then).
 	if len(scopes) > 0 {
+		if err := pruneScopeBlocks(ctx, pool, scopes); err != nil {
+			return err
+		}
 		for _, d := range pruneScopeDeletes {
 			if _, err := drainBatched(ctx, pool, d.sql, scopes, pruneBatchSize); err != nil {
 				return fmt.Errorf("store: prune %s: %w", d.table, err)
