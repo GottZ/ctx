@@ -281,8 +281,9 @@ func batchIdentityClash(items []BatchUpsert, holds []batchHold) error {
 // order, after every item is written: a ParentItem names the block the earlier
 // item wrote (or, for an item that changed nothing, the block it matched).
 // The link is the one of /api/store (LinkBlockParent), so a refusal is its
-// ErrLinkScopeViolation, named by the item.
-func linkBatchParents(ctx context.Context, tx pgx.Tx, items []BatchUpsert, results []BatchResult) error {
+// ErrLinkScopeViolation, named by the item; held are the scopes whose locks
+// the batch holds (a chain beyond them runs the batch again with them).
+func linkBatchParents(ctx context.Context, tx pgx.Tx, items []BatchUpsert, results []BatchResult, held []string) error {
 	for i, it := range items {
 		if it.Update != nil || (it.ParentID == "" && it.ParentItem == nil) {
 			continue
@@ -295,7 +296,7 @@ func linkBatchParents(ctx context.Context, tx pgx.Tx, items []BatchUpsert, resul
 				parent = r.Block.ID
 			}
 		}
-		if err := LinkBlockParent(ctx, tx, results[i].Block.ID, parent, it.Scope); err != nil {
+		if err := LinkBlockParent(ctx, tx, results[i].Block.ID, parent, it.Scope, held); err != nil {
 			return &BatchItemError{Index: i, Err: err}
 		}
 	}

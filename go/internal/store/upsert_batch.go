@@ -397,7 +397,7 @@ func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep ba
 		}
 		results[i].Block = b
 	}
-	if err := linkBatchParents(ctx, tx, items, results); err != nil {
+	if err := linkBatchParents(ctx, tx, items, results, held); err != nil {
 		return nil, err
 	}
 	return results, nil
