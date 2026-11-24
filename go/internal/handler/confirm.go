@@ -121,7 +121,7 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 		writeJSONReject(w, out.Reject)
 	case confirmTOCTOUGone:
 		// 409: the stage is intact but the world moved — re-read and re-stage.
-		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": confirmTOCTOUGoneMsg(out.Op)})
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": out.Item+confirmTOCTOUGoneMsg(out.Op)})
 	case confirmTOCTOUDrift, confirmExecDrift:
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": out.driftMsg()})
 	case confirmBlockRefGone:
@@ -142,7 +142,7 @@ func (h *ConfirmHandler) HandleConfirm(w http.ResponseWriter, r *http.Request) {
 		})
 	case confirmExecGone:
 		noun := confirmBlockOpNoun(out.Op)
-		gone := fmt.Sprintf("confirmed %s failed to execute — block no longer accessible; the stage token is consumed; re-stage the %s", noun, noun)
+		gone := out.Item + fmt.Sprintf("confirmed %s failed to execute — block no longer accessible; the stage token is consumed; re-stage the %s", noun, noun)
 		if out.Op == store.OpBlobLink {
 			gone = "confirmed blob_link failed to execute — blob no longer accessible; the stage token is consumed; re-stage the link"
 		}

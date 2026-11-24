@@ -1,13 +1,16 @@
-// All-or-none block batches (issue #211): several store writes applied in ONE
-// transaction, so a client whose logical record is several blocks — a record
-// and the index block that points at it, a correction and the block it
-// supersedes — never leaves the store holding a prefix of them.
+// All-or-none block batches (issue #211): several store writes and block
+// updates applied in ONE transaction, so a client whose logical record is
+// several blocks — a record and the index block that points at it, a
+// correction and the block it supersedes — never leaves the store holding a
+// prefix of them.
 //
 // The batch is built from the in-transaction halves the single writes already
-// run (prepareUpsert/exec, execDeclaring), not from a copy of them: every rule
-// UpsertBlock and UpsertBlockSupersedes apply inside their transaction — the
+// run (prepareUpsert/exec, execDeclaring, prepareUpdate/execHeld,
+// LinkBlockParent), not from a copy of them: every rule UpsertBlock,
+// UpsertBlockSupersedes and UpdateBlock apply inside their transaction — the
 // identity row lock, the I7/S3 provenance gate, the stale-vector clear, the
-// supersedes gates and declaration — applies to each item here unchanged.
+// supersedes gates and declaration, the guard-key protection, the edits on the
+// held row, the scope move's sweep — applies to each item here unchanged.
 package store
 
 import (
@@ -27,7 +30,9 @@ import (
 
 // BatchUpsert is one item of UpsertBlocks: the arguments of UpsertBlock, plus
 // the block the write declares to supersede ("" = none), which makes the item
-// UpsertBlockSupersedes' write.
+// UpsertBlockSupersedes' write, and the parent the written block hangs under.
+// With Update set the item is an update of an existing block by id instead,
+// and every other field is unused (issue #211).
 type BatchUpsert struct {
 	Category, Title, Content string
 	Tags                     []string
@@ -37,14 +42,62 @@ type BatchUpsert struct {
 	Sens                     SensitivityWrite
 	TypeName                 string
 	Supersedes               string
+	// ParentID hangs the written block under an existing block, the
+	// /api/store parent_id: a full uuid of a live block in the item's scope,
+	// not the item's own identity (lockBatchParent), not closing a parent
+	// cycle (LinkBlockParent). "" = none.
+	ParentID string
+	// ParentItem hangs the written block under the block an EARLIER item of
+	// the same batch writes, by that item's index in the list — the one parent
+	// a client cannot name by id before the batch ran. nil = none. A reference
+	// to the item itself or a later one is refused (ErrBatchParentItem): every
+	// link points backwards in the list, so the batch's own links cannot form
+	// a cycle among its items.
+	ParentItem *int
+	// Update makes the item an update of an existing block by id, the update
+	// form (UpdateBlock's arguments); nil for an upsert.
+	Update *BatchUpdate
+}
+
+// BatchUpdate is an update item of UpsertBlocks: UpdateBlock's arguments.
+type BatchUpdate struct {
+	ID          string
+	Data        UpdateBlockData
+	WriteScopes []string
+}
+
+// ErrBatchParentItem refuses a ParentItem that does not name an earlier item
+// of the batch, and a parent on an update item (UpdateBlock carries none).
+var ErrBatchParentItem = errors.New("store: block batch: parent_item must name an earlier item of the batch")
+
+// BatchSameBlockError refuses the later of two items of one batch that would
+// write one block: the same row (two update items of one id, a store item
+// whose identity is an update item's row) or, with Identity, the same
+// (category, title, scope) after the batch (an update item renamed or moved
+// onto the identity a store item or another update item writes). First is the
+// earlier item's index. Which of the two the block would keep would depend on
+// the order the batch writes in, so neither is written.
+type BatchSameBlockError struct {
+	First    int
+	Identity bool
+}
+
+func (e *BatchSameBlockError) Error() string {
+	if e.Identity {
+		return fmt.Sprintf("store: block batch: same category, title and scope as items[%d]", e.First)
+	}
+	return fmt.Sprintf("store: block batch: same block as items[%d]", e.First)
 }
 
 // BatchItemError is the refusal or failure of one item of UpsertBlocks. Index
-// is the item's position in the caller's list, Err what UpsertBlock or
-// UpsertBlockSupersedes would have returned for that item alone
+// is the item's position in the caller's list, Err what UpsertBlock,
+// UpsertBlockSupersedes or UpdateBlock would have returned for that item alone
 // (ErrProvenanceProtected, ErrRetypeBound, ErrSupersedesTarget,
-// *SupersedesConflictError, or a fault), reachable through errors.Is/As. The
-// whole batch is rolled back: no item of it is written.
+// *SupersedesConflictError, *BlockIdentityTakenError, *ContentEditError,
+// ErrBlockChanged, ErrBlockNotFound for an update item whose block is not a
+// live block of its write scopes, ErrLinkScopeViolation for a parent, or a
+// fault), reachable through errors.Is/As. The whole batch is rolled back: no
+// item of it is written.
 type BatchItemError struct {
 	Index int
 	Err   error
@@ -64,8 +117,10 @@ type BatchResult struct {
 	// answer), made on its row while the transaction holds that row's lock:
 	// Match.Unchanged() is an item the batch did not write (Block nil, Match.ID
 	// the block it matches), Match.Changed() names what an identical-content
-	// write rewrote. Zero for an item that declares a supersedes — such a write
-	// is never a no-op, as on /api/store.
+	// write rewrote. Zero for an item that declares a supersedes or names a
+	// parent — such a write is never a no-op, as on /api/store. For an update
+	// item it is Unchanged() exactly when the update would change no column
+	// but updated_at (Block nil, Match.ID the block).
 	Match IdenticalContent
 }
 
@@ -74,20 +129,33 @@ type BatchResult struct {
 //
 // An item whose write would change nothing — the identical-content no-op of
 // /api/store (IdenticalContentMatch: content, tags, metadata, sensitivity,
-// type) — is not written. That is decided HERE, on the item's row while this
-// transaction holds its lock, not before the transaction: a decision taken on
-// a row nobody holds lets another writer change it in between, and the batch
-// would then write the rest of its items around a value it no longer matches
-// — a store holding part of this batch beside part of another, which no order
-// of the two batches produces (review of #389). The row of a no-op item stays
-// locked to the commit, so the value the batch reports unchanged is the value
-// it commits beside its writes.
+// type), or an update item whose every assignment already holds — is not
+// written. That is decided HERE, on the item's row while this transaction
+// holds its lock, not before the transaction: a decision taken on a row nobody
+// holds lets another writer change it in between, and the batch would then
+// write the rest of its items around a value it no longer matches — a store
+// holding part of this batch beside part of another, which no order of the two
+// batches produces (review of #389). The row of a no-op item stays locked to
+// the commit, so the value the batch reports unchanged is the value it commits
+// beside its writes.
 //
 // The caller has run the write gates of each item (the handler chain) and
-// passes items whose (category, title, scope) identities are pairwise distinct;
-// this layer trusts its caller for that as UpsertBlock does for sensitivity
-// levels and type names. apiKeyID and types are what a supersedes declaration
-// records and checks (SupersedesDeclaration).
+// passes store items whose (category, title, scope) identities are pairwise
+// distinct; this layer trusts its caller for that as UpsertBlock does for
+// sensitivity levels and type names. Two items that meet on one block anyway —
+// through a row an update item names by id, or an identity an update item
+// moves onto — are refused here (*BatchSameBlockError), because only the
+// transaction knows the rows. apiKeyID and types are what a supersedes
+// declaration records and checks (SupersedesDeclaration).
+//
+// An update item runs UpdateBlock's statement through UpdateBlock's
+// transaction half (execHeld) — the provenance exclusion, the guard-key
+// protection of its metadata, the identity collision, the re-type bound, the
+// edits on the held row, the ExpectUpdatedAt pin of a confirmed card, the
+// scope move's link sweep and supersedes reconcile, the vector invalidation —
+// after this batch's lock pass took its locks. A parent (ParentID,
+// ParentItem) is linked after every item is written, in list order, through
+// the one parent check of /api/store (LinkBlockParent).
 //
 // budget is the key's write budget, spent inside this transaction: checked
 // after the no-op decisions and before the first write, for the items that
@@ -96,7 +164,8 @@ type BatchResult struct {
 // refused), and booked, one 'write' row per written block, with the commit —
 // so a batch is never written without its booking, and never booked without
 // being written. nil books nothing: the confirm of a staged batch, which paid
-// at stage time (ReserveWriteIntents).
+// at stage time (ReserveWriteIntents), and a single /api/store with a parent,
+// which books as every single store does.
 //
 // Lock order, the same for every batch, so two batches never wait for each
 // other in opposite orders:
@@ -104,25 +173,35 @@ type BatchResult struct {
 //  1. the key's budget lock (WriteBudget, an advisory lock no row-lock holder
 //     takes), so two batches of one key count and book one after the other —
 //     on every ctxd instance of the database;
-//  2. the supersedes lock of every scope the batch names — written or not —
-//     EXCLUSIVE, in sorted scope order, before any row lock
-//     (LockSupersedesScope: "the lock is the FIRST its transaction takes" —
-//     the budget lock before it holds no row). A single upsert holds one block
-//     row and waits for nothing else while it holds it; a batch holds several
-//     and waits for the next one, so every other transaction that holds block
-//     rows and then waits for more would close a lock cycle with it. The
-//     exclusive lock keeps every holder of the scope's lock out for the
-//     batch's duration — dream link batches (they hold the key-share lock of
-//     every link endpoint they inserted and then wait for the next), archives
-//     and scope moves (lockSupersedesSource: a block and its targets in id
-//     order), declarations and the other batches of the scope. A scope without
-//     any supersedes item takes it as well, for exactly that reason;
-//  3. the items in (scope, category, title) order, every item: the identity
-//     row FOR NO KEY UPDATE (with the no-op comparison, lockBatchMatch), and for a
-//     supersedes item the target FOR NO KEY UPDATE after it
-//     (lockSupersedesPair). Only then are the writes made, in the same order;
-//     they wait for no row lock this pass did not take, except an identity
-//     another transaction is inserting right then (the unique index).
+//  2. the supersedes lock of every scope the batch names — written or not,
+//     an update item's current scope (read without a lock first,
+//     readBatchUpdateTargets) and the scope it moves to — EXCLUSIVE, in sorted
+//     scope order, before any row lock (LockSupersedesScope: "the lock is the
+//     FIRST its transaction takes" — the budget lock before it holds no row).
+//     A single upsert holds one block row and waits for nothing else while it
+//     holds it; a batch holds several and waits for the next one, so every
+//     other transaction that holds block rows and then waits for more would
+//     close a lock cycle with it. The exclusive lock keeps every holder of the
+//     scope's lock out for the batch's duration — dream link batches (they
+//     hold the key-share lock of every link endpoint they inserted and then
+//     wait for the next), archives and scope moves (lockSupersedesSource: a
+//     block and its targets in id order), declarations, guard-resolve batches
+//     and the other batches of the scope. A scope without any supersedes item
+//     takes it as well, for exactly that reason;
+//  3. the items in (scope, category, title) order — an update item by its
+//     current identity — every item: the identity row FOR NO KEY UPDATE (with
+//     the no-op comparison, lockBatchMatch), for a supersedes item the target
+//     FOR NO KEY UPDATE after it (lockSupersedesPair), for a parent named by
+//     id the parent FOR SHARE after it (lockBatchParent), for an update item
+//     its row by id within the scope read in step 2 (lockBatchUpdate) and, for
+//     a scope move, the targets of its supersedes links after it, in id order.
+//     Only then are the writes made, in the same order; they wait for no row
+//     lock this pass did not take, except an identity another transaction is
+//     inserting right then (the unique index).
+//
+// An update item whose block left the scope read in step 2 before the lock
+// pass reached it runs the whole transaction again (writeSupersedesSource):
+// the next read names the new scope, and its lock is taken in order.
 //
 // Paths that hold several block rows without the scope lock remain: the guard
 // run (its picked blocks FOR NO KEY UPDATE, then the key-share lock of a
@@ -136,16 +215,19 @@ type BatchResult struct {
 // in 40P01. A batch that meets a cycle anyway answers the error with nothing
 // written; all-or-none holds either way.
 func UpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, apiKeyID string, types *blocktype.Set, budget *WriteBudget) ([]BatchResult, error) {
+	prep, err := prepareBatch(items)
+	if err != nil {
+		return nil, err
+	}
 	var results []BatchResult
-	times := batchContentTimes(items)
-	err := pgxdb.Write(ctx, pool, pgxdb.At("store: upsert block batch"), func(tx pgx.Tx) error {
+	err = writeSupersedesSource(ctx, pool, pgxdb.At("store: upsert block batch"), func(tx pgx.Tx) error {
 		if budget != nil {
 			if err := budget.lock(ctx, tx); err != nil {
 				return err
 			}
 		}
 		var err error
-		if results, err = upsertBlocksTx(ctx, tx, items, times, apiKeyID, types, budget); err != nil {
+		if results, err = upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types, budget); err != nil {
 			return err
 		}
 		if budget == nil {
@@ -163,7 +245,13 @@ func UpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, 
 		return budget.book(ctx, tx, ids, 0)
 	})
 	if err != nil {
+		batchIdentityHolder(ctx, pool, items, err)
 		return nil, err
+	}
+	for i, u := range prep.updates {
+		if u != nil && results[i].Block != nil {
+			u.handOver(results[i].Block)
+		}
 	}
 	return results, nil
 }
@@ -171,14 +259,17 @@ func UpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, 
 // CheckUpsertBlocks runs UpsertBlocks' transaction without its budget and
 // rolls it back: every refusal the batch would meet on the rows as they are
 // now — the supersedes declarations against each other included (two items
-// naming one target, two items declaring each other), which a check of one
+// naming one target, two blocks declaring each other), which a check of one
 // item at a time cannot see. The staged MCP batch runs it, so a card never
 // promises a batch its confirm would refuse on today's rows; the confirm
 // decides again.
 func CheckUpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, apiKeyID string, types *blocktype.Set) error {
-	times := batchContentTimes(items)
-	err := pgxdb.Write(ctx, pool, pgxdb.At("store: check block batch"), func(tx pgx.Tx) error {
-		if _, err := upsertBlocksTx(ctx, tx, items, times, apiKeyID, types, nil); err != nil {
+	prep, err := prepareBatch(items)
+	if err != nil {
+		return err
+	}
+	err = writeSupersedesSource(ctx, pool, pgxdb.At("store: check block batch"), func(tx pgx.Tx) error {
+		if _, err := upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types, nil); err != nil {
 			return err
 		}
 		return pgxdb.ErrRollback
@@ -186,51 +277,95 @@ func CheckUpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUps
 	if errors.Is(err, pgxdb.ErrRollback) {
 		return nil
 	}
+	batchIdentityHolder(ctx, pool, items, err)
 	return err
 }
 
-// batchHold is what the lock pass of a batch learned about one item: whether
-// its identity row exists (the pre-read's answer), its no-op comparison, and
-// the locked target of a supersedes item.
-type batchHold struct {
-	hadRow bool
-	match  IdenticalContent
-	target supersedesTarget
+// batchPrep is what a batch computes before its transaction: each store
+// item's content_times (prepareUpsert says why), each update item's prepared
+// statement (prepareUpdate).
+type batchPrep struct {
+	times   [][]time.Time
+	updates []*blockUpdate
 }
 
-// batchContentTimes is temporalExtraction of every item's content, computed
-// before the batch's transaction (prepareUpsert says why).
-func batchContentTimes(items []BatchUpsert) [][]time.Time {
-	times := make([][]time.Time, len(items))
+// prepareBatch prepares every item, refusing a ParentItem that names no
+// earlier item and a parent on an update item (ErrBatchParentItem), and an
+// update the store would refuse unsent (CheckUpdatePatch, no field).
+func prepareBatch(items []BatchUpsert) (batchPrep, error) {
+	p := batchPrep{times: make([][]time.Time, len(items)), updates: make([]*blockUpdate, len(items))}
 	for i, it := range items {
-		times[i] = temporalExtraction(it.Content)
+		if it.Update != nil {
+			if it.ParentID != "" || it.ParentItem != nil {
+				return batchPrep{}, &BatchItemError{Index: i, Err: ErrBatchParentItem}
+			}
+			u, err := prepareUpdate(it.Update.ID, it.Update.Data, it.Update.WriteScopes)
+			if err != nil {
+				return batchPrep{}, &BatchItemError{Index: i, Err: err}
+			}
+			p.updates[i] = &u
+			continue
+		}
+		if it.ParentItem != nil && (*it.ParentItem < 0 || *it.ParentItem >= i) {
+			return batchPrep{}, &BatchItemError{Index: i, Err: ErrBatchParentItem}
+		}
+		p.times[i] = temporalExtraction(it.Content)
 	}
-	return times
+	return p, nil
 }
+
+// batchHold is what the lock pass of a batch learned about one item: the row
+// it holds (rowID, "" for a store item whose identity has no row yet) and
+// whether that row existed (the pre-read's answer), its no-op comparison, the
+// locked target of a supersedes item, and for an update item the identity its
+// block has after the update and the supersedes targets a scope move locked.
+type batchHold struct {
+	rowID    string
+	hadRow   bool
+	match    IdenticalContent
+	target   supersedesTarget
+	identity batchIdentity
+	targets  []string
+}
+
+// batchIdentity is a block's (scope, category, title).
+type batchIdentity struct{ scope, category, title string }
 
 // upsertBlocksTx is the batch inside its transaction (see UpsertBlocks): the
-// scope locks, the lock pass over every item with its no-op decision, the
-// budget check for the items that write, then the writes. budget nil checks
-// nothing; its lock is the caller's, taken before this. times holds each
-// item's content_times (batchContentTimes).
-func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, times [][]time.Time, apiKeyID string, types *blocktype.Set, budget *WriteBudget) ([]BatchResult, error) {
-	for _, scope := range batchScopes(items) {
+// update items' scopes read, the scope locks, the lock pass over every item
+// with its no-op decision, the budget check for the items that write, the
+// writes, then the parent links. budget nil checks nothing; its lock is the
+// caller's, taken before this.
+func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep batchPrep, apiKeyID string, types *blocktype.Set, budget *WriteBudget) ([]BatchResult, error) {
+	current, err := readBatchUpdateTargets(ctx, tx, items)
+	if err != nil {
+		return nil, err
+	}
+	for _, scope := range batchScopes(items, current) {
 		if err := LockSupersedesScope(ctx, tx, scope); err != nil {
 			return nil, err
 		}
 	}
-	order := batchLockOrder(items)
+	order := batchLockOrder(items, current)
 	holds := make([]batchHold, len(items))
+	rows := make(map[string]int, len(items))
 	writes := 0
 	for _, i := range order {
-		h, err := lockBatchItem(ctx, tx, items[i])
+		h, err := lockBatchItem(ctx, tx, items[i], prep.updates[i], current[i])
 		if err != nil {
 			return nil, &BatchItemError{Index: i, Err: err}
 		}
+		if first, dup := rows[h.rowID]; dup && h.rowID != "" {
+			return nil, &BatchItemError{Index: max(i, first), Err: &BatchSameBlockError{First: min(i, first)}}
+		}
+		rows[h.rowID] = i
 		holds[i] = h
 		if !h.match.Unchanged() {
 			writes++
 		}
+	}
+	if err := batchIdentityClash(items, holds); err != nil {
+		return nil, err
 	}
 	if budget != nil {
 		if err := budget.check(ctx, tx, writes); err != nil {
@@ -243,28 +378,58 @@ func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, times [
 		if holds[i].match.Unchanged() {
 			continue
 		}
-		b, err := writeBatchItem(ctx, tx, items[i], times[i], holds[i], apiKeyID, types)
+		var b *Block
+		var err error
+		if u := prep.updates[i]; u != nil {
+			b, err = writeBatchUpdate(ctx, tx, u, holds[i])
+		} else {
+			b, err = writeBatchItem(ctx, tx, items[i], prep.times[i], holds[i], apiKeyID, types)
+		}
 		if err != nil {
 			return nil, &BatchItemError{Index: i, Err: err}
 		}
 		results[i].Block = b
 	}
+	if err := linkBatchParents(ctx, tx, items, results); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
-// lockBatchItem is the lock pass of one item: a supersedes item's lock pair
-// (identity row, then target — lockSupersedesPair, the locks
-// UpsertBlockSupersedes takes), every other item's identity row with its
-// no-op comparison (lockBatchMatch).
-func lockBatchItem(ctx context.Context, tx pgx.Tx, it BatchUpsert) (batchHold, error) {
+// lockBatchItem is the lock pass of one item: an update item's row
+// (lockBatchUpdate); a supersedes item's lock pair (identity row, then target
+// — lockSupersedesPair, the locks UpsertBlockSupersedes takes); every other
+// item's identity row with its no-op comparison (lockBatchMatch). A parent
+// named by id is locked after the item's row (lockBatchParent), and an item
+// with a parent is never a no-op: the link is part of its write.
+func lockBatchItem(ctx context.Context, tx pgx.Tx, it BatchUpsert, u *blockUpdate, cur batchIdentity) (batchHold, error) {
+	if u != nil {
+		return lockBatchUpdate(ctx, tx, u, cur)
+	}
+	var h batchHold
 	if it.Supersedes != "" {
 		tgt, sourceID, err := lockSupersedesPair(ctx, tx, it.Category, it.Title, it.Scope, it.Supersedes)
 		if err != nil {
 			return batchHold{}, err
 		}
-		return batchHold{hadRow: sourceID != "", target: tgt}, nil
+		h = batchHold{rowID: sourceID, hadRow: sourceID != "", target: tgt}
+	} else {
+		var err error
+		if h, err = lockBatchMatch(ctx, tx, it); err != nil {
+			return batchHold{}, err
+		}
 	}
-	return lockBatchMatch(ctx, tx, it)
+	h.identity = batchIdentity{it.Scope, it.Category, it.Title}
+	if it.ParentID == "" && it.ParentItem == nil {
+		return h, nil
+	}
+	h.match = IdenticalContent{}
+	if it.ParentID != "" {
+		if err := lockBatchParent(ctx, tx, it.ParentID, it.Scope, it.Category, it.Title); err != nil {
+			return batchHold{}, err
+		}
+	}
+	return h, nil
 }
 
 // lockBatchMatch locks the item's identity row FOR NO KEY UPDATE — the
@@ -293,10 +458,10 @@ func lockBatchMatch(ctx context.Context, tx pgx.Tx, it BatchUpsert) (batchHold, 
 		return batchHold{}, fmt.Errorf("store: upsert block batch: lock: %w", err)
 	}
 	if !sameContent {
-		return batchHold{hadRow: true}, nil
+		return batchHold{rowID: id, hadRow: true}, nil
 	}
 	m.ID = id
-	return batchHold{hadRow: true, match: m}, nil
+	return batchHold{rowID: id, hadRow: true, match: m}, nil
 }
 
 // WriteBudget is a key's write budget (query.rate_limit_write: writes per api
@@ -427,32 +592,50 @@ func writeBatchItem(ctx context.Context, tx pgx.Tx, it BatchUpsert, contentTimes
 	return u.execDeclared(ctx, tx, SupersedesDeclaration{TargetID: it.Supersedes, APIKeyID: apiKeyID, Types: types}, tgt)
 }
 
-// batchLockOrder is the order UpsertBlocks writes the items in: by
-// (scope, category, title), the position in the list breaking a tie.
-func batchLockOrder(items []BatchUpsert) []int {
+// batchLockOrder is the order UpsertBlocks locks and writes the items in: by
+// (scope, category, title) — an update item by the identity its block had
+// when the batch read it (current) — the position in the list breaking a tie.
+func batchLockOrder(items []BatchUpsert, current []batchIdentity) []int {
 	order := make([]int, len(items))
 	for i := range order {
 		order[i] = i
 	}
+	key := func(i int) batchIdentity {
+		if items[i].Update != nil {
+			return current[i]
+		}
+		return batchIdentity{items[i].Scope, items[i].Category, items[i].Title}
+	}
 	sort.SliceStable(order, func(a, b int) bool {
-		x, y := items[order[a]], items[order[b]]
-		if x.Scope != y.Scope {
-			return x.Scope < y.Scope
+		x, y := key(order[a]), key(order[b])
+		if x.scope != y.scope {
+			return x.scope < y.scope
 		}
-		if x.Category != y.Category {
-			return x.Category < y.Category
+		if x.category != y.category {
+			return x.category < y.category
 		}
-		return x.Title < y.Title
+		return x.title < y.title
 	})
 	return order
 }
 
-// batchScopes is the sorted set of scopes the items write.
-func batchScopes(items []BatchUpsert) []string {
+// batchScopes is the sorted set of scopes the items write: a store item's
+// scope, an update item's current scope (current) and the scope it moves to.
+func batchScopes(items []BatchUpsert, current []batchIdentity) []string {
 	scopes := make([]string, 0, 1)
-	for _, it := range items {
-		if !slices.Contains(scopes, it.Scope) {
-			scopes = append(scopes, it.Scope)
+	add := func(s string) {
+		if !slices.Contains(scopes, s) {
+			scopes = append(scopes, s)
+		}
+	}
+	for i, it := range items {
+		if it.Update == nil {
+			add(it.Scope)
+			continue
+		}
+		add(current[i].scope)
+		if it.Update.Data.Scope != nil {
+			add(*it.Update.Data.Scope)
 		}
 	}
 	sort.Strings(scopes)

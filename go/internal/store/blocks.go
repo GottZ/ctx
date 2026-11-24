@@ -1969,21 +1969,83 @@ func guardIdentityMove(ctx context.Context, tx pgx.Tx, b *Block) error {
 // ErrEditedContentTooLarge and writes nothing. A MetadataMerge is one jsonb
 // expression of the statement and reads the row the statement locked.
 func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string) (*Block, bool, error) {
-	if err := CheckUpdatePatch(data); err != nil {
-		return nil, false, fmt.Errorf("store: update block: %w", err)
+	u, err := prepareUpdate(id, data, writeScopes)
+	if err != nil {
+		return nil, false, err
 	}
-	// Build SET clause dynamically.
-	setClauses := []string{}
+	b := &Block{}
+	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, u)
+	var taken *BlockIdentityTakenError
+	if errors.As(err, &taken) {
+		taken.ConflictID = blockIdentityHolder(ctx, pool, id, data, writeScopes, taken.refusedKey)
+		return nil, false, taken
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, pinnedUpdateMissReason(ctx, pool, id, writeScopes, data.ExpectUpdatedAt != nil)
+	}
+	u.handOver(b)
+	return b, needsReEmbed, nil
+}
+
+// blockUpdate is a by-id update prepared for its transaction (prepareUpdate):
+// the statement, its arguments and what the transaction half needs to know
+// about them. UpdateBlock runs it in a transaction of its own
+// (runBlockUpdate); a block batch runs it inside the batch's (UpsertBlocks,
+// issue #211). Both run the same statement through the same half (execHeld).
+type blockUpdate struct {
+	id          string
+	data        UpdateBlockData
+	writeScopes []string
+	query       string
+	args        []any
+	// assign is the statement's SET list without updated_at, as (column,
+	// expression) pairs over args: a batch compares it with the row it holds
+	// to tell an item that changes nothing (changedSQL).
+	assign []updateAssignment
+	// contentSent: the update writes the content (a content or edits);
+	// contentArg is the index of its argument in args, content_times follows.
+	contentSent bool
+	contentArg  int
+	// identitySent says the query returns identityMovedCol as its last column
+	// (the update names a category, a title or a scope); when the identity
+	// moved, the archived-claim probe runs right after the statement
+	// (guardIdentityMove).
+	identitySent bool
+	// edits is nil unless the update carries edits (issue #406); the content
+	// they produce fills args[contentArg] once the row is held.
+	edits *contentEditPlan
+	// moveScopes is nil unless the update names a scope (a possible scope
+	// move); then it carries the caller's write scopes.
+	moveScopes []string
+	// idIdx, scopeIdx and pinIdx are the $n of the id, the write scopes and
+	// the ExpectUpdatedAt pin (0 = no pin) in args.
+	idIdx, scopeIdx, pinIdx int
+}
+
+// updateAssignment is one assignment of an update's SET list.
+type updateAssignment struct{ col, expr string }
+
+// prepareUpdate builds the statement of a by-id update: its SET list, its
+// WHERE (the id within the write scopes, live, not a derivative, and the
+// ExpectUpdatedAt pin) and its RETURNING. It writes nothing.
+func prepareUpdate(id string, data UpdateBlockData, writeScopes []string) (blockUpdate, error) {
+	if err := CheckUpdatePatch(data); err != nil {
+		return blockUpdate{}, fmt.Errorf("store: update block: %w", err)
+	}
+	u := blockUpdate{id: id, data: data, writeScopes: writeScopes}
 	args := []any{}
 	argIdx := 1
 
 	if data.Category != nil {
-		setClauses = append(setClauses, fmt.Sprintf("category = $%d", argIdx))
+		u.assign = append(u.assign, updateAssignment{"category", fmt.Sprintf("$%d", argIdx)})
 		args = append(args, *data.Category)
 		argIdx++
 	}
 	if data.Title != nil {
-		setClauses = append(setClauses, fmt.Sprintf("title = $%d", argIdx))
+		u.assign = append(u.assign, updateAssignment{"title", fmt.Sprintf("$%d", argIdx)})
 		args = append(args, *data.Title)
 		argIdx++
 	}
@@ -1993,22 +2055,21 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// (see the RETURNING clause).
 	//
 	// Edits are a content write as well; their argument is the content they
-	// resolve to, which exists only once runBlockUpdate holds the row, so the
-	// slot is reserved here and filled there (contentEditPlan).
+	// resolve to, which exists only once the row is held, so the slot is
+	// reserved here and filled there (contentEditPlan).
 	//
 	// A content write sets content_times as well, from the content it stores
 	// (issue #421, see prepareUpsert); for edits that content, and so its
 	// dates, exist only once the row is held, and contentEditPlan fills both
 	// slots.
-	contentSent := data.Content != nil || data.Edits != nil
-	var edits *contentEditPlan
-	contentArg := len(args)
-	if contentSent {
-		setClauses = append(setClauses,
-			fmt.Sprintf("content = $%d", argIdx),
-			fmt.Sprintf("content_times = $%d::timestamptz[]", argIdx+1))
+	u.contentSent = data.Content != nil || data.Edits != nil
+	u.contentArg = len(args)
+	if u.contentSent {
+		u.assign = append(u.assign,
+			updateAssignment{"content", fmt.Sprintf("$%d", argIdx)},
+			updateAssignment{"content_times", fmt.Sprintf("$%d::timestamptz[]", argIdx+1)})
 		if data.Edits != nil {
-			edits = &contentEditPlan{edits: data.Edits, arg: len(args), writeScopes: writeScopes}
+			u.edits = &contentEditPlan{edits: data.Edits, arg: len(args), writeScopes: writeScopes}
 			args = append(args, nil, nil)
 		} else {
 			args = append(args, *data.Content, temporalExtraction(*data.Content))
@@ -2016,52 +2077,58 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 		argIdx += 2
 	}
 	if data.Tags != nil {
-		setClauses = append(setClauses, fmt.Sprintf("tags = $%d", argIdx))
+		u.assign = append(u.assign, updateAssignment{"tags", fmt.Sprintf("$%d", argIdx)})
 		args = append(args, data.Tags)
 		argIdx++
 	}
 	var metaExpr string
 	before := len(args)
-	metaExpr, args = updateMetadataExpr(data, contentSent, args)
+	metaExpr, args = updateMetadataExpr(data, u.contentSent, args)
 	argIdx += len(args) - before
 	if metaExpr != "" {
-		setClauses = append(setClauses, "metadata = "+metaExpr)
+		u.assign = append(u.assign, updateAssignment{"metadata", metaExpr})
 	}
 	if data.Scope != nil {
-		setClauses = append(setClauses, fmt.Sprintf("scope = $%d", argIdx))
+		u.assign = append(u.assign, updateAssignment{"scope", fmt.Sprintf("$%d", argIdx)})
 		args = append(args, *data.Scope)
 		argIdx++
 	}
 	if data.Sensitivity != nil {
 		// Handler has validated the level and enforced the downgrade confirm.
-		setClauses = append(setClauses, fmt.Sprintf("sensitivity = $%d", argIdx))
+		u.assign = append(u.assign,
+			updateAssignment{"sensitivity", fmt.Sprintf("$%d", argIdx)},
+			updateAssignment{"sensitivity_source", "'manual'"})
 		args = append(args, *data.Sensitivity)
 		argIdx++
-		setClauses = append(setClauses, "sensitivity_source = 'manual'")
 	}
 	if data.Type != nil {
 		// Handler has validated the name against the registry (WF T10).
-		setClauses = append(setClauses, fmt.Sprintf("type_name = $%d", argIdx))
+		u.assign = append(u.assign,
+			updateAssignment{"type_name", fmt.Sprintf("$%d", argIdx)},
+			updateAssignment{"type_source", "'manual'"})
 		args = append(args, *data.Type)
 		argIdx++
-		setClauses = append(setClauses, "type_source = 'manual'")
 	}
 
-	if len(setClauses) == 0 {
-		return nil, false, fmt.Errorf("store: update block: no fields to update")
+	if len(u.assign) == 0 {
+		return blockUpdate{}, fmt.Errorf("store: update block: no fields to update")
 	}
-
+	setClauses := make([]string, 0, len(u.assign)+1)
+	for _, a := range u.assign {
+		setClauses = append(setClauses, a.col+" = "+a.expr)
+	}
 	setClauses = append(setClauses, "updated_at = now()")
 
 	// Add WHERE params
 	args = append(args, id)
-	idIdx := argIdx
+	u.idIdx = argIdx
 	argIdx++
 	args = append(args, writeScopes)
-	scopeIdx := argIdx
+	u.scopeIdx = argIdx
 	pinSQL := ""
 	if data.ExpectUpdatedAt != nil {
 		args = append(args, *data.ExpectUpdatedAt)
+		u.pinIdx = len(args)
 		pinSQL = fmt.Sprintf(" AND updated_at = $%d", len(args))
 	}
 
@@ -2075,7 +2142,9 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// UpdateBlock has exactly three callers, all of them client surfaces
 	// (handler/context_manage.go, handler/mcp_update.go, handler/confirm_core.go);
 	// no arm or scheduler writes through it. The guard is therefore
-	// client-only by construction rather than by a flag.
+	// client-only by construction rather than by a flag. The block batch
+	// (UpsertBlocks) runs the same statement for its update items, a client
+	// surface too (handler/store_batch.go).
 	//
 	// The RETURNING metadata goes through the guard redaction GetBlock applies
 	// (guardRedactedMetadataSQL): the REST update answers with the whole block,
@@ -2098,56 +2167,39 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	// the identity actually moved (identityMovedCol), which decides the
 	// archived-claim probe (guardIdentityMove). An update that names none runs
 	// the statement it always ran.
-	identitySent := data.Category != nil || data.Title != nil || data.Scope != nil
+	u.identitySent = data.Category != nil || data.Title != nil || data.Scope != nil
 	movedCol := ""
-	if identitySent {
+	if u.identitySent {
 		movedCol = ",\n\t\t           " + identityMovedCol
 	}
-	query := fmt.Sprintf(
+	u.query = fmt.Sprintf(
 		`UPDATE context_blocks SET %s
 		 WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived
 		   AND `+notDerivedSQL+`%s
 		 RETURNING id, category, tags, title, content, %s, scope, sensitivity, sensitivity_source, type_name, lifecycle_state, type_source, created_at, updated_at,
 		           `+untrustedOriginCol+`,
 		           (old.title IS DISTINCT FROM new.title OR old.content IS DISTINCT FROM new.content)%s`,
-		strings.Join(setClauses, ", "), idIdx, scopeIdx, pinSQL, guardRedactedMetadataSQL(fmt.Sprintf("$%d", scopeIdx)), movedCol,
+		strings.Join(setClauses, ", "), u.idIdx, u.scopeIdx, pinSQL, guardRedactedMetadataSQL(fmt.Sprintf("$%d", u.scopeIdx)), movedCol,
 	)
-
-	// The statement, the invalidation of the vector and (on a scope move) the
-	// link sweep commit together. The invalidation in particular must not be
-	// a second step after the commit: needsReEmbed is a difference, so an
-	// invalidation that got lost between the two (request cancelled, pool
-	// fault) would not be repaired by sending the same update again, and the
-	// block would keep a vector for content it no longer holds, unmarked and
-	// invisible to the backfill.
-	b := &Block{}
-	var moveScopes []string
+	u.args = args
 	if data.Scope != nil {
-		moveScopes = writeScopes
+		u.moveScopes = writeScopes
 	}
-	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, id, query, args, moveScopes, identitySent, edits)
-	var taken *BlockIdentityTakenError
-	if errors.As(err, &taken) {
-		taken.ConflictID = blockIdentityHolder(ctx, pool, id, data, writeScopes, taken.refusedKey)
-		return nil, false, taken
+	return u, nil
+}
+
+// handOver puts the content the statement stored and its content_times on b,
+// for the afterwork (issue #434); for edits, the ones the held row resolved.
+// As in execHeld, the handover names the returned content.
+func (u blockUpdate) handOver(b *Block) {
+	if !u.contentSent {
+		return
 	}
-	if err != nil {
-		return nil, false, err
+	content, okContent := u.args[u.contentArg].(string)
+	times, okTimes := u.args[u.contentArg+1].([]time.Time)
+	if okContent && okTimes && content == b.Content {
+		b.written = &writtenDates{content: b.Content, times: times}
 	}
-	if !found {
-		return nil, false, pinnedUpdateMissReason(ctx, pool, id, writeScopes, data.ExpectUpdatedAt != nil)
-	}
-	if contentSent {
-		// The content the statement stored and its content_times, for the
-		// afterwork (issue #434); for edits, the ones the held row resolved.
-		// As in execHeld, the handover names the returned content.
-		content, okContent := args[contentArg].(string)
-		times, okTimes := args[contentArg+1].([]time.Time)
-		if okContent && okTimes && content == b.Content {
-			b.written = &writtenDates{content: b.Content, times: times}
-		}
-	}
-	return b, needsReEmbed, nil
 }
 
 // pinnedUpdateMissReason is updateBlockMissReason for UpdateBlock, which may
@@ -2197,116 +2249,42 @@ func updateBlockMissReason(ctx context.Context, pool *pgxpool.Pool, id string, w
 	return nil
 }
 
-// runBlockUpdate runs a by-id block update as ONE transaction: the
-// UPDATE…RETURNING scan into b, on a scope move the GD5 link sweep (the link
-// tables' row-scope invariant, both endpoints + row in the same scope, would
-// otherwise break post-hoc; GD5/K8), and the vector invalidation when the
-// statement reports that the title or the content changed
-// (InvalidateEmbeddingTx, the primitive UpsertBlock uses on its
-// content-change path). Returns
-// found=false (no error) when the block was not found in the caller's write
-// scopes.
+// runBlockUpdate runs a prepared by-id block update as ONE transaction: on a
+// scope move the lock pass of the block and its supersedes targets
+// (lockSupersedesSource), the edits resolved on the held row, then the
+// transaction half every by-id update runs (execHeld). Returns found=false (no
+// error) when the block was not found in the caller's write scopes.
 //
-// moveScopes is nil unless the update names a scope (a possible scope move);
-// then it carries the caller's write scopes, and the block and the targets of
-// its supersedes links are locked before the update (lockSupersedesSource), so
-// the supersedes state the sweep ends can be reconciled in this transaction;
-// a statement that moved a block the lock pass missed runs the transaction
-// again, as an archive does (archiveSupersedesSource).
+// On a scope move the block and the targets of its supersedes links are locked
+// before the update (lockSupersedesSource), so the supersedes state the sweep
+// ends can be reconciled in this transaction; a statement that moved a block
+// the lock pass missed runs the transaction again, as an archive does
+// (archiveSupersedesSource).
 //
-// identitySent says the query returns identityMovedCol as its last column (the
-// update names a category, a title or a scope); when the identity moved, the
-// archived-claim probe runs right after the statement (guardIdentityMove).
-//
-// edits is nil unless the update carries edits (issue #406); then the row is
-// locked and read, and the content the edits produce fills its argument slot,
-// after the supersedes locks of a scope move (which lock the block first) and
-// before the statement.
-func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query string, args []any, moveScopes []string, identitySent bool, edits *contentEditPlan) (found, needsReEmbed bool, err error) {
+// Edits (issue #406): the row is locked and read, and the content the edits
+// produce fills its argument slot, after the supersedes locks of a scope move
+// (which lock the block first) and before the statement.
+func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, u blockUpdate) (found, needsReEmbed bool, err error) {
 	var swept int
-	scopeMove := moveScopes != nil
+	scopeMove := u.moveScopes != nil
 	write := pgxdb.Write
 	if scopeMove {
 		write = writeSupersedesSource // lockSupersedesSource may ask for a re-run
 	}
 	if err := write(ctx, pool, pgxdb.At("store: update block"), func(tx pgx.Tx) error {
-		var supersedesTargets []string
-		var missed bool
+		var held updateHold
 		if scopeMove {
 			var err error
-			if supersedesTargets, missed, err = lockSupersedesSource(ctx, tx, id, moveScopes); err != nil {
+			if held.targets, held.missed, err = lockSupersedesSource(ctx, tx, u.id, u.moveScopes); err != nil {
 				return err
 			}
 		}
-		if ok, err := edits.resolve(ctx, tx, id, args); !ok {
+		if ok, err := u.edits.resolve(ctx, tx, u.id, u.args); !ok {
 			return cmp.Or(err, pgxdb.ErrRollback) // a miss writes nothing, as below
 		}
-		var moved bool
-		dest := []any{
-			&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
-			&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
-			&b.UntrustedOrigin, &needsReEmbed,
-		}
-		if identitySent {
-			dest = append(dest, &moved)
-		}
-		err := tx.QueryRow(ctx, query, args...).Scan(dest...)
-		if errors.Is(err, pgx.ErrNoRows) {
-			// A miss writes nothing: pgxdb.ErrRollback keeps it a rollback
-			// instead of a commit.
-			return pgxdb.ErrRollback
-		}
-		if err != nil {
-			return blockUpdateError(err)
-		}
-		if missed {
-			// The lock pass found no live block of the write scopes, yet the
-			// statement changed one: it entered a write scope in between,
-			// unlocked (archiveSupersedesSource; issue #284). Run again.
-			return errSupersedesSourceChanged
-		}
-		if moved {
-			if err := guardIdentityMove(ctx, tx, b); err != nil {
-				return err
-			}
-		}
-
-		if scopeMove {
-			var ended []string
-			if swept, ended, err = sweepScopeMoveLinks(ctx, tx, id, b.Scope); err != nil {
-				return err
-			}
-			// Only targets locked above (plus the moved block itself, which the
-			// update locked) are reconciled: a supersedes link that ended here
-			// either left one of the block's own targets behind, or pointed at
-			// the block from a source that stayed behind.
-			var reconcile []string
-			for _, t := range ended {
-				if t == b.ID || slices.Contains(supersedesTargets, t) {
-					reconcile = append(reconcile, t)
-				}
-			}
-			restored, err := ReconcileSupersedesTargets(ctx, tx, reconcile, "")
-			if err != nil {
-				return fmt.Errorf("store: update block: %w", err)
-			}
-			// The moved block may itself be a target the move took away from
-			// its last superseder: the reconcile changed its lifecycle after
-			// the update returned it, so the answer reads it again.
-			if slices.Contains(restored, b.ID) {
-				if err := tx.QueryRow(ctx,
-					`SELECT lifecycle_state FROM context_blocks WHERE id = $1::uuid`, b.ID).Scan(&b.LifecycleState); err != nil {
-					return fmt.Errorf("store: update block: re-read lifecycle: %w", err)
-				}
-			}
-		}
-		if needsReEmbed {
-			if err := InvalidateEmbeddingTx(ctx, tx, b.ID); err != nil {
-				return fmt.Errorf("store: update block: invalidate embedding: %w", err)
-			}
-			dropInvalidatedMarks(b)
-		}
-		return nil
+		var err error
+		swept, needsReEmbed, err = u.execHeld(ctx, tx, b, held)
+		return err
 	}); err != nil {
 		if errors.Is(err, pgxdb.ErrRollback) {
 			return false, false, nil
@@ -2314,9 +2292,95 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, id, query
 		return false, false, err
 	}
 	if swept > 0 {
-		slog.Info("store: scope move swept divergent links", "block_id", id, "new_scope", b.Scope, "links_deleted", swept)
+		slog.Info("store: scope move swept divergent links", "block_id", u.id, "new_scope", b.Scope, "links_deleted", swept)
 	}
 	return true, needsReEmbed, nil
+}
+
+// updateHold is what the lock pass of a by-id update holds before its
+// statement: the targets of the block's supersedes links (a scope move), and
+// whether the pass missed the block (lockSupersedesSource).
+type updateHold struct {
+	targets []string
+	missed  bool
+}
+
+// execHeld is the transaction half of a by-id update, run after its lock pass:
+// the UPDATE…RETURNING scan into b, the archived-claim probe of a moved
+// identity, on a scope move the GD5 link sweep (the link tables' row-scope
+// invariant, both endpoints + row in the same scope, would otherwise break
+// post-hoc; GD5/K8) and the reconcile of the supersedes state it ended, and
+// the vector invalidation when the statement reports that the title or the
+// content changed (InvalidateEmbeddingTx, the primitive UpsertBlock uses on
+// its content-change path). A statement that finds no row answers
+// pgxdb.ErrRollback: a miss writes nothing.
+func (u blockUpdate) execHeld(ctx context.Context, tx pgx.Tx, b *Block, held updateHold) (swept int, needsReEmbed bool, err error) {
+	var moved bool
+	dest := []any{
+		&b.ID, &b.Category, &b.Tags, &b.Title, &b.Content, &b.Metadata, &b.Scope,
+		&b.Sensitivity, &b.SensitivitySource, &b.TypeName, &b.LifecycleState, &b.TypeSource, &b.CreatedAt, &b.UpdatedAt,
+		&b.UntrustedOrigin, &needsReEmbed,
+	}
+	if u.identitySent {
+		dest = append(dest, &moved)
+	}
+	err = tx.QueryRow(ctx, u.query, u.args...).Scan(dest...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// A miss writes nothing: pgxdb.ErrRollback keeps it a rollback
+		// instead of a commit.
+		return 0, false, pgxdb.ErrRollback
+	}
+	if err != nil {
+		return 0, false, blockUpdateError(err)
+	}
+	if held.missed {
+		// The lock pass found no live block of the write scopes, yet the
+		// statement changed one: it entered a write scope in between,
+		// unlocked (archiveSupersedesSource; issue #284). Run again.
+		return 0, false, errSupersedesSourceChanged
+	}
+	if moved {
+		if err := guardIdentityMove(ctx, tx, b); err != nil {
+			return 0, false, err
+		}
+	}
+
+	if u.moveScopes != nil {
+		var ended []string
+		if swept, ended, err = sweepScopeMoveLinks(ctx, tx, u.id, b.Scope); err != nil {
+			return 0, false, err
+		}
+		// Only targets locked above (plus the moved block itself, which the
+		// update locked) are reconciled: a supersedes link that ended here
+		// either left one of the block's own targets behind, or pointed at
+		// the block from a source that stayed behind.
+		var reconcile []string
+		for _, t := range ended {
+			if t == b.ID || slices.Contains(held.targets, t) {
+				reconcile = append(reconcile, t)
+			}
+		}
+		restored, err := ReconcileSupersedesTargets(ctx, tx, reconcile, "")
+		if err != nil {
+			return 0, false, fmt.Errorf("store: update block: %w", err)
+		}
+		// The moved block may itself be a target the move took away from
+		// its last superseder: the reconcile changed its lifecycle after
+		// the update returned it, so the answer reads it again.
+		if slices.Contains(restored, b.ID) {
+			if err := tx.QueryRow(ctx,
+				`SELECT lifecycle_state FROM context_blocks WHERE id = $1::uuid`, b.ID).Scan(&b.LifecycleState); err != nil {
+				return 0, false, fmt.Errorf("store: update block: re-read lifecycle: %w", err)
+			}
+		}
+	}
+	if needsReEmbed {
+		if err := InvalidateEmbeddingTx(ctx, tx, b.ID); err != nil {
+			return 0, false, fmt.Errorf("store: update block: invalidate embedding: %w", err)
+		}
+		dropInvalidatedMarks(b)
+	}
+	return swept, needsReEmbed, nil
 }
 
 // blockUpdateError is runBlockUpdate's answer to an error of its statement

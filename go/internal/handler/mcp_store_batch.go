@@ -23,17 +23,39 @@ import (
 )
 
 type storeBatchInput struct {
-	Items []storeInput `json:"items" jsonschema:"the blocks to write, each with the arguments of the store tool (category, title, content required); all of them are written in one transaction, or none is"`
+	Items []storeBatchItemInput `json:"items" jsonschema:"the writes, all in one transaction or none: a store item (category, title, content required) or an update item (id plus the fields to change)"`
+}
+
+// storeBatchItemInput is one item of the tool: the store tool's arguments (a
+// store item) or, with an id, the update tool's (an update item, issue #211).
+// One object for both, the form told by `id` (storeBatchEntry), so a batch
+// written before update items existed is read as it always was. category,
+// title and content are therefore not required by the schema; a store item
+// without them is refused by the store chain, named by its index.
+type storeBatchItemInput struct {
+	ID            string            `json:"id,omitempty" jsonschema:"update item: the block id (or unambiguous prefix); omit for a store item"`
+	Category      *string           `json:"category,omitempty" jsonschema:"block category"`
+	Title         *string           `json:"title,omitempty" jsonschema:"block title (a store item upserts on category+title+scope)"`
+	Content       *string           `json:"content,omitempty" jsonschema:"block content (max 50KB)"`
+	Tags          []string          `json:"tags,omitempty" jsonschema:"tags (an update item replaces the set; [] clears)"`
+	Metadata      map[string]any    `json:"metadata,omitempty" jsonschema:"metadata object; put the source of the knowledge into metadata.source"`
+	Sensitivity   string            `json:"sensitivity,omitempty" jsonschema:"store item: credentials|personal|internal|public"`
+	Type          string            `json:"type,omitempty" jsonschema:"explicit block type name from the registry"`
+	Scope         string            `json:"scope,omitempty" jsonschema:"store item: target scope (default: the key's home scope)"`
+	Supersedes    string            `json:"supersedes,omitempty" jsonschema:"store item: id of a block in the same scope this block replaces"`
+	Edits         []updateEditInput `json:"edits,omitempty" jsonschema:"update item: text edits of the content instead of a whole content, all or none"`
+	MetadataMerge map[string]any    `json:"metadata_merge,omitempty" jsonschema:"update item: keys merged into the stored metadata (null removes) instead of replacing it"`
 }
 
 // storeBatchToolDescription is the tool's description, example included: the
 // one place a model reads how the call is shaped before it makes one.
 const storeBatchToolDescription = "Save or update several knowledge blocks at once, all or none: every item is " +
 	"written in one transaction, and a refusal of any item or of the batch writes nothing; an item's refusal " +
-	"names the item as items[i]. Each item takes the store tool's arguments and upserts on (category, title, scope). " +
+	"names the item as items[i]. A store item takes the store tool's arguments and upserts on (category, title, scope); " +
+	"an item with an id takes the update tool's arguments and updates that block. " +
 	"At most writes.batch_max_items items (default 100); each written item counts as one write of the key's " +
 	"write budget. Example: {\"items\": [{\"category\": \"decisions\", \"title\": \"Cache layer\", \"content\": " +
-	"\"We cache …\"}, {\"category\": \"decisions\", \"title\": \"Decision index\", \"content\": \"- Cache layer\"}]}"
+	"\"We cache …\"}, {\"id\": \"<id of the decision index>\", \"edits\": [{\"old\": \"- Auth\", \"new\": \"- Auth\\n- Cache layer\"}]}]}"
 
 func registerStoreBatchTool(server *mcp.Server, cfg MCPConfig) {
 	addMCPTool(server, &mcp.Tool{
@@ -42,20 +64,37 @@ func registerStoreBatchTool(server *mcp.Server, cfg MCPConfig) {
 	}, mcpStoreBatchHandler(cfg))
 }
 
-// storeRequest maps the store tool's arguments onto the request the write
-// gates read (the mapping mcpStoreHandler spells out at its own call site).
-func (in storeInput) storeRequest() storeRequest {
-	return storeRequest{
-		Category:    in.Category,
-		Title:       in.Title,
-		Content:     in.Content,
-		Tags:        in.Tags,
-		Metadata:    in.Metadata,
-		Sensitivity: in.Sensitivity,
-		Type:        in.Type,
-		Scope:       in.Scope,
-		Supersedes:  in.Supersedes,
+// entry maps one item of the tool onto the batch core's form: a store item
+// onto the request the write gates read (the mapping mcpStoreHandler spells out
+// at its own call site), an update item onto the update tool's patch
+// (updateFieldsOf). A field the item's form does not take is refused by name:
+// the update tool carries no sensitivity, scope or supersedes, a store item no
+// edits or metadata_merge.
+func (in storeBatchItemInput) entry() storeBatchEntry {
+	if in.ID == "" {
+		e := storeBatchEntry{Store: &storeRequest{
+			Category:    strOrEmpty(in.Category),
+			Title:       strOrEmpty(in.Title),
+			Content:     strOrEmpty(in.Content),
+			Tags:        in.Tags,
+			Metadata:    in.Metadata,
+			Sensitivity: in.Sensitivity,
+			Type:        in.Type,
+			Scope:       in.Scope,
+			Supersedes:  in.Supersedes,
+		}}
+		if in.Edits != nil || in.MetadataMerge != nil {
+			e.Misplaced = storeItemUpdateFieldsMsg
+		}
+		return e
 	}
+	data, fields := updateFieldsOf(updateInput{ID: in.ID, Category: in.Category, Title: in.Title, Content: in.Content,
+		Tags: in.Tags, Metadata: in.Metadata, Type: in.Type, Edits: in.Edits, MetadataMerge: in.MetadataMerge})
+	e := storeBatchEntry{Update: &storeBatchUpdate{ID: in.ID, Data: data, Fields: fields}}
+	if in.Sensitivity != "" || in.Scope != "" || in.Supersedes != "" {
+		e.Misplaced = mcpUpdateItemFieldsMsg
+	}
+	return e
 }
 
 func mcpStoreBatchHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeBatchInput, any] {
@@ -76,9 +115,9 @@ func mcpStoreBatchHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeBatchInput, any
 			ttl = snap.Writes.ConfirmTTL
 		}
 		set := cfg.mcpTypeSnapshot(ctx)
-		items := make([]storeRequest, len(input.Items))
+		items := make([]storeBatchEntry, len(input.Items))
 		for i, it := range input.Items {
-			items[i] = it.storeRequest()
+			items[i] = it.entry()
 		}
 		reqID := RequestIDFromContext(ctx)
 		noteToolCount(ctx, len(input.Items))
@@ -97,14 +136,24 @@ func mcpStoreBatchHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeBatchInput, any
 // renderStoreBatch is the tool's answer: a summary line, then one line per
 // item in the store tool's own wording.
 func renderStoreBatch(results []storeBatchItem) string {
-	written := 0
+	stored, updated, updates := 0, 0, false
 	for _, it := range results {
-		if it.Block != nil {
-			written++
+		updates = updates || it.Update
+		switch {
+		case it.Block == nil:
+		case it.Update:
+			updated++
+		default:
+			stored++
 		}
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Batch written in one transaction: %d stored, %d unchanged.\n", written, len(results)-written)
+	if updates {
+		fmt.Fprintf(&sb, "Batch written in one transaction: %d stored, %d updated, %d unchanged.\n",
+			stored, updated, len(results)-stored-updated)
+	} else {
+		fmt.Fprintf(&sb, "Batch written in one transaction: %d stored, %d unchanged.\n", stored, len(results)-stored)
+	}
 	for i, it := range results {
 		sb.WriteString(batchItemPrefix(i))
 		sb.WriteString(storeBatchItemLine(it))
@@ -129,13 +178,13 @@ func renderStoreBatch(results []storeBatchItem) string {
 func stageBatchSupersedesCheck(ctx context.Context, cfg MCPConfig, set *blocktype.Set, ar *auth.AuthResult,
 	plan *storeBatchPlan, reqID string,
 ) *mcp.CallToolResult {
-	declares := slices.ContainsFunc(plan.items, func(it storeRequest) bool { return it.Supersedes != "" })
+	declares := slices.ContainsFunc(plan.items, func(e storeBatchEntry) bool { return e.Store != nil && e.Store.Supersedes != "" })
 	var err error
 	switch {
 	case !declares:
 		return nil
 	case len(plan.items) == 1:
-		it := plan.items[0]
+		it := plan.items[0].Store
 		err = store.CheckSupersedesDeclarable(ctx, cfg.Pool, it.Category, it.Title, plan.gated[0].WriteScope,
 			store.SupersedesDeclaration{TargetID: it.Supersedes, APIKeyID: ar.ApiKeyID, Types: set})
 		if rej := supersedesReject(err); rej != nil {
@@ -185,6 +234,9 @@ func storeBatchItemLine(it storeBatchItem) string {
 	if it.Block == nil {
 		return fmt.Sprintf("No change needed — identical content already exists (id: %s)", it.UnchangedID)
 	}
+	if it.Update {
+		return fmt.Sprintf("Updated: %s (id: %s, category: %s)", it.Block.Title, it.Block.ID, it.Block.Category)
+	}
 	return fmt.Sprintf("Stored: %s (id: %s, category: %s%s)", it.Block.Title, it.Block.ID, it.Block.Category,
 		supersedesSuffix(it.Supersedes))
 }
@@ -206,8 +258,10 @@ func stageBatchUnchanged(ctx context.Context, cfg MCPConfig, plan *storeBatchPla
 	ids := make([]string, len(plan.items))
 	err := pgxdb.WriteOpts(ctx, cfg.Pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
 		pgxdb.At("mcp: stage batch identical-content check"), func(tx pgx.Tx) error {
-			for i, it := range plan.items {
-				if it.Supersedes != "" {
+			for i, e := range plan.items {
+				it := e.Store
+				if it == nil || it.Supersedes != "" {
+					// An update item, and a declaring item, would write.
 					continue
 				}
 				res := plan.gated[i]
@@ -229,6 +283,62 @@ func stageBatchUnchanged(ctx context.Context, cfg MCPConfig, plan *storeBatchPla
 	return ids, nil
 }
 
+// stageBatchUpdateCards fills the card form of each update item of a plan
+// (cards; the store items' are filled), as the update tool's stage builds its
+// card (mcpStageUpdate): the block read within the key's writable scopes, its
+// updated_at bound as the drift pin, a derivative refused (no card for a write
+// the confirm cannot execute, D1-M2), edits resolved against the content the
+// pin names and bound as that content, a metadata_merge kept a merge. A
+// refusal names the item.
+func stageBatchUpdateCards(ctx context.Context, cfg MCPConfig, plan *storeBatchPlan, cards []store.CanonicalWrite, reqID string) *writeReject {
+	for i, e := range plan.items {
+		u := e.Update
+		if u == nil {
+			continue
+		}
+		id := plan.resolved[i]
+		// nil type set (V-11): a TOCTOU fingerprint, not a read answer.
+		block, err := store.GetBlock(ctx, cfg.Pool, nil, id, plan.writable, nil)
+		if err != nil {
+			logRequestError(ctx, "mcp: stage batch update base read failed", "error", err, "block_id", id, "request_id", reqID)
+			return classInternal.reject("stage failed: internal error")
+		}
+		if block == nil {
+			return classUnknownBlock.reject(updateNotFoundMsg).prefixed(batchItemPrefix(i))
+		}
+		if rej := derivativeTargetReject(block); rej != nil {
+			return rej.prefixed(batchItemPrefix(i))
+		}
+		content, fields := strOrEmpty(u.Data.Content), u.Fields
+		if u.Data.Edits != nil {
+			edited, err := store.ApplyContentEdits(block.Content, u.Data.Edits)
+			if rej := contentEditReject(err); rej != nil {
+				return rej.prefixed(batchItemPrefix(i))
+			}
+			if err != nil {
+				slog.Error("mcp: stage batch update edits failed", "error", err, "block_id", id, "request_id", reqID)
+				return classInternal.reject("stage failed: internal error")
+			}
+			content, fields = edited, stagedEditFields(fields)
+		}
+		cards[i] = store.CanonicalWrite{
+			Op:            "update",
+			ID:            id,
+			Scope:         block.Scope,
+			Category:      strOrEmpty(u.Data.Category),
+			Title:         strOrEmpty(u.Data.Title),
+			Content:       content,
+			Tags:          u.Data.Tags,
+			Metadata:      u.Data.Metadata,
+			Type:          strOrEmpty(u.Data.Type),
+			UpdateFields:  fields,
+			BaseUpdatedAt: block.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			MetadataMerge: u.Data.MetadataMerge,
+		}
+	}
+	return nil
+}
+
 // mcpStageStoreBatch stages a batch for a confirm_writes key: the gates the
 // direct path runs (gateStoreBatch), the supersedes declarations checked
 // (stageBatchSupersedesCheck), then ONE card whose hash binds every item. A
@@ -243,10 +353,14 @@ func stageBatchUnchanged(ctx context.Context, cfg MCPConfig, plan *storeBatchPla
 // every staged op; an item the confirm then finds unchanged was charged
 // without being written.
 func mcpStageStoreBatch(ctx context.Context, cfg MCPConfig, set *blocktype.Set, ar *auth.AuthResult,
-	items []storeRequest, lim storeBatchLimits, ttl time.Duration, reqID string,
+	items []storeBatchEntry, lim storeBatchLimits, ttl time.Duration, reqID string,
 ) (*mcp.CallToolResult, any, error) {
 	plan, rej := gateStoreBatch(ctx, cfg.Pool, set, ar, items, lim, reqID)
 	if rej != nil {
+		return errResultReject(rej), nil, nil
+	}
+	cardItems := storeBatchCanonicalItems(plan)
+	if rej := stageBatchUpdateCards(ctx, cfg, plan, cardItems, reqID); rej != nil {
 		return errResultReject(rej), nil, nil
 	}
 	unchanged, rej := stageBatchUnchanged(ctx, cfg, plan, reqID)
@@ -264,7 +378,6 @@ func mcpStageStoreBatch(ctx context.Context, cfg MCPConfig, set *blocktype.Set, 
 		return res, nil, nil
 	}
 
-	cardItems := storeBatchCanonicalItems(plan)
 	scopes := make([]string, len(cardItems))
 	for k, it := range cardItems {
 		scopes[k] = it.Scope

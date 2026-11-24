@@ -91,6 +91,14 @@ var (
 	// or the written block itself. ONE class with ONE sentence for all of them,
 	// for the reason classUnknownParent gives.
 	classUnknownSupersedes = rejectClass{http.StatusUnprocessableEntity, "unknown_supersedes"}
+	// classUnknownBlock — an update item of a block batch (issue #211) names a
+	// block by id that it cannot update: unknown id, ambiguous or too short a
+	// prefix, an archived block, one outside the key's writable scopes. ONE
+	// class for all of them, for the reason classUnknownParent gives; the
+	// message is the update tool's. 422 like its two neighbours: the batch
+	// answers about the payload it was handed. The single update surfaces keep
+	// their uncoded answers (errcode.go SCOPE).
+	classUnknownBlock = rejectClass{http.StatusUnprocessableEntity, "unknown_block"}
 	// classSupersedesConflict — the named block lies in the write's scope but
 	// its state refuses the declaration: another live block already supersedes
 	// it through a pinned link (the answer names the current head of that

@@ -13,9 +13,7 @@ import (
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
-	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -208,19 +206,24 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// store.UpsertBlock) still matters: digest/dream write through UpsertBlock
 	// internally and must never self-stage.
 
-	// Execute upsert.
-	block, err := upsertStoreBlock(ctx, h.pool, classifySet, authResult.ApiKeyID, req.Category, req.Title, req.Content,
-		req.Tags, res.Metadata, res.WriteScope, res.ScopeExplicit, res.Sens, req.Type, req.Supersedes)
+	// Execute upsert — with the parent link in the same transaction when the
+	// write names one (upsertStoreBlockWithParent).
+	var block *store.Block
+	var err error
+	if req.ParentID == "" {
+		block, err = upsertStoreBlock(ctx, h.pool, classifySet, authResult.ApiKeyID, req.Category, req.Title, req.Content,
+			req.Tags, res.Metadata, res.WriteScope, res.ScopeExplicit, res.Sens, req.Type, req.Supersedes)
+	} else {
+		block, err = upsertStoreBlockWithParent(ctx, h.pool, classifySet, authResult.ApiKeyID, req, res)
+	}
+	if errors.Is(err, store.ErrLinkScopeViolation) {
+		h.reject(w, ctx, authResult, req, classUnknownParent.reject(parentNotLinkableMsg))
+		return
+	}
 	if err != nil {
 		// I7/S3: the conflicting row is a derivative. The refusal is decided in
 		// the store (atomic with the row lock) and answered here as 403.
 		h.reject(w, ctx, authResult, req, upsertFailureReject(ctx, err, reqID))
-		return
-	}
-
-	// Hang the block under the parent it named (nothing named ⇒ no-op).
-	if rej := linkParent(ctx, h.pool, block.ID, req.ParentID, res.WriteScope, reqID); rej != nil {
-		h.reject(w, ctx, authResult, req, rej)
 		return
 	}
 
@@ -298,22 +301,18 @@ func (h *StoreHandler) reject(w http.ResponseWriter, ctx context.Context, ar *au
 }
 
 // parentPreflight resolves the parent a write NAMED, before anything is
-// written. nil = this write names no parent, or names one it may hang under.
+// written or locked. nil = this write names no parent, or names one it may
+// hang under.
 //
-// It exists because store.UpsertBlock owns its own transaction, so the link
-// (linkParent below) is a SECOND bracket. Without this check the routine
-// refusals — a typo, a parent in another scope, an archived one — would arrive
-// AFTER the row exists, and the only answers left would be an error standing
-// next to a stored block, or a 200 that silently dropped the parent. Neither is
-// an answer this route may give for a field it accepts.
-//
-// It grants nothing: store.PutBlockParent re-validates inside the transaction
-// that performs the write, and store.ParentLinkable answers unknown, archived,
-// foreign-scope, malformed and self-referencing ids with ONE error, so the
-// pre-check cannot become an existence oracle either. The self-reference is why
-// it takes the whole request: (category, title, scope) is the upsert key, so a
-// parent carrying that identity IS the row this write is about, and only a check
-// that knows both can refuse it before the upsert instead of after.
+// It answers the routine refusals — a typo, a parent in another scope, an
+// archived one — before the write's transaction takes its scope lock and row
+// locks. It grants nothing: the transaction checks the parent again, locked
+// (upsertStoreBlockWithParent), and store.ParentLinkable answers unknown,
+// archived, foreign-scope, malformed and self-referencing ids with ONE error,
+// so the pre-check cannot become an existence oracle either. The
+// self-reference is why it takes the whole request: (category, title, scope)
+// is the upsert key, so a parent carrying that identity IS the row this write
+// is about, and only a check that knows both can refuse it before the upsert.
 func parentPreflight(ctx context.Context, pool *pgxpool.Pool, req storeRequest, writeScope, reqID string) *writeReject {
 	parentID := req.ParentID
 	if parentID == "" {
@@ -329,44 +328,33 @@ func parentPreflight(ctx context.Context, pool *pgxpool.Pool, req storeRequest, 
 	return nil
 }
 
-// linkParent hangs the freshly written block under the parent the request named.
-// nil = nothing named, or linked.
-//
-// store.PutBlockParent is the ONE parent_id write path (structlinks.go) and
-// re-asserts the scope invariant inside this transaction — the same primitive
-// store.InsertCommentBlock composes, so the two parent-bearing paths share their
-// verdict instead of agreeing by accident. The allowed scope is the write's own
-// resolved scope, which makes "child and parent share a scope" (§5.2) the
-// condition here; the WRITE scope is not derived from the parent, because the
-// upsert key is (category, title, scope) and a parent-derived scope would move
-// the block a repeat save addresses.
-//
-// WINDOW, deliberate and named: the upsert committed in a transaction of its
-// own, so this is a second bracket. parentPreflight removed the routine reasons
-// for a failure here, which leaves a process death between the two commits, or a
-// parent archived/deleted/moved in between — and then the block exists without
-// the parent its type demands, the orphan the gate prevents. The answer names
-// the failure instead of hiding it. Closing the window means handing the parent
-// to store.UpsertBlock so both writes share ONE transaction, exactly as
-// InsertCommentBlock does; that edit belongs to store/blocks.go, which the wave
-// that added this field does not own (NZ-3 Übergabe).
-func linkParent(ctx context.Context, pool *pgxpool.Pool, blockID, parentID, writeScope, reqID string) *writeReject {
-	if parentID == "" {
-		return nil
+// upsertStoreBlockWithParent writes a block that names a parent: the upsert (a
+// declared supersedes included) and the parent link in ONE transaction, through
+// the halves of a block batch — store.UpsertBlocks with this one item and no
+// budget (a single store books after its commit, as it always has). The
+// transaction locks the parent FOR SHARE and checks it again (unknown,
+// archived, another scope, the write's own identity), refuses a parent that
+// would close a parent cycle (store.LinkBlockParent), and links through
+// store.PutBlockParent, the ONE parent_id write path. Any refusal is
+// store.ErrLinkScopeViolation and writes nothing (issue #211): until then the
+// link was a second transaction after the upsert, and a parent archived,
+// deleted or moved between the pre-check and the link — or a process that
+// ended between the two commits — left the block written without the parent
+// its type may demand. The WRITE scope is still the gate's, not the parent's:
+// the upsert key is (category, title, scope), and a parent-derived scope
+// would move the block a repeat save addresses.
+func upsertStoreBlockWithParent(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, apiKeyID string,
+	req storeRequest, res *stageWriteGateResult,
+) (*store.Block, error) {
+	results, err := store.UpsertBlocks(ctx, pool, []store.BatchUpsert{{
+		Category: req.Category, Title: req.Title, Content: req.Content, Tags: req.Tags,
+		Metadata: res.Metadata, Scope: res.WriteScope, ScopeExplicit: res.ScopeExplicit, Sens: res.Sens,
+		TypeName: req.Type, Supersedes: req.Supersedes, ParentID: req.ParentID,
+	}}, apiKeyID, set, nil)
+	if err != nil {
+		return nil, err
 	}
-	err := pgxdb.Write(ctx, pool, pgxdb.At("store: link block parent"), func(tx pgx.Tx) error {
-		return store.PutBlockParent(ctx, tx, blockID, parentID, []string{writeScope})
-	})
-	if err == nil {
-		return nil
-	}
-	logRequestError(ctx, "store: parent link failed after the upsert — the block exists without its parent",
-		"error", err, "block_id", blockID, "parent_id", parentID, "request_id", reqID,
-		"write_outcome", writeCommitted, "link_outcome", writeOutcome(err))
-	if errors.Is(err, store.ErrLinkScopeViolation) {
-		return classUnknownParent.reject(parentNotLinkableMsg)
-	}
-	return classInternal.reject("Internal server error")
+	return results[0].Block, nil
 }
 
 // blockSizeLimit checks the shared write-path size caps. Empty = within

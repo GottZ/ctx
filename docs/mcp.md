@@ -464,17 +464,31 @@ transaction, or none is.
 
 | Parameter | Type | | Description |
 |---|---|---|---|
-| `items` | object[] | required | the blocks to write; each takes the [`store`](#store) arguments (`category`, `title`, `content` required) |
+| `items` | object[] | required | the writes: a **store item** takes the [`store`](#store) arguments (`category`, `title`, `content` required); an item with an `id` is an **update item** and takes the [`update`](#update) arguments |
 
 ```json
 {"items": [
   {"category": "decisions", "title": "Cache layer", "content": "We cache …", "metadata": {"source": "design review"}},
-  {"category": "decisions", "title": "Decision index", "content": "- Cache layer"}
+  {"id": "<id of the decision index>", "edits": [{"old": "- Auth", "new": "- Auth\n- Cache layer"}]}
 ]}
 ```
 
-Each item runs the gate chain of `store` and upserts on (category, title, scope); an
-item may name its own `scope` and `supersedes`. Any refusal — of one item or of the
+A batch may mix both forms; a batch without an `id` is read exactly as before update
+items existed (issue #211). Each store item runs the gate chain of `store` and upserts
+on (category, title, scope); it may name its own `scope` and `supersedes`. Each update
+item runs the gate chain of `update` (at least one field, `content` or `edits`,
+`metadata` or `metadata_merge`, the size caps, the claim gates, the id within the key's
+writable scopes — a miss answers `unknown_block` with `Block not found (or not in a
+writable scope of this key)`) and, in the transaction, its statement: a derivative,
+an identity another block holds, an edit that does not match answer as `update` answers
+them, with a code. An update item takes no `sensitivity`, `scope` or `supersedes`, a
+store item no `edits` or `metadata_merge` (`invalid_body`). Two items that would write
+one block — two updates of one id, a store item whose identity is an update item's
+block, an update renamed onto the identity another item writes — are refused
+(`constraint`, `same block as items[<j>]` / `same category, title and scope as
+items[<j>]`); a block an earlier item of the batch creates cannot be updated in the same
+batch (its id does not exist yet). Parents are REST only (`parent_id`, `parent_item`,
+[api.md](api.md#endpoints)), as on `store`. Any refusal — of one item or of the
 batch — writes nothing and answers `isError: true` with the refusal's code. A refusal
 of one item names it, its text behind the prefix `items[<i>]:` (the item's position):
 a gate of the item (as `store` answers it), `constraint` for two items with the same
@@ -489,7 +503,7 @@ item: a batch without items answers `missing_fields` and more items than
 `writes.batch_max_items` (default 100, at most 1000, `0` switches batches off) `size_cap`, each with
 a text that opens with `items:`; a batch over the write budget (below) answers
 `rate_limit` with `Rate limit exceeded: …`. An item whose write would change nothing (the `store` tool's
-identical-content check) is not written and costs nothing; the batch decides that in its
+identical-content check; for an update item: every field it names already holds) is not written and costs nothing; the batch decides that in its
 transaction on the block while it holds the block's lock, and keeps the lock to its
 commit, so no other write lands between the decision and the commit. Every other item
 counts as one write of the key's write budget (`query.rate_limit_write`), and a batch
@@ -510,6 +524,10 @@ items[1]: No change needed — identical content already exists (id: <uuid>)
 items[2]: Stored: <title> (id: <uuid>, category: <category>, supersedes: <uuid>)
 ```
 
+A batch with update items counts them on their own and answers each in the `update`
+tool's wording: `Batch written in one transaction: 1 stored, 2 updated, 0 unchanged.`,
+`items[1]: Updated: <title> (id: <uuid>, category: <category>)`.
+
 For a `confirm_writes` key the batch is **staged as one card**: one `payload_hash`
 over every item — an item unchanged at stage time included, named in the stage answer
 as `items[<i>]: identical content exists now (id: <uuid>) — the confirm leaves it as it
@@ -522,9 +540,16 @@ confirm would run it, then rolled back: whatever its transaction would refuse on
 today's blocks — two blocks declaring each other, a target another item of the batch
 retypes out of the dream loop, a derivative in the way — refuses the stage, and no
 card is issued; a batch without a declaration meets such refusals at the confirm.
+An update item is staged as the `update` tool stages it: the block's `updated_at` is
+bound as its drift pin, edits are resolved at stage time and bound as the content they
+produce, a `metadata_merge` stays a merge.
 [`confirm`](#confirm) then runs every item of the
 card in one transaction, deciding on each locked block whether it is still unchanged
-(then it is left as it is, its intent spent). Before it spends the hash, the confirm re-checks each
+(then it is left as it is, its intent spent). A block of an update item that changed
+since the stage — in any item, not only the first — refuses the whole confirm with
+`items[<k>]: confirm rejected: block <uuid> changed since this update was staged …` and
+keeps the card; one that changes after that check and before the write refuses it as
+well, then with the token spent. Before it spends the hash, the confirm re-checks each
 item's scope and claims against the key and the registry of that moment — a refusal
 there names the item (`items[<k>]:` in front of the confirm's wording) and keeps the
 card; a refusal of the transaction itself (a supersedes target that
