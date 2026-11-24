@@ -1,8 +1,100 @@
 -- =============================================================================
--- 194_pending_writes_drop_auth_keys.sql — the staged writes keep no foreign
--- key on context_api_keys and context_principals (issue #277)
+-- 194_pending_writes_drop_auth_keys.sql — the dream queue count reads the
+-- eligible rows from one index (issue #271), and the staged writes keep no
+-- foreign key on context_api_keys and context_principals (issue #277)
 -- Part of ctx by GottZ (https://github.com/GottZ/ctx)
 -- =============================================================================
+-- PART 1: idx_blocks_dream_eligible.
+--
+-- dream.QueueDepth (the dream_queue section of manage stats, the /api/status
+-- collector every events.queue_stats_interval) counts the dream-eligible
+-- blocks of the caller's read scopes:
+--   WHERE NOT is_archived
+--     AND lifecycle_state IN ('knowledge', 'canonical', 'synthesis')
+--     AND type_name = ANY($2)            -- the dream.linkable types
+--     AND scope = ANY($1)                -- the read scopes
+-- and no index carried the first two conjuncts: the plans combined
+-- idx_blocks_type_name, idx_context_scope(_active) and idx_blocks_sensitivity,
+-- or walked idx_context_scope over every row of the scopes. This adds
+--
+--   idx_blocks_dream_eligible ON context_blocks (scope, type_name)
+--       WHERE NOT is_archived AND lifecycle_state IN ('knowledge', 'canonical', 'synthesis')
+--
+-- which holds exactly the eligible rows. The count still reads embedding IS
+-- NULL of every eligible row on the heap; the index removes the others.
+-- Measured (docs/operations.md, "Migration 194"; production image, rows of
+-- about 1.3 kB, per row of a linkable type three of other types, 1 in 13
+-- archived), three read scopes holding three quarters of the rows, the plan a pooled
+-- connection runs after five executions, random_page_cost 4: 143 443 ->
+-- 72 046 buffers at 1 000 000 rows, 573 741 -> 288 887 at 4 000 000; at
+-- random_page_cost 1.1 76 026 -> 72 044 and 304 661 -> 288 885; one scope of
+-- 10 000 rows beside them 9 429 -> 2 281 at 4 000 000 (1.1); at 10 000 000
+-- rows 1 461 880 -> 721 989 (4) and 781 248 -> 721 987 (1.1). The first five
+-- executions on a connection are custom plans, which gain nothing at 4 and
+-- at 10 000 000 rows and 1.1 read 762 022 -> 1 524 044 buffers (a plain
+-- index scan of this index). Write cost: one entry per insert of an eligible
+-- block and per update that is not HOT, +57-90 bytes of WAL per insert
+-- (under 1 %); about 6.4 bytes per table row (24 MB at 4 000 000 rows, 61 MB
+-- at 10 000 000).
+--
+-- HOT. scope, type_name, is_archived and lifecycle_state are named by other
+-- indexes of context_blocks already (idx_context_scope, idx_blocks_type_name,
+-- idx_archived and the partial indexes, idx_block_type), so no update that was
+-- HOT stops being HOT: the dream pick's claim and RestampBackoff write
+-- dream_cooldown_until alone, which no index names (measured: 2 000 of 2 000
+-- claims HOT with and without the index; with a dream column in the key, the
+-- rejected variant, 0 of 2 000). The predicate names no embedding column: the
+-- index is not in the attnum class of the re-embed cutover.
+--
+-- COUPLING. The predicate is the lifecycle list of dream.dreamEligibleWhere;
+-- a state added there and not here leaves QueueDepth on the plans before 194
+-- (correct, at their cost). TestDreamEligibleIndexPredicateIsThePickPredicate
+-- holds the two lists equal.
+--
+-- BUILD AND ITS RUNBOOK (docs/development.md, "A migration with a row
+-- threshold"). CREATE INDEX takes SHARE on context_blocks until the file
+-- commits: readers go on, every INSERT, UPDATE and DELETE waits; the build
+-- reads the whole heap.
+--   * A valid index of this name with exactly this definition, as
+--     PostgreSQL deparses it:
+--       CREATE INDEX idx_blocks_dream_eligible ON public.context_blocks USING btree (scope, type_name) WHERE ((NOT is_archived) AND ((lifecycle_state)::text = ANY ((ARRAY['knowledge'::character varying, 'canonical'::character varying, 'synthesis'::character varying])::text[])))
+--     no-op.
+--   * Below 500 000 rows (ctx_migration_rows, migration 191) and nothing of
+--     this name: built inline. Measured with a writer inserting a block
+--     every 2 ms (rows of about 1.5 KB of heap, host load 25-38): the build
+--     and the writer's longest wait 0.69-1.07 s at 250 000 rows (390 MB
+--     heap), 1.00-1.39 s at 500 000 (781 MB); 2.9 MB of index at 415 700
+--     entries (the key deduplicates).
+--   * Above, or a name taken by anything else (another definition, an
+--     INVALID index — an aborted CONCURRENTLY build — or a relation that is
+--     not an index): WARNING, nothing built or dropped, no SHARE lock on
+--     context_blocks. Build it out of band (readers and writers go on).
+--     First, what holds the name:
+--
+--       SELECT c.relkind, i.indisvalid, pg_get_indexdef(c.oid)
+--         FROM pg_class c
+--         JOIN pg_namespace n ON n.oid = c.relnamespace
+--         LEFT JOIN pg_index i ON i.indexrelid = c.oid
+--        WHERE n.nspname = 'public' AND c.relname = 'idx_blocks_dream_eligible';
+--
+--     No row: build it. An index, valid, of the definition above: keep it.
+--     That definition with indisvalid false: DROP INDEX CONCURRENTLY
+--     idx_blocks_dream_eligible; then build it. Anything else: rename it,
+--     then build it:
+--
+--       CREATE INDEX CONCURRENTLY idx_blocks_dream_eligible
+--           ON context_blocks (scope, type_name)
+--           WHERE NOT is_archived AND lifecycle_state IN ('knowledge', 'canonical', 'synthesis');
+--
+--     No IF NOT EXISTS: it would pass over an INVALID index or a foreign
+--     object of the name. Until it stands QueueDepth counts as before 194
+--     and the schema-contract manifest stays red.
+-- Rows, not the heap: the threshold counts live rows, the build reads every
+-- heap page; compact a heap far larger than its rows first, or build the
+-- index by the runbook before the upgrade.
+--
+-- PART 2: the foreign keys of context_pending_writes.
+--
 -- context_pending_writes (migration 089) is a TimescaleDB hypertable of 1 h
 -- chunks with two foreign keys onto the tables every authentication reads:
 --   context_pending_writes_api_key_id_fkey   (api_key_id)   -> context_api_keys    ON DELETE CASCADE
@@ -117,13 +209,69 @@
 -- after removing the stages whose key is gone (the DELETE above), then
 -- DELETE FROM _migrations WHERE version = 194.
 --
--- Constraint change only, no table, column or index: the test.sh T07 counts
--- and the schema-contract manifest's sections stay; migration_max 193 -> 194.
--- Idempotent, forward-only. Registration by the runner (store.RunMigrations).
+-- WAY BACK, part 1: only when the check query of part 1 shows an index of
+-- its definition (any validity) — a same-named object of another kind or
+-- definition is one this file left alone with a WARNING, and it stays —
+-- DROP INDEX CONCURRENTLY idx_blocks_dream_eligible; QueueDepth counts as
+-- before 194. The older binary (v5.79.0) pays the index's writes and reads it
+-- with the same statement; its schema-contract check reports the index it
+-- does not know (param) beside _migrations:194.
+--
+-- No table or column: the test.sh T07 counts stay. The schema-contract
+-- manifest gains idx_blocks_dream_eligible and migration_max 193 -> 194 (it
+-- lists no constraints). Idempotent, forward-only. Registration by the runner
+-- (store.RunMigrations).
 -- =============================================================================
 
 SET LOCAL lock_timeout = '3s';
 
+-- Part 1: the dream queue index (issue #271). First, so the ACCESS EXCLUSIVE
+-- of part 2 on the tables every authentication reads is taken last and held
+-- only for the drop.
+DO $do$
+DECLARE
+    -- Measured: the build at the threshold and what waits for it
+    -- (docs/operations.md, "Migration 194").
+    inline_rows CONSTANT BIGINT := 500000;
+    c_def       CONSTANT TEXT := 'CREATE INDEX idx_blocks_dream_eligible ON public.context_blocks USING btree (scope, type_name) WHERE ((NOT is_archived) AND ((lifecycle_state)::text = ANY ((ARRAY[''knowledge''::character varying, ''canonical''::character varying, ''synthesis''::character varying])::text[])))';
+    v_kind      TEXT;
+    v_def       TEXT;
+    v_valid     BOOLEAN;
+    v_rows      BIGINT;
+BEGIN
+    -- Whatever relation holds the name: CREATE INDEX could not pass a view,
+    -- a table or a sequence of this name either.
+    SELECT c.relkind::text, pg_get_indexdef(i.indexrelid), i.indisvalid INTO v_kind, v_def, v_valid
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      LEFT JOIN pg_index i ON i.indexrelid = c.oid
+     WHERE n.nspname = 'public' AND c.relname = 'idx_blocks_dream_eligible';
+
+    IF FOUND THEN
+        -- The definition as PostgreSQL deparses it, so a same-named index on
+        -- another table, key or predicate is not adopted.
+        IF v_kind = 'i' AND v_valid AND v_def = c_def THEN
+            RETURN;                 -- usable, nothing to do
+        END IF;
+        RAISE WARNING 'idx_blocks_dream_eligible exists but is not the index of migration 194 (valid=%): %. Nothing built or dropped; the dream queue counts stay correct at their cost before 194. Runbook in the header of 194_pending_writes_drop_auth_keys.sql; the schema-contract manifest stays red until then.',
+            COALESCE(v_valid, false), COALESCE(v_def, format('a relation of relkind %s, not an index', v_kind));
+        RETURN;
+    END IF;
+
+    v_rows := ctx_migration_rows('public.context_blocks', inline_rows);
+    IF v_rows >= inline_rows THEN
+        RAISE WARNING 'idx_blocks_dream_eligible is missing at % rows: build it out of band (CREATE INDEX CONCURRENTLY, runbook in the header of 194_pending_writes_drop_auth_keys.sql). The dream queue counts stay correct at their cost before 194; the schema-contract manifest stays red.',
+            v_rows;
+        RETURN;
+    END IF;
+
+    CREATE INDEX idx_blocks_dream_eligible
+        ON context_blocks (scope, type_name)
+        WHERE NOT is_archived AND lifecycle_state IN ('knowledge', 'canonical', 'synthesis');
+END
+$do$;
+
+-- Part 2: the foreign keys of the staged writes (issue #277).
 DO $do$
 DECLARE
     -- Measured: the drop and the authentications waiting for it per chunk
