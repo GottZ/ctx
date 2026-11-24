@@ -10,9 +10,9 @@
 // pruned. The prune now detaches such a child (parent_id = NULL) under the
 // supersedes lock of its scope before it deletes the parent — as a scope
 // purge never removes a row of another scope (it refuses such a closure) and
-// an archive cascades nothing. The chain reaches B through a block of the
+// an archive cascades nothing. The chain reaches B through two blocks of the
 // tenant's OTHER scope, so the batch that deletes the parent finds B's child
-// only below the cascade's first level.
+// only below the cascade's second level.
 package store_test
 
 import (
@@ -37,9 +37,16 @@ func TestTenantPruneLeavesAnotherTenantsChild(t *testing.T) {
 			f.tenant(t, "fc-b", b, "")
 			parent := f.block(t, a1, "fc parent")
 			// A chain inside A that crosses its scopes, then into B: parent (a1)
-			// → mid (a2) → child (b) → grandchild (b).
+			// → mid (a2) → low (a2) → child (b) → grandchild (b).
 			mid := f.c547Moved(t, a1, a2, "fc mid", parent)
-			child := f.c547Moved(t, a2, b, "fc child", mid)
+			if err := f.c547Link(f.pool, a2, "fc low", mid); err != nil {
+				t.Fatalf("low: %v", err)
+			}
+			var low string
+			if err := f.pool.QueryRow(ctx, `SELECT id::text FROM context_blocks WHERE title = 'fc low'`).Scan(&low); err != nil {
+				t.Fatal(err)
+			}
+			child := f.c547Moved(t, a2, b, "fc child", low)
 			if err := f.c547Link(f.pool, b, "fc grandchild", child); err != nil {
 				t.Fatalf("grandchild: %v", err)
 			}
