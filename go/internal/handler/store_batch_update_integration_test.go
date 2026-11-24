@@ -747,7 +747,7 @@ func TestStoreBatchUpdateReviewCases(t *testing.T) {
 		x := f.seed(t, "sbr-nul", "nul body")
 		refused(t, k, sbItems(sbuUpdate(x, "content", "a\x00b")), "invalid_body", "items[0]: content carries a NUL character")
 		if a := f.mcpCall(t, k, "store_batch", sbItems(sbuUpdate(x, "metadata_merge", map[string]any{"k": "a\x00b"}))); !a.IsError ||
-			a.Code != "invalid_body" || !strings.HasPrefix(a.Text, "items[0]: metadata_merge carries a NUL character") {
+			a.Code != "invalid_body" || !strings.HasPrefix(a.Text, "items[0]: metadata_merge") || !strings.Contains(a.Text, " carries a NUL character") {
 			t.Errorf("MCP: %+v", a)
 		}
 	})

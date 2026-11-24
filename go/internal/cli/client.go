@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -127,11 +128,15 @@ func (c *Client) Post(endpoint string, body any) ([]byte, error) {
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, c.readLimit()))
 	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+		return nil, fmt.Errorf("%w: %w", errReadResponse, err)
 	}
 
 	return respBody, nil
 }
+
+// errReadResponse marks a call that ended while its answer was read: the
+// server had answered with its status and headers before (Post).
+var errReadResponse = errors.New("read response")
 
 // Do sends a request with an arbitrary method to BaseURL/path (path starts
 // with "/api/…"). body may be nil. Unlike Post (endpoint-POST only), Do

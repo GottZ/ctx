@@ -1969,12 +1969,18 @@ func guardIdentityMove(ctx context.Context, tx pgx.Tx, b *Block) error {
 // ErrEditedContentTooLarge and writes nothing. A MetadataMerge is one jsonb
 // expression of the statement and reads the row the statement locked.
 func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string) (*Block, bool, error) {
+	return updateBlock(ctx, pool, id, data, writeScopes, nil)
+}
+
+// updateBlock is UpdateBlock with the key's write budget spent in the
+// update's transaction (UpdateBlockBooked, issue #519); nil books nothing.
+func updateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string, budget *WriteBudget) (*Block, bool, error) {
 	u, err := prepareUpdate(id, data, writeScopes)
 	if err != nil {
 		return nil, false, err
 	}
 	b := &Block{}
-	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, u)
+	found, needsReEmbed, err := runBlockUpdate(ctx, pool, b, u, budget)
 	var taken *BlockIdentityTakenError
 	if errors.As(err, &taken) {
 		taken.ConflictID = blockIdentityHolder(ctx, pool, id, data, writeScopes, taken.refusedKey)
@@ -2264,7 +2270,7 @@ func updateBlockMissReason(ctx context.Context, pool *pgxpool.Pool, id string, w
 // Edits (issue #406): the row is locked and read, and the content the edits
 // produce fills its argument slot, after the supersedes locks of a scope move
 // (which lock the block first) and before the statement.
-func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, u blockUpdate) (found, needsReEmbed bool, err error) {
+func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, u blockUpdate, budget *WriteBudget) (found, needsReEmbed bool, err error) {
 	var swept int
 	scopeMove := u.moveScopes != nil
 	write := pgxdb.Write
@@ -2282,12 +2288,28 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, u blockUp
 		if ok, err := u.edits.resolve(ctx, tx, u.id, u.args); !ok {
 			return cmp.Or(err, pgxdb.ErrRollback) // a miss writes nothing, as below
 		}
-		var err error
+		charged, err := u.charge(ctx, tx, budget)
+		if err != nil {
+			return err
+		}
+		if charged {
+			// A key whose budget is used up is refused before the statement
+			// (second review of PR #553), by a count without the budget lock:
+			// the statement of an update the count under the lock refuses
+			// anyway would run its triggers and WAL and hold the row for it.
+			// A key with budget left is decided by spend, under the lock.
+			if err := budget.check(ctx, tx, 1); err != nil {
+				return err
+			}
+		}
 		swept, needsReEmbed, err = u.execHeld(ctx, tx, b, held)
 		if errors.Is(err, errUpdateMiss) {
 			return pgxdb.ErrRollback // a miss writes nothing: a rollback, not a commit
 		}
-		return err
+		if err != nil || !charged {
+			return err
+		}
+		return budget.spend(ctx, tx, []string{u.id})
 	}); err != nil {
 		if errors.Is(err, pgxdb.ErrRollback) {
 			return false, false, nil

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,6 +25,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/chat"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -43,6 +45,11 @@ func (s *chatStageRunner) StageWrite(ctx context.Context, category, title, conte
 		return nil, "", errors.New("chat stage: no resolved auth identity")
 	}
 	reqID := RequestIDFromContext(ctx)
+	// Issue #519: a NUL the model wrote into an argument is refused as the
+	// HTTP and MCP surfaces refuse it — before any statement, model-visible.
+	if f := updateNULField(store.UpdateBlockData{Category: &category, Title: &title, Content: &content, Tags: tags, Metadata: metadata}); f != "" {
+		return nil, f + " " + nulFieldMessage, nil
+	}
 
 	var set *blocktype.Set
 	if s.blocktypes != nil {
@@ -89,7 +96,14 @@ func (s *chatStageRunner) StageWrite(ctx context.Context, category, title, conte
 		slog.Error("chat: canonicalize staged write failed", "error", err, "request_id", reqID)
 		return nil, "", err
 	}
-	pw, err := store.StagePendingWrite(ctx, s.pool, ar.ApiKeyID, res.WriteScope, "store", "chat", canonical, hash, ttl)
+	// The write intent is booked with the card, in the stage's transaction
+	// (stageWithIntent), as the update stage does (issue #519).
+	pw, err := stageWithIntent(ctx, s.pool, updateWriteBudget(ctx, s.cfg, ar), func(q pgxdb.Rower) (*store.PendingWrite, error) {
+		return store.StagePendingWrite(ctx, q, ar.ApiKeyID, res.WriteScope, "store", "chat", canonical, hash, ttl)
+	})
+	if rej := updateBudgetReject(err); rej != nil {
+		return nil, rej.Msg, nil
+	}
 	if err != nil {
 		logRequestError(ctx, "chat: stage pending write failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return nil, "", err
@@ -142,7 +156,7 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	if len(fields) == 0 {
 		return nil, "nothing to update — provide at least one of category, title, content, tags, metadata", nil
 	}
-	if msg := blockSizeLimit(strOrEmpty(data.Category), strOrEmpty(data.Title), strOrEmpty(data.Content)); msg != "" {
+	if msg := stageUpdateShapeReject(id, data); msg != "" {
 		return nil, msg, nil
 	}
 	// I7 claim gates, the call the MCP update twin makes for an update without
@@ -158,22 +172,11 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	}
 
 	var ttl time.Duration
-	rateLimit := 0
 	if s.cfg != nil {
-		snap := s.cfg.SnapshotForRequest(ctx)
-		ttl = snap.Writes.ConfirmTTL
-		rateLimit = snap.Query.RateLimitWrite
+		ttl = s.cfg.SnapshotForRequest(ctx).Writes.ConfirmTTL
 	}
-	if rateLimit > 0 {
-		writeCount, err := store.CheckRateLimit(ctx, s.pool, ar.ApiKeyID)
-		if err != nil {
-			logRequestError(ctx, "chat: stage update rate limit check error", "error", err, "request_id", reqID)
-			return nil, "", err
-		}
-		if writeCount >= rateLimit {
-			return nil, fmt.Sprintf("Rate limit exceeded: max %d writes per 60 seconds", rateLimit), nil
-		}
-	}
+	// The write budget is counted and spent with the stage, in its
+	// transaction (stageWithIntent, issue #519).
 
 	resolvedID, _, err := store.ResolveBlockID(ctx, s.pool, id, writableBlockScopes(ar), nil)
 	if err != nil {
@@ -216,7 +219,12 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 		slog.Error("chat: canonicalize staged update failed", "error", err, "request_id", reqID)
 		return nil, "", err
 	}
-	pw, err := store.StagePendingWrite(ctx, s.pool, ar.ApiKeyID, block.Scope, "update", "chat", canonical, hash, ttl)
+	pw, err := stageWithIntent(ctx, s.pool, updateWriteBudget(ctx, s.cfg, ar), func(q pgxdb.Rower) (*store.PendingWrite, error) {
+		return store.StagePendingWrite(ctx, q, ar.ApiKeyID, block.Scope, "update", "chat", canonical, hash, ttl)
+	})
+	if rej := updateBudgetReject(err); rej != nil {
+		return nil, rej.Msg, nil
+	}
 	if err != nil {
 		logRequestError(ctx, "chat: stage pending update failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return nil, "", err
@@ -268,4 +276,17 @@ func previewOf(content string) string {
 		return content
 	}
 	return string(r[:max]) + "…"
+}
+
+// stageUpdateShapeReject is the refusal of a staged update's values before
+// any statement: a NUL character in the id or a field (issue #519, the
+// refusal StageWrite gives), then the size caps.
+func stageUpdateShapeReject(id string, data store.UpdateBlockData) string {
+	if strings.ContainsRune(id, 0) {
+		return "id " + nulFieldMessage
+	}
+	if f := updateNULField(data); f != "" {
+		return f + " " + nulFieldMessage
+	}
+	return blockSizeLimit(strOrEmpty(data.Category), strOrEmpty(data.Title), strOrEmpty(data.Content))
 }

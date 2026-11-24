@@ -163,17 +163,3 @@ func (n *healthNotice) run(r *healthRound, db *pgxpool.Pool, snap []backends.Bac
 	n.mu.Unlock()
 	close(r.done)
 }
-
-// budgetShare is the context of a probe with left candidates of its role
-// still to probe, this one included (issue #519): an equal share of what is
-// left of ctx's budget, so each candidate gets a try — the first candidate of
-// two waits half the budget, and a later one is not "probed" with a budget an
-// earlier one used up. A slow first candidate is the price: it has to answer
-// within its share. The caller of /health waits no longer than before.
-func budgetShare(ctx context.Context, left int) (context.Context, context.CancelFunc) {
-	deadline, ok := ctx.Deadline()
-	if !ok || left <= 1 {
-		return context.WithCancel(ctx)
-	}
-	return context.WithTimeout(ctx, time.Until(deadline)/time.Duration(left))
-}

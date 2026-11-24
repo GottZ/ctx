@@ -24,6 +24,15 @@ const (
 	// under the SDKs' timeout; the throughput knob is the concurrency, not
 	// this deadline.
 	modelAuthDBDeadline = time.Second
+	// modelAuthCheckBound bounds a check's statement once it holds a pool
+	// connection, past its caller's deadline (onSlot): a slow database
+	// answers within it rather than losing the connection to a cancel (a
+	// cancelled statement destroys its connection, and the close and the
+	// reconnect cost the pool), and a database that does not answer gives
+	// the slot back after it. While it runs the check keeps its semaphore
+	// slot, so the door waits for at most gateway.auth_db_concurrency of
+	// them (issue #519).
+	modelAuthCheckBound = 10 * time.Second
 	// modelAuthIPv6Bits is the IPv6 prefix of the lock key: one /64 is one
 	// host's rotation space (B26).
 	modelAuthIPv6Bits = 64

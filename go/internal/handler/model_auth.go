@@ -298,8 +298,8 @@ func (d *ModelDoor) Handler(next http.Handler) http.Handler {
 		// before it: a revocation signal during the check is caught at
 		// registration (stage 8).
 		mark := d.inflight.touchMark()
-		ca, err := d.check(ctx, s.DBConcurrency, func(c context.Context) (*auth.ConsumerAuth, error) {
-			return auth.AuthenticateModelKey(c, d.pool, hash, ip, secure)
+		ca, err := d.check(ctx, s.DBConcurrency, func(c context.Context, q auth.ModelAuthQuerier) (*auth.ConsumerAuth, error) {
+			return auth.AuthenticateModelKey(c, q, hash, ip, secure)
 		})
 		if err != nil {
 			d.warn("model auth: check unavailable", "error", err, "request_id", RequestIDFromContext(ctx))
@@ -425,10 +425,18 @@ func bearerToken(r *http.Request) (string, bool) {
 	return token, token != ""
 }
 
-// check runs one database check under the semaphore, all of it inside
-// modelAuthDBDeadline: semaphore wait, pool acquire and query. Every failure
-// wraps ErrModelAuthUnavailable.
-func (d *ModelDoor) check(ctx context.Context, limit int, run func(context.Context) (*auth.ConsumerAuth, error)) (*auth.ConsumerAuth, error) {
+// check runs one database check under the semaphore. The caller's answer
+// comes within modelAuthDBDeadline — semaphore wait, pool acquire and query —
+// and every failure wraps ErrModelAuthUnavailable. The semaphore slot is
+// held as long as the check's pool slot is (onSlot), not as long as the
+// caller waits (issue #519): a check cancelled at the deadline destroyed its
+// connection, whose close, and the build an abandoned acquire leaves behind,
+// kept the pool slot after the semaphore had released it — under a database
+// that did not answer the door, it held 19 slots of 20 with a semaphore of 4.
+// So the slot goes back from the check's own goroutine once its connection
+// is back in the pool or closed, and the door holds at most
+// gateway.auth_db_concurrency of the pool's slots.
+func (d *ModelDoor) check(ctx context.Context, limit int, run func(context.Context, auth.ModelAuthQuerier) (*auth.ConsumerAuth, error)) (*auth.ConsumerAuth, error) {
 	dctx, cancel := context.WithTimeout(ctx, modelAuthDBDeadline)
 	defer cancel()
 	t0 := time.Now()
@@ -439,13 +447,51 @@ func (d *ModelDoor) check(ctx context.Context, limit int, run func(context.Conte
 		d.countUnavailable(ctx, &d.st.semaphoreTimeouts)
 		return nil, fmt.Errorf("%w: semaphore: %w", ErrModelAuthUnavailable, err)
 	}
-	defer release()
-	ca, err := run(dctx)
-	if err != nil {
-		d.countUnavailable(ctx, &d.st.dbErrors)
-		return nil, fmt.Errorf("%w: %w", ErrModelAuthUnavailable, err)
+	type outcome struct {
+		ca  *auth.ConsumerAuth
+		err error
 	}
-	return ca, nil
+	done := make(chan outcome, 1)
+	go func() {
+		defer release()
+		ca, err := d.onSlot(context.WithoutCancel(ctx), run)
+		done <- outcome{ca, err}
+	}()
+	select {
+	case o := <-done:
+		if o.err != nil {
+			d.countUnavailable(ctx, &d.st.dbErrors)
+			return nil, fmt.Errorf("%w: %w", ErrModelAuthUnavailable, o.err)
+		}
+		return o.ca, nil
+	case <-dctx.Done():
+		d.countUnavailable(ctx, &d.st.dbErrors)
+		return nil, fmt.Errorf("%w: %w", ErrModelAuthUnavailable, dctx.Err())
+	}
+}
+
+// onSlot runs a check on a connection of the pool and returns once the
+// pool slot is free again. The acquire is never given up — puddle finishes
+// the build of an abandoned acquire in the background, on a slot of its own
+// —, so it waits for a connection, or for the connect timeout of the one
+// being built; the statement runs under modelAuthCheckBound instead of the
+// caller's deadline; and a connection the pool destroys on release (a
+// statement cancelled at the bound) is waited for until its close is done.
+func (d *ModelDoor) onSlot(ctx context.Context, run func(context.Context, auth.ModelAuthQuerier) (*auth.ConsumerAuth, error)) (*auth.ConsumerAuth, error) {
+	conn, err := d.pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	qctx, cancel := context.WithTimeout(ctx, modelAuthCheckBound)
+	ca, err := run(qctx, conn)
+	cancel()
+	pc := conn.Conn().PgConn()
+	destroyed := pc.IsClosed() || pc.IsBusy() || pc.TxStatus() != 'I' // Conn.Release's own test
+	conn.Release()
+	if destroyed {
+		<-pc.CleanupDone()
+	}
+	return ca, err
 }
 
 // countUnavailable files a failed database step: as a gone client when the

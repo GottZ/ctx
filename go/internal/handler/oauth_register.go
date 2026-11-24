@@ -115,7 +115,7 @@ func (h *OAuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Body cap analogous to /authorize and /token (8192, design 02 §4b).
-	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+	r.Body = http.MaxBytesReader(w, r.Body, AuthFlowBodyCap)
 	var req dcrRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		// Covers malformed JSON and the MaxBytesReader overrun alike —

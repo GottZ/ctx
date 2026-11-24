@@ -251,6 +251,11 @@ func TestValidateTable(t *testing.T) {
 		// V17 comment deferred lands here. Signal change is this commit's
 		// visible decision, not a fold-in (W19).
 		{"V21 backfill base zero rejected", map[string]string{"embed_backfill.backoff_base": "0"}, "embed_backfill.backoff_base", SeverityError},
+		// V73 (#519): a database name whose percent escapes the DSN decoded
+		// before is used as written, with a warning naming both readings.
+		{"V73 pre-encoded database name warned", map[string]string{"server.db": "my%20db"}, "server.db", SeverityWarn},
+		{"V73 plain database name ok", map[string]string{"server.db": "context_store"}, "server.db", -1},
+		{"V73 a percent that decodes nothing ok", map[string]string{"server.db": "50%off"}, "server.db", -1},
 		// V70 (#236): the hold of a tenant-admin's repeated backfill release.
 		{"V70 release hold zero rejected", map[string]string{"embed_backfill.release_hold": "0"}, "embed_backfill.release_hold", SeverityError},
 		{"V17 release hold negative", map[string]string{"embed_backfill.release_hold": "-60"}, "embed_backfill.release_hold", SeverityError},

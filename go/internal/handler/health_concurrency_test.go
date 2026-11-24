@@ -150,13 +150,13 @@ func TestHostProbesFinishedResultStands(t *testing.T) {
 	var hits atomic.Int32
 	url := slowBackend(t, 0, &hits)
 	probes := newHostProbes()
-	if err := probes.ping(context.Background(), url, 1); err != nil {
+	if err := probes.ping(context.Background(), url); err != nil {
 		t.Fatalf("first probe: %v", err)
 	}
 	ended, cancel := context.WithCancel(context.Background())
 	cancel()
 	for i := range 100 {
-		if err := probes.ping(ended, url, 1); err != nil {
+		if err := probes.ping(ended, url); err != nil {
 			t.Fatalf("lookup %d of a finished reachable probe on an ended context = %v, want its result (nil)", i, err)
 		}
 	}

@@ -637,8 +637,8 @@ func TestModelAliasManage_PolicyIdentityKind_Integration(t *testing.T) {
 		"sensitivity": "secret", "description": strings.Repeat("x", 501)}); code != http.StatusUnprocessableEntity || fieldsOf(out) != "name,kind,role,sensitivity,description" {
 		t.Errorf("create with five bad fields = %d %s, want 422 at name,kind,role,sensitivity,description", code, body)
 	}
-	if code, out, body := m.do(m.admin, "model-alias-update", gpID, map[string]any{"description": "nul\x00byte"}); code != http.StatusBadRequest || !strings.HasPrefix(func() string { s, _ := out["error"].(string); return s }(), "data.description ") {
-		t.Errorf("update with a NUL byte in description = %d %s, want 400 naming data.description (text cannot hold NUL; the dispatcher refuses it, issue #519)", code, body)
+	if code, out, body := m.do(m.admin, "model-alias-update", gpID, map[string]any{"description": "nul\x00byte"}); code != http.StatusUnprocessableEntity || fieldsOf(out) != "description" {
+		t.Errorf("update with a NUL byte in description = %d %s, want 422 at description (text cannot hold NUL; the dispatcher refuses it as the form's field error, issue #519)", code, body)
 	}
 	if code, out, body := m.do(m.admin, "model-alias-update", gpID, map[string]any{"sensitivity": nil}); code != http.StatusUnprocessableEntity || fieldsOf(out) != "sensitivity" {
 		t.Errorf("update {sensitivity: null} = %d %s, want 422", code, body)

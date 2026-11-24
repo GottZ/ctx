@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -247,15 +246,15 @@ var healthProbeBudget = 4 * time.Second
 // 2026-10-31 §3). Server health is the operator's pool; a tenant's rows answer
 // for themselves on its own chain calls.
 //
-// The candidates of one role stay in order and the role stops at the first
-// reachable one, as before: a role never requests more than its own ordered
+// The candidates of one role are probed in their order and none starts once
+// one answered (probeInTurn): a role never requests more than its own ordered
 // walk, and the bound of a call stays the operator rows of the probed roles.
-// probes only removes repeats — a base URL another role of the same round
-// already probed is not requested again, unless that probe ran out of a
-// shorter share than this role's. Each candidate probes with its share of
-// what is left of the budget (budgetShare, issue #519): a first candidate
-// that hangs no longer leaves a later one "probed" with a spent budget and
-// logged as failed without having been requested.
+// Every probe runs on the round's whole budget (issue #519), so a first
+// candidate that hangs no longer leaves a later one "probed" with a spent
+// budget, and probes only removes repeats — a base URL another role of the
+// same round already probed is not requested again; the answer is the one
+// this role would have got itself. A probe that hangs is waited for until the
+// budget ends, wherever it stands in the order.
 func (n *healthNotice) roleReachable(ctx context.Context, seq uint64, snap []backends.Backend, role string, probes *hostProbes) string {
 	rows := 0
 	var candidates []*backends.Backend
@@ -270,68 +269,113 @@ func (n *healthNotice) roleReachable(ctx context.Context, seq uint64, snap []bac
 		}
 	}
 	n.roleProbed(seq, role, rows, candidates)
-	for i, b := range candidates {
-		err := probes.ping(ctx, b.Host, len(candidates)-i)
-		n.pinged(seq, role, b, err)
-		if err == nil {
-			n.walked(seq, role, candidates[:i+1], true)
-			return "ok"
+	served, started := probeInTurn(ctx, candidates, probes, func(b *backends.Backend, err error) { n.pinged(seq, role, b, err) })
+	n.walked(seq, role, candidates[:started], served)
+	if served {
+		return "ok"
+	}
+	return "error"
+}
+
+// probeInTurn probes the candidates of a role in their order (issue #519,
+// the review of #530): each on the round's whole remaining budget. The next
+// candidate starts when the one before it has had its share — an equal part
+// of what was left when it started, among it and the candidates still to
+// come — or at once when every probe in flight has failed; an earlier one
+// runs on meanwhile, and its answer counts until the round ends. So a later
+// candidate is tried with a share of its own (a first one that hangs does not
+// spend it), and a first candidate slower than its share still serves the
+// role when the later ones fail: the share they leave by failing fast goes
+// back to it. No candidate starts once one answered. Each result goes to
+// pinged in the order the probes end; it waits for every probe it started and
+// returns whether one answered and how many it started. The caller of
+// /health waits no longer than the round's budget.
+func probeInTurn(ctx context.Context, candidates []*backends.Backend, probes *hostProbes, pinged func(*backends.Backend, error)) (served bool, started int) {
+	type result struct {
+		i   int
+		err error
+	}
+	results := make(chan result, len(candidates))
+	var shareEnd time.Time
+	start := func() {
+		i := started
+		started++
+		if deadline, ok := ctx.Deadline(); ok {
+			now := time.Now()
+			shareEnd = now.Add(deadline.Sub(now) / time.Duration(len(candidates)-i))
+		}
+		go func() { results <- result{i, probes.ping(ctx, candidates[i].Host)} }()
+	}
+	inFlight := 0
+	if len(candidates) > 0 {
+		start()
+		inFlight++
+	}
+	for inFlight > 0 {
+		var next <-chan time.Time
+		var timer *time.Timer
+		if !served && started < len(candidates) && !shareEnd.IsZero() {
+			timer = time.NewTimer(time.Until(shareEnd))
+			next = timer.C
+		}
+		select {
+		case r := <-results:
+			inFlight--
+			pinged(candidates[r.i], r.err)
+			served = served || r.err == nil
+		case <-next:
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+		// The share ran out, or nothing is in flight any more: the next one.
+		if !served && started < len(candidates) && (inFlight == 0 || !time.Now().Before(shareEnd)) {
+			start()
+			inFlight++
 		}
 	}
-	n.walked(seq, role, candidates, false)
-	return "error"
+	return served, started
 }
 
 // hostProbes is the probe memo of ONE probe round (#265): the first role that
 // needs a base URL requests it, every other role of the same round that needs
-// it waits for that result — within its own share of the budget (issue
-// #519). Keyed by the probe target pingHost requests (the base URL without
-// trailing slashes), so "http://h/" and "http://h" are one probe. It lives
-// exactly as long as the round — a later round probes afresh, nothing is
-// cached across rounds.
+// it waits for that result. Every probe of a round runs on the round's whole
+// budget (probeInTurn, issue #519), so a role that waits for another role's
+// probe of a base URL gets the answer it would have got itself. Keyed by the
+// probe target pingHost requests (the base URL without trailing slashes), so
+// "http://h/" and "http://h" are one probe. It lives exactly as long as the
+// round — a later round probes afresh, nothing is cached across rounds.
 type hostProbes struct {
 	mu sync.Mutex
 	m  map[string]*hostProbe
 }
 
 // hostProbe is one in-flight or finished probe. err is written once, before
-// done is closed, and read only after done is closed; deadline, the end of
-// the owner's share (zero without one), is set before the probe is shared.
+// done is closed, and read only after done is closed.
 type hostProbe struct {
-	done     chan struct{}
-	err      error
-	deadline time.Time
+	done chan struct{}
+	err  error
 }
 
 func newHostProbes() *hostProbes {
 	return &hostProbes{m: make(map[string]*hostProbe)}
 }
 
-// ping returns pingHost's result for host with the share of ctx's budget of
-// a candidate that has left candidates of its role still to probe, itself
-// included (budgetShare). The first role that needs host requests it; a role
-// that finds the probe started waits for it within its own share, so a role
-// with several candidates never spends more of its budget on a base URL it
-// shares with another role than on one of its own (issue #519): when its
-// share ends first, the host did not answer within it; when the owner's
-// shorter share ended in its deadline and this role has time left, it probes
-// once more with the rest of its share. A finished result stands whatever
-// the waiting role's context says, so the answer does not depend on which
-// of the two finished first.
-func (p *hostProbes) ping(ctx context.Context, host string, left int) error {
+// ping returns pingHost's result for host: the first role that needs it
+// requests it, a role that finds the probe started waits for it until ctx
+// ends. A finished result stands whatever the waiting role's context says,
+// so the answer does not depend on which of the two finished first.
+func (p *hostProbes) ping(ctx context.Context, host string) error {
 	key := strings.TrimRight(host, "/")
-	sctx, cancel := budgetShare(ctx, left)
-	defer cancel()
-	share, _ := sctx.Deadline()
 	p.mu.Lock()
 	pr, joined := p.m[key]
 	if !joined {
-		pr = &hostProbe{done: make(chan struct{}), deadline: share}
+		pr = &hostProbe{done: make(chan struct{})}
 		p.m[key] = pr
 	}
 	p.mu.Unlock()
 	if !joined {
-		pr.err = pingHost(sctx, host)
+		pr.err = pingHost(ctx, host)
 		close(pr.done)
 		return pr.err
 	}
@@ -340,12 +384,9 @@ func (p *hostProbes) ping(ctx context.Context, host string, left int) error {
 	default:
 		select {
 		case <-pr.done:
-		case <-sctx.Done():
-			return fmt.Errorf("connecting to host: %w", sctx.Err())
+		case <-ctx.Done():
+			return fmt.Errorf("connecting to host: %w", ctx.Err())
 		}
-	}
-	if errors.Is(pr.err, context.DeadlineExceeded) && share.After(pr.deadline) && sctx.Err() == nil {
-		return pingHost(sctx, host)
 	}
 	return pr.err
 }
