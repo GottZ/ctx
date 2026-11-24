@@ -225,6 +225,26 @@ func TestNeedsTranslationNordicWhateverTheSpelling(t *testing.T) {
 	)
 }
 
+// TestNeedsTranslationNordicVerbFirstAndSharedWords: a Nordic yes/no
+// question begins with its verb, capitalised, and may carry no other sign; a
+// short one may consist of words English and German share. They are
+// translated — the reason a few English words with a name such as Ålesund, or
+// two shared words such as "var den", are translated too: a rule that left
+// those as written would leave these as written as well.
+func TestNeedsTranslationNordicVerbFirstAndSharedWords(t *testing.T) {
+	checkNeedsTranslation(t, true,
+		"Går backupen i natt?",
+		"Kører serveren stadig?",
+		"Bør vi opgradere databasen?",
+		"Står det i loggen?",
+		"Får kunden refusjon?",
+		"Har du den?",
+		"Er den ny?",
+		"Er der kaffe?",
+		"Er hat recht",
+	)
+}
+
 // TestNeedsTranslationGermanKept: what was translated before stays translated
 // — umlauts, sharp s, capitalised umlaut nouns, two stop words (the ambiguous
 // ones included), domain terms, and German around English terms and code.

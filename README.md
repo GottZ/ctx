@@ -108,8 +108,8 @@ What does not work, or only partly:
   alone, the 27B reference model needs about 4.5 to 5.5 minutes per answer; on a GPU, up to a minute.
 - **Full text in German and English only.** The full-text search knows the word forms of these two languages;
   content in other languages is found by meaning and by its title. A German, Swedish, Danish, Norwegian or Finnish
-  question is translated to English before the search, an English one is not; the setting `query.translate` (`off`)
-  turns that off.
+  question is translated to English before the search, an English sentence is not (a few English words with a name
+  such as `Ålesund` can be); the setting `query.translate` (`off`) turns that off.
 - **New text is found by meaning a little later.** Embeddings are computed in the background. A block you just
   saved or changed is found by its words and its title at once, and by meaning once its new vector exists.
 - **No earlier versions.** Saving under the same category and title replaces the whole block, tags and metadata
