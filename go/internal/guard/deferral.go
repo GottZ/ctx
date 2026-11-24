@@ -28,8 +28,9 @@ var (
 
 // DeferredVerdicts returns the verdicts the guard runs of this process have
 // deferred since the process started, and how many its last committed run
-// deferred. A run that fails or is interrupted adds nothing: its rollback
-// leaves every block of its batch pending anyway.
+// that took blocks deferred (an empty run leaves it; runs side by side in one
+// process overwrite each other's). A run that fails or is interrupted adds
+// nothing: its rollback leaves every block of its batch pending anyway.
 func DeferredVerdicts() (sinceStart, lastRun int64) {
 	return deferredTotal.Load(), deferredLastRun.Load()
 }

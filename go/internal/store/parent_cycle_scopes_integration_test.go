@@ -171,3 +171,29 @@ func TestParentWritersUnderOneParent(t *testing.T) {
 	wg.Wait()
 	t.Logf("8 parallel parent writers under one parent: %d writes in %d s = %.0f/s, %d failed", n.Load(), secs, float64(n.Load())/float64(secs), fails.Load())
 }
+
+// TestParentItemsCrossingSeveralScopes: a batch with three items, each under a
+// parent whose ancestor chain crosses into a scope of its own the batch does
+// not write (review of #547). The batch learns every chain's scopes in one
+// run and goes through on its next — no concurrency, so no write conflict.
+func TestParentItemsCrossingSeveralScopes(t *testing.T) {
+	f := newP547Fixture(t)
+	items := make([]store.BatchUpsert, 0, 3)
+	for i := 0; i < 3; i++ {
+		x := fmt.Sprintf("c547x-%d", i)
+		top := f.block(t, x, fmt.Sprintf("c547x top %d", i))
+		p := f.c547Moved(t, x, "c547x-p", fmt.Sprintf("c547x parent %d", i), top) // in P, its parent in X_i
+		items = append(items, store.BatchUpsert{Category: "learnings", Title: fmt.Sprintf("c547x child %d", i),
+			Content: "a child", Scope: "c547x-p", ScopeExplicit: true, ParentID: p})
+	}
+	res, err := store.UpsertBlocks(context.Background(), f.pool, items, "", f.set, nil)
+	if err != nil {
+		t.Fatalf("batch of three items with crossing chains: %v", err)
+	}
+	for i, r := range res {
+		var parent string
+		if err := f.pool.QueryRow(context.Background(), `SELECT COALESCE(parent_id::text, '') FROM context_blocks WHERE id = $1`, r.Block.ID).Scan(&parent); err != nil || parent != items[i].ParentID {
+			t.Errorf("item %d linked under %q, want %s (%v)", i, parent, items[i].ParentID, err)
+		}
+	}
+}

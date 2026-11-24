@@ -293,8 +293,11 @@ func batchIdentityClash(items []BatchUpsert, holds []batchHold) error {
 // item wrote (or, for an item that changed nothing, the block it matched).
 // The link is the one of /api/store (LinkBlockParent), so a refusal is its
 // ErrLinkScopeViolation, named by the item; held are the scopes whose locks
-// the batch holds (a chain beyond them runs the batch again with them).
+// the batch holds — the chains of every item that reach beyond them are
+// walked first, and the batch runs again with all their scopes locked.
 func linkBatchParents(ctx context.Context, tx pgx.Tx, items []BatchUpsert, results []BatchResult, held []string) error {
+	var missing []string
+	first := -1
 	for i, it := range items {
 		if it.Update != nil || (it.ParentID == "" && it.ParentItem == nil) {
 			continue
@@ -307,9 +310,28 @@ func linkBatchParents(ctx context.Context, tx pgx.Tx, items []BatchUpsert, resul
 				parent = r.Block.ID
 			}
 		}
-		if err := LinkBlockParent(ctx, tx, results[i].Block.ID, parent, it.Scope, held); err != nil {
+		err := LinkBlockParent(ctx, tx, results[i].Block.ID, parent, it.Scope, held)
+		var more *scopesToLockError
+		if errors.As(err, &more) {
+			// Every item's chain is walked before the batch runs again, so the
+			// next run takes the locks of all of them at once (review of #547:
+			// one scope per run ran out of runs at three crossing items).
+			if first < 0 {
+				first = i
+			}
+			for _, sc := range more.scopes {
+				if !slices.Contains(missing, sc) {
+					missing = append(missing, sc)
+				}
+			}
+			continue
+		}
+		if err != nil {
 			return &BatchItemError{Index: i, Err: err}
 		}
+	}
+	if first >= 0 {
+		return &BatchItemError{Index: first, Err: &scopesToLockError{scopes: missing}}
 	}
 	return nil
 }

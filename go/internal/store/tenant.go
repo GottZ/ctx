@@ -546,17 +546,9 @@ func drainBatched(ctx context.Context, pool *pgxpool.Pool, sql string, args ...a
 // CASCADE (then step 1 would be redundant) — while 016:18-19 has no ON DELETE,
 // links-first is forced (design/01 §4.3.1).
 //
-// SCALE-NAHT (N11, design/01 §6.3 — named, NOT fixed here): context_dream_links
-// has NO index on `scope` (verified: all 9 indexes lead with source/
-// target_block_id or confidence/version). At the ~2M-link target scale the
-// ctid-LIMIT inner SELECT degenerates to a full seq scan per batch → O(n²) for
-// this ONE table; context_blocks is fine (idx_context_scope greift). The fix is a
-// `scope` btree on context_dream_links, but at 1M+ it MUST be built CONCURRENTLY
-// out-of-band (the single-Tx migration runner forbids CONCURRENTLY, 057:8-12) — a
-// deliberate index wave, NOT an ad-hoc add here (would ACCESS-EXCLUSIVE-lock a 2M
-// table on deploy and collide with the planned 062-068 numbering). Today's corpus
-// (~2k links) makes the prune trivial; this is a target-scale seam, not a
-// correctness blocker. (Secondary N11, closed by migration 172: the FK actions of
+// The dream links' batches (pruneScopeBlocks) read idx_dream_links_scope_created
+// for the scope (the baseline's index; the earlier note here that the table had
+// no index on scope no longer held). (Secondary N11, closed by migration 172: the FK actions of
 // write_log.matched_block_id and embed_failures.block_id scanned their table once
 // per deleted block — measured for the scope purge (#202) at 29 ms per block next
 // to a 300 000-row write log; since 172 every FK on context_blocks has a serving
@@ -611,18 +603,19 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 // scope '_global': server-admin-only history of a tenant-admin's grants) — so
 // they are deleted first, in a statement of their own, under the same lock.
 //
-// LOCKS (issue #547): the dream links and the blocks go per scope, in sorted
-// scope order, each batch in a transaction that takes the scope's supersedes
-// lock exclusively first (pruneScopeBlocks), as a scope purge batch does —
+// LOCKS (issue #547): the dream links and the blocks go in batches, each in a
+// transaction that takes the supersedes locks of all the tenant's scopes
+// exclusively and in sorted order first (pruneScopeBlocks), as a scope purge
+// batch takes its scope's —
 // every other path that deletes, archives or moves blocks of a scope, writes
 // its supersedes links or locks several of its blocks takes that lock, so a
 // batch runs alone in its scope against them and holds no row any of them
 // waits for while it waits for one of theirs. Without it a declaration (its
 // source, then its target), a block batch (its identity rows in order) and a
 // dream link batch (each link's ends, link by link) met the prune's delete in
-// a lock cycle (40P01) — the prune lost and left the tenant half pruned. A
-// batch holds one scope lock, never two, so no order among scope locks is
-// needed; it holds it for one batch of at most pruneBatchSize rows.
+// a lock cycle (40P01) — the prune lost and left the tenant half pruned. The
+// locks are taken in the sorted order every multi-scope holder takes them in,
+// and held for one batch of at most pruneBatchSize rows.
 //
 // STAGED WRITES (issue #277): step 7 deletes the staged writes of the keys
 // it deletes (context_pending_writes, which hold block content), right after

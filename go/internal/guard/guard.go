@@ -497,7 +497,9 @@ func RunGuardBatch(ctx context.Context, pool interface {
 	if err != nil {
 		return processed, err
 	}
-	recordDeferrals(deferred)
+	if len(blocks) > 0 {
+		recordDeferrals(deferred) // an empty run leaves last_run to the last run that checked blocks
+	}
 
 	// After the commit, in a statement of its own: see the doc comment. A
 	// context cancelled right after the commit (shutdown) leaves the stamp

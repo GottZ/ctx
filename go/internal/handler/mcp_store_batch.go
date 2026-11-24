@@ -197,6 +197,9 @@ func stageBatchSupersedesCheck(ctx context.Context, cfg MCPConfig, set *blocktyp
 		if rej := storeBatchRefusal(err); rej != nil {
 			return errResultReject(rej)
 		}
+		if rej := writeConflictReject(err); rej != nil {
+			return errResultReject(rej) // the stage check lost to concurrent writes (issue #547)
+		}
 	}
 	if err != nil {
 		logRequestError(ctx, "mcp: stage batch supersedes check failed", "error", err, "request_id", reqID)

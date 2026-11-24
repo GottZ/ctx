@@ -581,6 +581,10 @@ func confirmedBatchFailure(ctx context.Context, cw store.CanonicalWrite, err err
 	if rej := storeBatchRefusal(err); rej != nil {
 		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmStoreBatchPrefix)}
 	}
+	if rej := writeConflictReject(err); rej != nil {
+		// Lost to concurrent writes outside any item (issue #547).
+		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmStoreBatchPrefix)}
+	}
 	noteToolWrite(ctx, err)
 	logRequestError(ctx, "confirm: confirmed batch execute failed", "error", err, "write_outcome", writeOutcome(err), "pending_id", pendingID)
 	return confirmOutcome{Kind: confirmExecErr, Op: cw.Op, Err: err}
