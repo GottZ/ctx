@@ -103,6 +103,7 @@ func TestNeedsTranslationQuotedTextIsMaterial(t *testing.T) {
 		"Was heißt »the build is green« in der Pipeline?",
 		"Was bedeutet der Fehler « the server is not responding »?",
 		"Wie übersetze ich ‚the best of both worlds‘ hier?",
+		"Was soll ‚the page you are looking for does not exist‘ heißen?",
 		"Vad betyder felet ”the disk is full” på servern?",
 		`Hvad betyder "the build is green" egentlig?`,
 		`Was bedeutet "Schreibschutz"?`,
