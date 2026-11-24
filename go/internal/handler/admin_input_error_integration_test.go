@@ -223,12 +223,13 @@ func TestAdminWriteInputErrorsBackendRoutes(t *testing.T) {
 	cases = append(cases, c("backend-create", "too long scope", map[string]any{"data": spec("i505-s",
 		"scope", i505Long[:51], "base_url", "https://i505.example.org")}))
 	// A NUL character the dispatcher refuses before the action runs (issue
-	// #519): 400 naming data.<field>.
+	// #519), for these form actions as the 422 field error their dialog shows
+	// (the review of #530).
 	want := map[string]int{"backend-create | too long scope": 422}
 	for _, route := range []string{"backend-create", "backend-update"} {
 		for _, input := range []string{"NUL in extra_headers", "NUL in metadata", "NUL in extra_body", "NUL in a metadata key",
 			"NUL in a key the write does not read"} {
-			want[route+" | "+input] = 400
+			want[route+" | "+input] = 422
 		}
 		want[route+" | out of range"] = 422
 		want[route+" | invalid JSON field"] = 400
@@ -254,8 +255,8 @@ func TestAdminWriteInputErrorsModelAliasRoutes(t *testing.T) {
 		c("model-alias-delete", "too long", map[string]any{"id": i505Long}),
 	}
 	runInputErrorCases(t, cases, map[string]int{
-		"model-alias-create | NUL": 400, "model-alias-create | NUL in policy": 400, "model-alias-create | too long": 422,
-		"model-alias-create | invalid JSON field": 400, "model-alias-update | NUL in policy": 400,
+		"model-alias-create | NUL": 422, "model-alias-create | NUL in policy": 422, "model-alias-create | too long": 422,
+		"model-alias-create | invalid JSON field": 400, "model-alias-update | NUL in policy": 422,
 		"model-alias-update | invalid JSON field": 400, "model-alias-delete | NUL": 400, "model-alias-delete | too long": 404,
 	})
 }

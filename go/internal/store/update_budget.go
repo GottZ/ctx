@@ -19,8 +19,10 @@ import (
 // without the write, no write without the booking. An update that changes
 // nothing, or finds no row, costs nothing. The internal writers (guard,
 // dream, digest, forge sync, backfill) do not update through this function.
-func UpdateBlockBooked(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string, budget WriteBudget) (*Block, bool, error) {
-	return updateBlock(ctx, pool, id, data, writeScopes, &budget)
+//
+// A nil budget books nothing: UpdateBlock.
+func UpdateBlockBooked(ctx context.Context, pool *pgxpool.Pool, id string, data UpdateBlockData, writeScopes []string, budget *WriteBudget) (*Block, bool, error) {
+	return updateBlock(ctx, pool, id, data, writeScopes, budget)
 }
 
 // lockBudget takes the key's budget lock (nothing without a budget): the
