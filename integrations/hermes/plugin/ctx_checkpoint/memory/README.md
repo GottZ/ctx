@@ -352,10 +352,49 @@ the plugin and runs over either transport.
 - Pacing (0.10.0): at most `checkpoint_max_parts` + 2 writes inside one 60 s window; a
   longer chain waits for the next window (the user is told before), and its deadline
   grows by 61 s per window after the first. A refused write (other writers on the key)
-  waits until a slot is free — when the chain's own oldest write in the window ages out,
-  else a whole window — at the latest until just before the deadline, and then tries once
-  more; the second refusal in a row ends the chain with `CtxCheckpointError` (Hermes opens
-  its per-server circuit breaker at the third error answer in a row).
+  waits until a slot is free — when the oldest write in the window ages out, else a whole
+  window — at the latest until just before the deadline, and then tries once more; the
+  second refusal in a row ends the chain with `CtxCheckpointError` (Hermes opens its
+  per-server circuit breaker at the third error answer in a row).
+- One state per server entry (0.17.0, GottZ/ctx#299): the window's writes and the error
+  answers in a row are counted per entry for every chain of the process
+  (`checkpoint.EntryState`: the MCP entry by name and a digest of its connection identity — route
+  and credentials, as Hermes compares them before profiles share one connection; an OAuth entry by
+  its profile as well — REST by base URL and key digest). A call goes out only while the entry's
+  error answers in a row plus the calls in flight stay below `MAX_RATE_REFUSALS`, a write only
+  while fewer than `checkpoint_max_parts` + 2 writes are booked or in flight in the window; an
+  answer ends the errors released before its call was sent. Two chains side by side share `checkpoint_max_parts` + 2 writes per window and their writes never show
+  the entry more error answers in a row than one chain alone. Several Hermes processes of one
+  profile share nothing.
+- Served in start order (0.17.0, round 1 of #299): every run (a chain, or required facts without
+  one) registers the writes it plans (`EntryState.register`) and ends the registration on every
+  way out (`_ChainRun.close`: the writer for a failed chain or one without facts, the provider
+  for the chain its required facts continue). A run's plan and deadline hold the windows the
+  writes booked or in flight and the planned writes of the runs that started before it need
+  together — of each such run the writes whose slots come before its deadline — never past the
+  host's wait; held behind them, a run's deadline follows them (its last planned slot plus its
+  window budget, never past the host's wait); a write goes out only while the window has a slot
+  beyond those planned writes, and at the limit of calls in flight a later run's call gives way
+  to a waiting call of an earlier one. A run whose turn comes after its deadline, or whose last
+  planned write would although it would fit from an empty window, stops before its next write
+  (`other checkpoints of this Hermes process started first …`); one that needs more than its
+  deadline even alone saves what fits and stops at its deadline as before. A run's planned
+  writes hold their places until it ends, at the latest until its deadline. A planned write ctx
+  confirms books nothing; a run held behind others looks again at every answer of the entry, and
+  every `ENTRY_HOLD_RECHECK_S` (5 s) while none is in flight.
+- Error answers: no write goes out after `MAX_RATE_REFUSALS` (2) in a row, so writes never draw a
+  third. A read still goes out, alone: the head search of a chain that starts then, and the read
+  a chain that wants to write sends first (`ChainWriter._probe`: a search for `PROBE_QUERY` in
+  its category, one row) — the process sees no other answers of the entry. Its answer ends the
+  run; a read that fails there ends its chain and is the entry's third error answer in a row
+  from this process. A chain gives up on a write ctx refused twice with no answer of the entry
+  in between (any call of the process), so refusals of other chains do not stop it. A failure envelope the REST client
+  returns instead of raising (`success: false`, or a body that is no JSON) counts as an error
+  answer; a write answered that way keeps its slot unless its code is `rate_limit`.
+- A write the chain gives up on (abandoned, cut off) keeps its slot from that moment; ctx may book
+  it until the host ends the call (through the dispatch: the entry's tool timeout), so a window
+  can then hold one write more than `checkpoint_max_parts` + 2 — inside ctx's 100 per key while
+  `checkpoint_max_parts` + 2 ≤ 97; a later refusal is handled as any refusal.
 - Idempotent (0.10.0): the checkpoint id is `sha256(root \0 transcript digest)[:16]`, so a
   retry of the same transcript writes the same titles; parts carry no time of their own
   (`evidence_date` is on manifest and head only), so ctx answers a part that is already
@@ -472,8 +511,10 @@ serve several profiles without mixing their stores.
   use `sensitivity_default`; downgrades require server-side confirmation.
 - **Rate limit:** the server allows 100 writes per 60 s per key; a large checkpoint plus
   facts and mirror writes share that budget. The chain paces itself to `checkpoint_max_parts`
-  + 2 writes per window; required facts after it are not paced (a refused fact is reported
-  and left for a later compaction; the checkpoint stands).
+  + 2 writes per window, and since 0.17.0 the required facts after it are stored in the chain's
+  run: planned with it, paced against the same window and its count of error answers (a refused
+  fact is reported and left for a later compaction; the checkpoint stands). Best-effort facts,
+  the mirror and digests are not paced.
 
 ## Development
 
