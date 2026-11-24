@@ -145,7 +145,7 @@ func (h *SessionHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		sessionError(w, http.StatusForbidden)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+	r.Body = http.MaxBytesReader(w, r.Body, AuthFlowBodyCap)
 	var req struct {
 		APIKey string `json:"api_key"`
 	}

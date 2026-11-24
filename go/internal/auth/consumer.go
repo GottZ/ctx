@@ -71,6 +71,13 @@ func addrArg(ip netip.Addr) any {
 	return ip.Unmap().WithZone("")
 }
 
+// ModelAuthQuerier is what AuthenticateModelKey runs its one statement on: a
+// pool, or a connection the caller acquired itself (the /v1 door, which
+// counts the pool slot it holds — issue #519).
+type ModelAuthQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // AuthenticateModelKey checks a model key by its hash against
 // ctx_model_auth($1,$2,$3) — the one database touch of the /v1 door
 // (design/01 §3.4, §4.2 stage 7). ip is the client address as the door
@@ -78,7 +85,7 @@ func addrArg(ip netip.Addr) any {
 // over TLS. An empty hash and every refusing gate yield a plain invalid
 // result with no other field set. The function is read-only (STABLE): it
 // stamps no last_used_at — that is the caller's batched Touch.
-func AuthenticateModelKey(ctx context.Context, pool *pgxpool.Pool, keyHash string, ip netip.Addr, secure bool) (*ConsumerAuth, error) {
+func AuthenticateModelKey(ctx context.Context, q ModelAuthQuerier, keyHash string, ip netip.Addr, secure bool) (*ConsumerAuth, error) {
 	if keyHash == "" {
 		return &ConsumerAuth{IsValid: false}, nil
 	}
@@ -90,7 +97,7 @@ func AuthenticateModelKey(ctx context.Context, pool *pgxpool.Pool, keyHash strin
 		expires                                  *time.Time
 	)
 	// Columns by name and in the function's order (K20: new columns go last).
-	err := pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT model_key_id, consumer_id, tenant_id, tenant_scope, kind, all_models, prompt_sensitivity, fair_weight, key_expires_at, is_valid, admission_lane, peer_instance_id FROM ctx_model_auth($1, $2, $3)`,
 		keyHash, addrArg(ip), secure,
 	).Scan(&keyID, &consumerID, &tenantID, &scope, &kind, &all, &sens, &weight, &expires, &valid, &lane, &peer)

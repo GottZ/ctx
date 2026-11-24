@@ -584,6 +584,15 @@ Change fields of an existing block.
 Omitted fields stay unchanged. **Answer:**
 `Updated: <title> (id: <uuid>, category: <category>)`. Staged for `confirm_writes` keys.
 
+**Write budget (issue #519).** An update that changes the block counts as one write of
+the key's write budget (`query.rate_limit_write`), as a `store` does: the count and the
+booking run in the update's transaction under the key's lock (the lock a batch takes), so
+two updates at the edge of the window get exactly what is left, and an update that does
+not fit writes nothing and answers `isError: true`, code `rate_limit`, `Rate limit
+exceeded: max <n> writes per 60 seconds`. An update whose fields already hold what it
+sends costs nothing. A staged update pays at stage time, in the stage's transaction, as
+every staged write does; its `confirm` books nothing.
+
 **Edits and a metadata merge (issue #406).** `edits` changes part of the content
 without sending the rest: an ordered list of `{"old": …, "new": …}` (both required;
 `"new": ""` deletes `old`), applied one after the other to the block's current

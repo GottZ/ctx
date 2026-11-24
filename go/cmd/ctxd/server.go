@@ -110,13 +110,19 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// RFC 9728 §3.1 path-insertion form for the /mcp resource (S5/W03-5) —
 	// clients derive this spelling from the resource URL <issuer>/mcp.
 	r.Get("/.well-known/oauth-protected-resource/mcp", oauthH.ProtectedResource)
-	r.HandleFunc("/authorize", oauthH.Authorize) // GET = form, POST = submit
-	r.Post("/token", oauthH.Token)
+	// Issue #519: the NUL guard fronts every route that reads a value it
+	// passes to the database (handler.RefuseNUL, nul_guard.go) — here in the
+	// OAuth error envelope, reading no further than the flow's body cap.
+	r.With(handler.RefuseNULOAuth(handler.NULBodyForm, handler.AuthFlowBodyCap, "invalid_request")).
+		HandleFunc("/authorize", oauthH.Authorize) // GET = form, POST = submit
+	r.With(handler.RefuseNULOAuth(handler.NULBodyForm, handler.AuthFlowBodyCap, "invalid_request")).
+		Post("/token", oauthH.Token)
 	// RFC 7591 DCR (02-W4a). Always mounted; the handler gates per request
 	// on CTX_OAUTH_DCR_MODE (off → 404, admin → server-admin key, open →
 	// unauthenticated) — auth lives IN the handler, not in middleware,
 	// because the mode decides whether auth applies at all.
-	r.Post("/register", oauthH.Register)
+	r.With(handler.RefuseNULOAuth(handler.NULBodyJSON, handler.AuthFlowBodyCap, "invalid_client_metadata")).
+		Post("/register", oauthH.Register)
 	// The mode is read per request; this is the one boot line that says
 	// open registration is on (§F-§6).
 	handler.WarnIfOpenDCR()
@@ -127,17 +133,17 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// ssrfguard-hardened upstream client live inside the handler. The SPA
 	// reserves the /auth prefix (index.ts RESERVED_SERVER_PREFIXES).
 	ssoH := handler.NewSSOHandler(pool)
-	r.Get("/auth/login/{provider}", ssoH.HandleLogin)
-	r.Get("/auth/callback/{provider}", ssoH.HandleCallback)
+	r.With(handler.RefuseNUL(handler.NULBodyNone, 0)).Get("/auth/login/{provider}", ssoH.HandleLogin)
+	r.With(handler.RefuseNUL(handler.NULBodyNone, 0)).Get("/auth/callback/{provider}", ssoH.HandleCallback)
 
 	// Web-session lifecycle (OAuth R3, design 05 §4.3) — public like the SSO
 	// routes above (they ARE the auth flow; login presents a credential, the
 	// other two act only on httpOnly cookies). POST /auth/login coexists with
 	// the GET /auth/login/{provider} SSO entry (different method + path shape).
 	sessH := handler.NewSessionHandler(pool)
-	r.Post("/auth/login", sessH.HandleLogin)
-	r.Post("/auth/refresh", sessH.HandleRefresh)
-	r.Post("/auth/logout", sessH.HandleLogout)
+	r.With(handler.RefuseNUL(handler.NULBodyJSON, handler.AuthFlowBodyCap)).Post("/auth/login", sessH.HandleLogin)
+	r.With(handler.RefuseNUL(handler.NULBodyNone, 0)).Post("/auth/refresh", sessH.HandleRefresh)
+	r.With(handler.RefuseNUL(handler.NULBodyNone, 0)).Post("/auth/logout", sessH.HandleLogout)
 
 	// Per-tenant quota accountant (T36, 04-W4): one process-wide instance, a
 	// lock-free TTL-cached per-tenant cost/call rollup feeding the synthesis,
@@ -299,6 +305,9 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 		r.Use(handler.Auth(pool))
 		r.Use(loopGuard)
 		r.Use(handler.MaxBodySizeStrict(DefaultMaxBodySize))
+		// The tools refuse a NUL in their arguments themselves (JSON-RPC
+		// answers); the guard checks the request line and headers.
+		r.Use(handler.RefuseNUL(handler.NULBodyNone, 0))
 		r.Handle("/mcp", mcpH)
 	})
 
@@ -307,6 +316,7 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 		r.Use(handler.Auth(pool))
 		r.Use(loopGuard)
 		r.Use(handler.MaxBodySize(DefaultMaxBodySize))
+		r.Use(handler.RefuseNUL(handler.NULBodyJSON, DefaultMaxBodySize))
 
 		// Query — RRF + LLM synthesis
 		r.Post("/api/query", queryHTTPHandler)
@@ -471,6 +481,7 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 		r.Use(handler.Auth(pool))
 		r.Use(loopGuard)
 		r.Use(handler.MaxBodySize(IngestMaxBodySize))
+		r.Use(handler.RefuseNUL(handler.NULBodyJSON, IngestMaxBodySize))
 		r.Post("/api/ingest", ingestH.HandleIngest)
 	})
 
@@ -479,6 +490,7 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 		r.Use(handler.Auth(pool))
 		r.Use(loopGuard)
 		r.Use(handler.MaxBodySize(BlobMaxBodySize))
+		r.Use(handler.RefuseNUL(handler.NULBodyJSON, BlobMaxBodySize))
 		r.Post("/api/blob/store", blobH.HandleBlobStore)
 	})
 
@@ -491,6 +503,7 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	webhookH := handler.NewWebhookGitHubHandler(pool, cfgStore)
 	r.Group(func(r chi.Router) {
 		r.Use(handler.MaxBodySize(DefaultMaxBodySize))
+		r.Use(handler.RefuseNUL(handler.NULBodyJSON, DefaultMaxBodySize))
 		r.Post("/webhooks/github/{project_id}", webhookH.HandleWebhook)
 	})
 
@@ -500,6 +513,7 @@ func buildRouter(ctx context.Context, pool *pgxpool.Pool, cfgStore *config.Store
 	// reserved server-side (index.ts RESERVED_SERVER_PREFIXES), so no SPA route
 	// collides. GET only — no body cap needed (design 07-camo §4.1/§4.2, D2b).
 	r.Group(func(r chi.Router) {
+		r.Use(handler.RefuseNUL(handler.NULBodyNone, 0))
 		r.Get("/api/img/{sig}", camoH.HandleFetch)
 	})
 

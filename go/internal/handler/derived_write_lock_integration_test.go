@@ -426,6 +426,25 @@ func TestDerivedWriteLock(t *testing.T) {
 				}
 			})
 		}
+		// A chunk that claims a reserved category AND carries a NUL fails
+		// on its own for the NUL (issue #519) — but the claim still refuses
+		// the whole request, as it did before: no sibling is written
+		// (second review round of PR #553).
+		t.Run("claim_with_a_NUL", func(t *testing.T) {
+			const sibling = "w012a ingest sibling of a NUL claim"
+			status, resp := restIngest(keyCtx, map[string]any{
+				"source": "w012a", "chunks": []map[string]any{
+					{"category": "catalog", "title": "w012a ingest NUL claim", "content": "occupying\x00via ingest"},
+					{"category": "test", "title": sibling, "content": "an ordinary chunk"},
+				},
+			})
+			if status != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (body %v)", status, resp)
+			}
+			if got := blockCount(sibling); got != 0 {
+				t.Errorf("rejected ingest stored %d sibling block(s), want 0", got)
+			}
+		})
 	})
 
 	t.Run("h_S2_ManageUpdate", func(t *testing.T) {

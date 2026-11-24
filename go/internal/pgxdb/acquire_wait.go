@@ -36,8 +36,10 @@ func WithAcquireWaitNoter(ctx context.Context, n AcquireWaitNoter) context.Conte
 // noter, is not touched.
 type AcquireWaitTracer struct{}
 
-// TraceQueryStart is the empty query hook a pgx tracer must have.
-func (AcquireWaitTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+// TraceQueryStart notes a connection that runs a statement naming
+// lock_timeout (PrepareAfterLockTimeout, issue #519).
+func (AcquireWaitTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	noteLockTimeout(conn, data.SQL)
 	return ctx
 }
 

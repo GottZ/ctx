@@ -160,8 +160,10 @@ func (tw *toolWrite) log(ctx context.Context) {
 // addMCPTool registers a tool: mcp.AddTool, and for a tool without
 // ReadOnlyHint the handler writes the call's server line. Every tool of the
 // server is registered through it, so a new write tool gets its line from
-// its annotations.
+// its annotations, and every tool refuses a NUL in its arguments
+// (withNULRefusal).
 func addMCPTool[In any](server *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, any]) {
+	h = withNULRefusal(t.Name, h)
 	if t.Annotations == nil || !t.Annotations.ReadOnlyHint {
 		h = withToolWriteLine(t.Name, h)
 	}

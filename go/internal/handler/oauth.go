@@ -303,7 +303,7 @@ func (h *OAuthHandler) authorizeForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *OAuthHandler) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+	r.Body = http.MaxBytesReader(w, r.Body, AuthFlowBodyCap)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -417,7 +417,7 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+	r.Body = http.MaxBytesReader(w, r.Body, AuthFlowBodyCap)
 	if err := r.ParseForm(); err != nil {
 		oauthError(w, "invalid_request", "bad form data")
 		return
@@ -534,6 +534,14 @@ func (h *OAuthHandler) authenticateClient(w http.ResponseWriter, r *http.Request
 			return nil, false
 		}
 		return nil, true // pre-S2 shape; rejected downstream as invalid_grant
+	}
+	if strings.IndexByte(clientID, 0) >= 0 {
+		// A NUL names no client. The request's NUL guard reads the form and
+		// the Authorization header as it came (base64), so one in the decoded
+		// Basic username arrives here (issue #519): refused as every unknown
+		// client id is, before the lookup the database would fail.
+		oauthUnauthorized(w, basicAuthUsed, "client authentication failed")
+		return nil, false
 	}
 	client, found, err := store.GetOAuthClientByClientID(r.Context(), h.pool, clientID)
 	if err != nil {

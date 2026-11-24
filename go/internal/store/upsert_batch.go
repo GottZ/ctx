@@ -157,27 +157,24 @@ type BatchResult struct {
 // ParentItem) is linked after every item is written, in list order, through
 // the one parent check of /api/store (LinkBlockParent).
 //
-// budget is the key's write budget, spent inside this transaction: checked
-// after the no-op decisions and before the first write, for the items that
-// write (a batch whose writes do not fit is refused with *WriteBudgetError and
-// writes nothing; a batch that writes nothing is neither counted nor
-// refused), and booked, one 'write' row per written block, with the commit —
-// so a batch is never written without its booking, and never booked without
-// being written. nil books nothing: the confirm of a staged batch, which paid
+// budget is the key's write budget, spent inside this transaction after the
+// writes (WriteBudget.spend): the items that wrote are counted (a batch whose
+// writes do not fit is refused with *WriteBudgetError and its writes roll
+// back; a batch that writes nothing is neither counted nor refused) and
+// booked, one 'write' row per written block, with the commit — so a batch is
+// never written without its booking, and never booked without being written.
+// nil books nothing: the confirm of a staged batch, which paid
 // at stage time (ReserveWriteIntents), and a single /api/store with a parent,
 // which books as every single store does.
 //
 // Lock order, the same for every batch, so two batches never wait for each
 // other in opposite orders:
 //
-//  1. the key's budget lock (WriteBudget, an advisory lock no row-lock holder
-//     takes), so two batches of one key count and book one after the other —
-//     on every ctxd instance of the database;
-//  2. the supersedes lock of every scope the batch names — written or not,
+//  1. the supersedes lock of every scope the batch names — written or not,
 //     an update item's current scope (read without a lock first,
 //     readBatchUpdateTargets) and the scope it moves to — EXCLUSIVE, in sorted
 //     scope order, before any row lock (LockSupersedesScope: "the lock is the
-//     FIRST its transaction takes" — the budget lock before it holds no row).
+//     FIRST its transaction takes").
 //     A single upsert holds one block row and waits for nothing else while it
 //     holds it; a batch holds several and waits for the next one, so every
 //     other transaction that holds block rows and then waits for more would
@@ -188,18 +185,25 @@ type BatchResult struct {
 //     block and its targets in id order), declarations, guard-resolve batches
 //     and the other batches of the scope. A scope without any supersedes item
 //     takes it as well, for exactly that reason;
-//  3. the items in (scope, category, title) order — an update item by its
+//  2. the items in (scope, category, title) order — an update item by its
 //     current identity — every item: the identity row FOR NO KEY UPDATE (with
 //     the no-op comparison, lockBatchMatch), for a supersedes item the target
 //     FOR NO KEY UPDATE after it (lockSupersedesPair), for a parent named by
 //     id the parent FOR SHARE after it (lockBatchParent), for an update item
-//     its row by id within the scope read in step 2 (lockBatchUpdate) and, for
+//     its row by id within the scope read in step 1 (lockBatchUpdate) and, for
 //     a scope move, the targets of its supersedes links after it, in id order.
 //     Only then are the writes made, in the same order; they wait for no row
 //     lock this pass did not take, except an identity another transaction is
-//     inserting right then (the unique index).
+//     inserting right then (the unique index);
+//  3. when an item wrote, the key's budget lock (WriteBudget, an advisory
+//     lock), the count and the booking — the last lock, held to the commit, as
+//     in a single update (UpdateBlockBooked): two writers of one key count and
+//     book one after the other, on every ctxd instance of the database, while
+//     a writer that waits for a row holds no budget lock and keeps no other
+//     write of its key waiting (review of PR #553), and the holder waits for
+//     nothing but its own count and booking.
 //
-// An update item whose block left the scope read in step 2 before the lock
+// An update item whose block left the scope read in step 1 before the lock
 // pass reached it runs the whole transaction again
 // (writeSupersedesSourceScopes): the next run takes the lock of the scope the
 // block was found in as well, in order, and finds the block in one of the two
@@ -224,13 +228,8 @@ func UpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, 
 	}
 	var results []BatchResult
 	err = writeSupersedesSourceScopes(ctx, pool, pgxdb.At("store: upsert block batch"), func(tx pgx.Tx, extra []string) error {
-		if budget != nil {
-			if err := budget.lock(ctx, tx); err != nil {
-				return err
-			}
-		}
 		var err error
-		if results, err = upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types, budget, extra); err != nil {
+		if results, err = upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types, extra); err != nil {
 			return err
 		}
 		if budget == nil {
@@ -245,7 +244,7 @@ func UpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, 
 		if len(ids) == 0 {
 			return nil
 		}
-		return budget.book(ctx, tx, ids, 0)
+		return budget.spend(ctx, tx, ids)
 	})
 	if err != nil {
 		batchIdentityHolder(ctx, pool, items, err)
@@ -272,7 +271,7 @@ func CheckUpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUps
 		return err
 	}
 	err = writeSupersedesSourceScopes(ctx, pool, pgxdb.At("store: check block batch"), func(tx pgx.Tx, extra []string) error {
-		if _, err := upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types, nil, extra); err != nil {
+		if _, err := upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types, extra); err != nil {
 			return err
 		}
 		return pgxdb.ErrRollback
@@ -339,10 +338,9 @@ type batchIdentity struct{ scope, category, title string }
 // upsertBlocksTx is the batch inside its transaction (see UpsertBlocks): the
 // update items' scopes read, the scope locks (with extra, the scopes an
 // earlier run of the transaction asked for), the lock pass over every item
-// with its no-op decision, the budget check for the items that write, the
-// writes, then the parent links. budget nil checks nothing; its lock is the
-// caller's, taken before this.
-func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep batchPrep, apiKeyID string, types *blocktype.Set, budget *WriteBudget, extra []string) ([]BatchResult, error) {
+// with its no-op decision, the writes, then the parent links. The budget is
+// the caller's, spent after this (WriteBudget.spend).
+func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep batchPrep, apiKeyID string, types *blocktype.Set, extra []string) ([]BatchResult, error) {
 	current, err := readBatchUpdateTargets(ctx, tx, items)
 	if err != nil {
 		return nil, err
@@ -356,7 +354,6 @@ func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep ba
 	order := batchLockOrder(items, current)
 	holds := make([]batchHold, len(items))
 	rows := make(map[string]int, len(items))
-	writes := 0
 	for _, i := range order {
 		h, err := lockBatchItem(ctx, tx, items[i], prep.updates[i], held)
 		if err != nil {
@@ -367,17 +364,9 @@ func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep ba
 		}
 		rows[h.rowID] = i
 		holds[i] = h
-		if !h.match.Unchanged() {
-			writes++
-		}
 	}
 	if err := batchIdentityClash(items, holds); err != nil {
 		return nil, err
-	}
-	if budget != nil {
-		if err := budget.check(ctx, tx, writes); err != nil {
-			return nil, err
-		}
 	}
 	results := make([]BatchResult, len(items))
 	for _, i := range order {
@@ -481,8 +470,8 @@ func lockBatchMatch(ctx context.Context, tx pgx.Tx, it BatchUpsert) (batchHold, 
 // overshoot by its size. The budget lock serializes the batches (and the
 // staged batches) of one key between the count and the booking instead.
 // Single stores do not take it: a single store whose check-to-booking stretch
-// overlaps a batch's count-to-commit stretch (the count after the batch's lock
-// pass, right before its first write) is not in the batch's count, and the
+// overlaps a batch's count-to-commit stretch (the count after the batch's
+// writes, right before its booking) is not in the batch's count, and the
 // batch's writes are not in its count, so beside the overshoot single stores
 // have among themselves the two exceed the limit together by at most the
 // smaller of the batch's writes and the number of such single stores
@@ -539,9 +528,11 @@ func (b WriteBudget) lock(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
-// check refuses n writes that do not fit; the caller holds the budget lock
-// (lock). The count runs after the lock, in a statement of its own, so it
-// sees every booking a batch of this key committed while this one waited. n 0
+// check refuses n writes that do not fit. The caller that decides by it holds
+// the budget lock (lock): the count runs after the lock, in a statement of
+// its own, so it sees every booking a batch of this key committed while this
+// one waited. Without the lock it is only the early refusal of a key whose
+// budget is already used up (runBlockUpdate); spend decides after it. n 0
 // counts nothing and refuses nothing.
 func (b WriteBudget) check(ctx context.Context, tx pgx.Tx, n int) error {
 	if b.Limit <= 0 || n == 0 {

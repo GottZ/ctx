@@ -227,7 +227,7 @@ func TestModelAliasR2_PolicyEdges(t *testing.T) {
 	type pc struct{ kind, role, policy, want string }
 	huge := strings.Repeat("k", 1<<20)
 	cases := []pc{
-		{"chat", "chat", `{"max\u0000n":1}`, "400"}, // the dispatcher refuses a NUL character (issue #519)
+		{"chat", "chat", `{"max\u0000n":1}`, "422"}, // the dispatcher refuses a NUL character as the form's field error (issue #519)
 		{"chat", "chat", `{"` + huge + `":1}`, "422"},
 		{"chat", "chat", `{"MAX_N":1}`, "422"},
 		{"chat", "chat", `{"tools":{"max_count":5}}`, "422"},

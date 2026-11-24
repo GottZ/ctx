@@ -80,6 +80,12 @@ func TestBlockIDOddUpdateItemIsUnknown(t *testing.T) {
 			if st != wantStatus || m["code"] != wantCode {
 				t.Errorf("REST batch: %d %v, want %d %s", st, m, wantStatus, wantCode)
 			}
+			if strings.IndexByte(c.id, 0) >= 0 {
+				// A NUL in a tool argument is refused before the tool runs,
+				// naming the field (issue #519); the store's own answer for
+				// such an id is what the REST call above reads.
+				wantText = "id " + nulFieldMessage
+			}
 			ans, err := f.mcpCallNoFatal(k, "store_batch", map[string]any{"items": []any{map[string]any{"id": c.id, "content": "written through an odd id"}}})
 			if err != nil || !ans.IsError || !strings.Contains(ans.Text, wantText) {
 				t.Errorf("MCP store_batch: %+v %v, want an error saying %q", ans, err, wantText)
