@@ -360,3 +360,50 @@ func TestUpsertBlocksUpdateInterrupted(t *testing.T) {
 		})
 	}
 }
+
+// TestUpsertBlocksUpdateFollowsAMovedBlock: an update item's block is moved to
+// another scope after the batch read its scope and before the batch's lock
+// pass reached it (the batch waits for the first scope's lock meanwhile). The
+// lock pass does not find the block in the scope it locked, and the batch runs
+// again: it reads the new scope, locks it in order and writes the block there.
+func TestUpsertBlocksUpdateFollowsAMovedBlock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	x := ubSeed(t, pool, "ubf-s1", "moving")
+	gate, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gate.Rollback(ctx) }()
+	if _, err := gate.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('ctx:supersedes:' || 'ubf-s1'))`); err != nil {
+		t.Fatal(err)
+	}
+	actor := ubActor(t, dsn, "ubf-batch", nil)
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.UpsertBlocks(ctx, actor, []store.BatchUpsert{
+			ubuUpdate(x, store.UpdateBlockData{Content: ubuPtr("written after the move")}, "ubf-s1", "ubf-s2"),
+		}, "ubf", nil, nil)
+		done <- err
+	}()
+	ubWaitForLockWait(t, pool, "ubf-batch")
+	if _, err := pool.Exec(ctx, `UPDATE context_blocks SET scope = 'ubf-s2' WHERE id = $1`, x); err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := ubAwait(t, "ubf-batch", done); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	var scope, content string
+	if err := pool.QueryRow(ctx, `SELECT scope, content FROM context_blocks WHERE id = $1`, x).Scan(&scope, &content); err != nil {
+		t.Fatal(err)
+	}
+	if scope != "ubf-s2" || content != "written after the move" {
+		t.Fatalf("block in %s with %q; want the batch's content in ubf-s2", scope, content)
+	}
+}
