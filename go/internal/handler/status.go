@@ -331,7 +331,7 @@ type advisoryRow struct {
 // sitting). It is the time the guard flagged the block (metadata
 // guard_checked_at); a guard pass does not move updated_at. The key's presence
 // varies across historic repair migrations (M107), so a row without a
-// readable one falls back to its updated_at (guard.FlaggedAtSQL). The wire
+// readable one falls back to its updated_at (guard.FlaggedSQL). The wire
 // name predates this and stays.
 // built_at (RC-1 wave S1) is the generation's SUCCESS stamp: the section is
 // served from ONE per-tick generation shared by every reader, and this field

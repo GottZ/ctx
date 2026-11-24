@@ -199,12 +199,12 @@ type batchHold struct {
 	target supersedesTarget
 }
 
-// batchContentTimes is ExtractDates of every item's content, computed before
-// the batch's transaction (prepareUpsert says why).
+// batchContentTimes is temporalExtraction of every item's content, computed
+// before the batch's transaction (prepareUpsert says why).
 func batchContentTimes(items []BatchUpsert) [][]time.Time {
 	times := make([][]time.Time, len(items))
 	for i, it := range items {
-		times[i] = ExtractDates(it.Content)
+		times[i] = temporalExtraction(it.Content)
 	}
 	return times
 }

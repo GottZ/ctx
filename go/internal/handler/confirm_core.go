@@ -402,7 +402,7 @@ func executeConfirmedStore(ctx context.Context, pool *pgxpool.Pool, blocktypes *
 	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
 		slog.Warn("confirm: auto-classify failed", "error", err, "block_id", block.ID)
 	}
-	_, _ = store.RefreshTemporal(ctx, pool, block.ID, block.Content, block.CreatedAt)
+	_, _ = store.RefreshBlockTemporal(ctx, pool, block)
 
 	return confirmOutcome{Kind: confirmOK, Op: cw.Op, Block: block, Supersedes: cw.Supersedes}
 }

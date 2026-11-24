@@ -48,6 +48,9 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 		metadata = map[string]any{}
 	}
 	sens, metadata, _ := ApplyWriteDetector(content, SensitivityWrite{}, metadata)
+	// The guard's keys are not the caller's (stripGuardKeys, issue #238); a
+	// rewrite of the chunk keeps the stored ones (keptGuardKeysSQL).
+	metadata = stripGuardKeys(metadata)
 
 	insertCols := "category, tags, title, content, metadata, scope, source_id, chunk_index, lifecycle_state"
 	selectVals := "$1::text, $2::text[], $3::text, $4::text, $5::jsonb, $6::text, $7::uuid, $8::int, 'chunk'"
@@ -57,7 +60,7 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 		"tags = EXCLUDED.tags",
 		"title = EXCLUDED.title",
 		"content = EXCLUDED.content",
-		"metadata = EXCLUDED.metadata",
+		"metadata = " + keptGuardKeysSQL("context_blocks.metadata", "EXCLUDED.metadata"),
 		"updated_at = now()",
 	}
 	if sens.Detector {
@@ -75,7 +78,8 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 	// see prepareUpsert).
 	insertCols += ", content_times"
 	selectVals += fmt.Sprintf(", $%d::timestamptz[]", len(args)+1)
-	args = append(args, ExtractDates(content))
+	times := temporalExtraction(content)
+	args = append(args, times)
 	setClauses = append(setClauses, "content_times = EXCLUDED.content_times")
 
 	query := fmt.Sprintf(`INSERT INTO context_blocks (%s)
@@ -101,6 +105,9 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 		// scope) another active block holds collides on the identity index
 		// (issue #275): the caller's input, typed like UpdateBlock's.
 		return nil, fmt.Errorf("store: insert chunk: %w", blockIdentityTaken(err))
+	}
+	if b.Content == content { // the afterwork's dates, as in execHeld (issue #434)
+		b.written = &writtenDates{content: b.Content, times: times}
 	}
 	return b, nil
 }

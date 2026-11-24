@@ -169,10 +169,10 @@ func updateDataFromCanonical(cw store.CanonicalWrite) store.UpdateBlockData {
 // deliberately match-only: a block whose new title stops matching keeps its
 // current type, the hook promotes and never demotes; nothing is written once a
 // later write replaced the title or a metadata key the rules read — issue
-// #426), temporal re-extraction
-// on content change (store.RefreshTemporal; the rows always get createdAt as
-// the meta-anchor, even without content times, and nothing is written once a
-// later write replaced the content — issue #414). All non-fatal; reqID stamps every
+// #426), the temporal rows on content change (store.RefreshBlockTemporal,
+// from the dates the update computed for content_times — issue #434; the rows
+// always get createdAt as the meta-anchor, even without content times, and
+// nothing is written once a later write replaced the content — issue #414). All non-fatal; reqID stamps every
 // line with the request it belongs to. The embedding reset on a changed title
 // or content is not afterwork: store.UpdateBlock clears the vector in the
 // update's own transaction.
@@ -195,7 +195,7 @@ func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *bloc
 		}
 	}
 	if data.Content != nil || data.Edits != nil {
-		if _, err := store.RefreshTemporal(ctx, pool, block.ID, block.Content, block.CreatedAt); err != nil {
+		if _, err := store.RefreshBlockTemporal(ctx, pool, block); err != nil {
 			logRequestError(ctx, "update afterwork: temporal refresh failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}
