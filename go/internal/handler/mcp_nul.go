@@ -7,7 +7,9 @@ import (
 )
 
 // mcpNULExempt names, per tool, the argument whose NUL is a legitimate value:
-// blob_store's text is stored as bytes (bytea), as its file is.
+// blob_store's text is stored as bytes (bytea), as its file is. The name is
+// matched as the arguments' decoder maps a key to its field, without regard
+// to case (nulFrame.is).
 var mcpNULExempt = map[string]string{
 	"blob_store": "text",
 }
@@ -19,7 +21,7 @@ var mcpNULExempt = map[string]string{
 // answers in JSON-RPC, so the refusal is a tool result, not an HTTP 400.
 func withNULRefusal[In any](tool string, h mcp.ToolHandlerFor[In, any]) mcp.ToolHandlerFor[In, any] {
 	exempt := mcpNULExempt[tool]
-	skip := func(p string) bool { return exempt != "" && p == exempt }
+	skip := func(f []nulFrame) bool { return exempt != "" && len(f) == 1 && f[0].is(exempt) }
 	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
 		if req != nil && req.Params != nil {
 			if path, found := jsonNULPath(req.Params.Arguments, skip); found {

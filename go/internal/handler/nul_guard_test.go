@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -46,7 +47,7 @@ func TestJSONNULPath(t *testing.T) {
 		{"numbers and literals", `{"a":1.5e3,"b":true,"c":null,"d":[false,"` + nulEsc + `"]}`, "", "d[1]", true},
 	}
 	for _, tc := range cases {
-		skip := func(p string) bool { return tc.skip != "" && p == tc.skip }
+		skip := func(f []nulFrame) bool { return tc.skip != "" && renderNULPath(f) == tc.skip }
 		got, found := jsonNULPath([]byte(tc.raw), skip)
 		if got != tc.want || found != tc.found {
 			t.Errorf("%s: jsonNULPath(%s) = %q, %v; want %q, %v", tc.name, tc.raw, got, found, tc.want, tc.found)
@@ -192,6 +193,117 @@ func TestNULGuardBodyAtTheCap(t *testing.T) {
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/y", strings.NewReader(over)))
 	if gotErr != nil || string(got) != over || rec.Code != http.StatusNoContent {
 		t.Errorf("past the limit: read %q err %v status %d", got, gotErr, rec.Code)
+	}
+}
+
+// TestNULGuardChunks: the guard holds a body as chunks that follow the bytes
+// as they arrive (readUpTo), so a NUL escape can stand across the edge of two
+// chunks, and a declared body may be shorter or longer than declared. Every
+// position of the escape around the first chunk edges is found, and every
+// body the guard passes reaches the handler byte for byte.
+func TestNULGuardChunks(t *testing.T) {
+	guard := RefuseNUL(NULBodyJSON, 1<<20)
+	for _, at := range []int{nulChunkMin - 20, nulChunkMin - 12, nulChunkMin - 6, nulChunkMin - 4, nulChunkMin - 3, nulChunkMin - 1, nulChunkMin,
+		2*nulChunkMin - 3, 4*nulChunkMin - 2, 8*nulChunkMin - 5, 3 << 18} {
+		for _, declared := range []bool{true, false} {
+			prefix := `{"content":"` + strings.Repeat("a", at-12)
+			body := prefix + nulEsc + strings.Repeat("b", 300) + `"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/store", strings.NewReader(body))
+			if !declared {
+				req.ContentLength = -1
+			}
+			status, answer, _, ran := nulGuardServe(t, guard, http.MethodPost, "/api/store", req)
+			if ran || status != http.StatusBadRequest || !strings.Contains(answer, "content "+nulFieldMessage) {
+				t.Errorf("escape at %d (declared %v): want 400 naming content, got ran=%v %d %s", at, declared, ran, status, answer)
+			}
+		}
+	}
+	for _, size := range []int{0, 1, nulChunkMin - 1, nulChunkMin, nulChunkMin + 1, 3*nulChunkMin + 7, nulChunkMax, nulChunkMax + 1, 1 << 20} {
+		for _, declared := range []int{-1, 0, size, size - 1, size + 1} {
+			if declared < -1 || (declared == 0 && size != 0) {
+				continue
+			}
+			body := `{"content":"` + strings.Repeat("x", max(0, size-14)) + `"}`
+			body = body[:min(len(body), size)]
+			if size == 0 {
+				body = ""
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/store", strings.NewReader(body))
+			req.ContentLength = int64(declared)
+			status, _, got, ran := nulGuardServe(t, guard, http.MethodPost, "/api/store", req)
+			if !ran || status != http.StatusNoContent || string(got) != body {
+				t.Errorf("a %d-byte body declared %d: ran=%v status %d, the handler read %d bytes", size, declared, ran, status, len(got))
+			}
+		}
+	}
+}
+
+// TestNULGuardReadsWhatArrives: what readUpTo holds follows the bytes that
+// arrived, whatever length a request declared — at most twice them plus a
+// first chunk; the measure is the capacity of the chunks it returns.
+func TestNULGuardReadsWhatArrives(t *testing.T) {
+	const declared = 75 << 20
+	for _, got := range []int{0, 25, nulChunkMin, 100 << 10, 3 << 20} {
+		chunks, n, err := readUpTo(io.MultiReader(bytes.NewReader(make([]byte, got)), iotest.ErrReader(io.ErrUnexpectedEOF)), declared, declared)
+		held := 0
+		for _, c := range chunks {
+			held += cap(c)
+		}
+		if n != int64(got) || !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("%d bytes then an error: read %d, err %v", got, n, err)
+		}
+		if bound := 2*got + nulChunkMin; held > bound {
+			t.Errorf("%d of %d declared bytes arrived: the guard holds %d, want at most %d", got, declared, held, bound)
+		}
+	}
+}
+
+// TestNULGuardExemptionAsTheDecoderMaps: an exemption names a field as the
+// handler's decoder (encoding/json) maps a key to it — without regard to case,
+// with Unicode's simple folding — so a key the decoder takes for the field is
+// exempt and every other key is not.
+func TestNULGuardExemptionAsTheDecoderMaps(t *testing.T) {
+	json := RefuseNUL(NULBodyJSON, 1<<20)
+	for _, key := range []string{"value", "Value", "VALUE", "vAlUe", "v\\u0061lue", "valu", "values", "vaIue"} {
+		var secret struct {
+			Value string `json:"value"`
+		}
+		decoderTakesIt := jsonUnmarshal(`{"`+key+`":"x"}`, &secret) == nil && secret.Value == "x"
+		body := `{"` + key + `":"a` + nulEsc + `b"}`
+		req := httptest.NewRequest(http.MethodPut, "/api/secrets/s", strings.NewReader(body))
+		_, _, _, ran := nulGuardServe(t, json, http.MethodPut, "/api/secrets/{name}", req)
+		if ran != decoderTakesIt {
+			t.Errorf("secret key %q: the decoder takes it for the value: %v; the guard exempts it: %v", key, decoderTakesIt, ran)
+		}
+	}
+	for _, key := range []string{"chunks", "CHUNKS", "Chunks", "chun\u212as", "chunk\u017f", "chunk\\u0073", "CHUNK\\u017f", "chunk", "chunkss"} {
+		var in IngestRequest
+		decoderTakesIt := jsonUnmarshal(`{"`+key+`":[{"title":"x"}]}`, &in) == nil && len(in.Chunks) == 1
+		body := `{"` + key + `":[{"title":"t","content":"` + nulEsc + `"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/api/ingest", strings.NewReader(body))
+		_, _, _, ran := nulGuardServe(t, json, http.MethodPost, "/api/ingest", req)
+		if ran != decoderTakesIt {
+			t.Errorf("ingest key %q: the decoder takes it for the chunks: %v; the guard exempts it: %v", key, decoderTakesIt, ran)
+		}
+	}
+}
+
+func jsonUnmarshal(s string, v any) error { return json.Unmarshal([]byte(s), v) }
+
+// TestNULGuardDuplicateKey pins the decision for a key that stands twice: the
+// guard judges the text, so a NUL in the instance the decoder overwrites is
+// refused as one in the instance it keeps — no body with a NUL reaches a
+// handler, whichever of its keys the handler would read.
+func TestNULGuardDuplicateKey(t *testing.T) {
+	for _, body := range []string{
+		`{"title":"a` + nulEsc + `b","title":"ok"}`,
+		`{"title":"ok","title":"a` + nulEsc + `b"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/store", strings.NewReader(body))
+		status, answer, _, ran := nulGuardServe(t, RefuseNUL(NULBodyJSON, 1<<20), http.MethodPost, "/api/store", req)
+		if ran || status != http.StatusBadRequest || !strings.Contains(answer, "title "+nulFieldMessage) {
+			t.Errorf("%s: want 400 naming title, got ran=%v %d %s", body, ran, status, answer)
+		}
 	}
 }
 

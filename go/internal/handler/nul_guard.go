@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
@@ -50,10 +51,13 @@ const AuthFlowBodyCap = 8192
 // handler: a NUL that is a legitimate value (bytes the route seals and stores
 // as bytea — a secret's value), or one the handler answers in its own form
 // (an ingest chunk fails on its own and the others are written, as every
-// chunk-level failure of that route).
-var nulBodySkip = map[string]func(path string) bool{
-	http.MethodPut + " /api/secrets/{name}": func(p string) bool { return p == "value" },
-	http.MethodPost + " /api/ingest":        func(p string) bool { return strings.HasPrefix(p, "chunks[") },
+// chunk-level failure of that route). A skip reads the frames of the NUL (the
+// containers around it, outermost first) and names a key as the handler's
+// decoder maps it to its field: encoding/json takes a key without regard to
+// case ("Value", "CHUNKS"), so the exemption does too (nulFrame.is).
+var nulBodySkip = map[string]func(frames []nulFrame) bool{
+	http.MethodPut + " /api/secrets/{name}": func(f []nulFrame) bool { return len(f) == 1 && f[0].is("value") },
+	http.MethodPost + " /api/ingest":        func(f []nulFrame) bool { return len(f) > 1 && f[0].is("chunks") && f[1].array },
 }
 
 // nulBodyOwnCheck names the routes whose dispatcher refuses a NUL in the body
@@ -161,16 +165,19 @@ func bodyNULField(r *http.Request, body NULBody, limit int64) (string, bool) {
 	if nulBodyOwnCheck[key] {
 		return "", false
 	}
-	raw, err := readUpTo(r.Body, limit, r.ContentLength)
-	if err != nil || int64(len(raw)) > limit {
-		r.Body = &replayBody{buf: raw, tail: err, rest: r.Body}
+	chunks, n, err := readUpTo(r.Body, limit, r.ContentLength)
+	if err != nil || n > limit {
+		r.Body = &replayBody{chunks: chunks, tail: err, rest: r.Body}
 		return "", false
 	}
-	r.Body = &replayBody{buf: raw, rest: r.Body}
+	r.Body = &replayBody{chunks: chunks, rest: r.Body}
 	if body == NULBodyForm {
-		return formNULField(r, raw)
+		return formNULField(r, joinChunks(chunks, n))
 	}
-	path, found := jsonNULPath(raw, nulBodySkip[key])
+	if !chunksCarry(chunks, []byte(`\u0000`)) {
+		return "", false
+	}
+	path, found := jsonNULPath(joinChunks(chunks, n), nulBodySkip[key])
 	if !found {
 		return "", false
 	}
@@ -215,35 +222,130 @@ func formNULField(r *http.Request, raw []byte) (string, bool) {
 	return valuesNULKey(values)
 }
 
-// readUpTo reads rc up to limit+1 bytes. size is the declared length (-1
-// unknown): a declared body is read into one buffer of its size.
-func readUpTo(rc io.Reader, limit, size int64) ([]byte, error) {
-	var b bytes.Buffer
-	if size > 0 && size <= limit {
-		b.Grow(int(size) + bytes.MinRead)
+// The guard holds a body as a list of chunks, each allocated once the chunks
+// before it are full: the first nulChunkMin bytes, each further chunk as large
+// as all before it together (the held bytes double), at most nulChunkMax, and
+// none larger than what the declared length (Content-Length) leaves. What the
+// guard holds therefore grows with the bytes that ARRIVED — at most twice them
+// plus a first chunk — never with the length a request declares: a connection
+// that declares a large body and stalls holds one first chunk until the
+// server's read timeout, not the declared size (review of PR #553). A complete
+// body costs its size once, in about log2 + size/nulChunkMax allocations,
+// with no copy; the replay hands each chunk out and drops it.
+const (
+	nulChunkMin = 4 << 10
+	nulChunkMax = 1 << 20
+)
+
+// readUpTo reads rc up to limit+1 bytes into chunks and returns them with the
+// number of bytes read. size is the declared length (-1 unknown): a chunk is
+// never larger than what it leaves plus one byte to see the end, and takes
+// that rest whole when it is at most bytes.MinRead larger than the chunk
+// (so a declared body ends inside its last chunk, not in one of its own).
+func readUpTo(rc io.Reader, limit, size int64) ([][]byte, int64, error) {
+	chunks := make([][]byte, 0, 16) // a body up to 4 MB without a regrowth
+	var n int64
+	for n <= limit {
+		c := max(n, nulChunkMin)
+		if c > nulChunkMax {
+			c = nulChunkMax
+		}
+		if rest := size - n + 1; size >= n && rest <= c+bytes.MinRead {
+			c = rest
+		}
+		if c > limit+1-n {
+			c = limit + 1 - n
+		}
+		buf := make([]byte, c)
+		m, err := fill(rc, buf)
+		if m > 0 {
+			chunks = append(chunks, buf[:m])
+			n += int64(m)
+		}
+		if errors.Is(err, io.EOF) {
+			return chunks, n, nil
+		}
+		if err != nil {
+			return chunks, n, err
+		}
 	}
-	_, err := b.ReadFrom(io.LimitReader(rc, limit+1))
-	return b.Bytes(), err
+	return chunks, n, nil
+}
+
+// fill reads into buf until it is full or the read ends: io.EOF for the end
+// of the body, any other error as it came (a body shorter than declared ends
+// in io.ErrUnexpectedEOF, which the handler is to see, not a clean end).
+func fill(rc io.Reader, buf []byte) (int, error) {
+	m := 0
+	for m < len(buf) {
+		k, err := rc.Read(buf[m:])
+		m += k
+		if err != nil {
+			return m, err
+		}
+	}
+	return m, nil
+}
+
+// joinChunks is the body as one slice: the one chunk itself, or a copy of all
+// (only when a NUL may be in the body, or for a form, which its cap keeps small).
+func joinChunks(chunks [][]byte, n int64) []byte {
+	if len(chunks) == 1 {
+		return chunks[0]
+	}
+	raw := make([]byte, 0, n)
+	for _, c := range chunks {
+		raw = append(raw, c...)
+	}
+	return raw
+}
+
+// chunksCarry reports whether the body may carry a NUL: the raw byte, or the
+// text esc anywhere — inside a chunk or across the edge of two. It errs on the
+// side of yes (an escaped backslash before the text); the walk decides.
+func chunksCarry(chunks [][]byte, esc []byte) bool {
+	var edge [16]byte
+	for i, c := range chunks {
+		if bytes.IndexByte(c, 0) >= 0 || bytes.Contains(c, esc) {
+			return true
+		}
+		if i == 0 {
+			continue
+		}
+		prev := chunks[i-1]
+		e := append(edge[:0], prev[max(0, len(prev)-len(esc)+1):]...)
+		if len(c) >= len(esc) {
+			c = c[:len(esc)-1]
+		}
+		e = append(e, c...)
+		if bytes.Contains(e, esc) {
+			return true
+		}
+	}
+	return false
 }
 
 // replayBody hands the handler the bytes the guard read, then what the read
-// ended with (its error), then the rest of the body. It drops its buffer once
-// handed out, so a handler that copies the body into its own (a JSON
-// decoder) does not hold two copies past the copy.
+// ended with (its error), then the rest of the body. It drops each chunk once
+// handed out, so a handler that copies the body into its own (a JSON decoder)
+// does not hold two copies of what it has read.
 type replayBody struct {
-	buf  []byte
-	tail error
-	rest io.ReadCloser
+	chunks [][]byte
+	tail   error
+	rest   io.ReadCloser
 }
 
 func (b *replayBody) Read(p []byte) (int, error) {
-	if len(b.buf) > 0 {
-		n := copy(p, b.buf)
-		b.buf = b.buf[n:]
-		if len(b.buf) == 0 {
-			b.buf = nil
+	for len(b.chunks) > 0 {
+		n := copy(p, b.chunks[0])
+		b.chunks[0] = b.chunks[0][n:]
+		if len(b.chunks[0]) == 0 {
+			b.chunks[0] = nil
+			b.chunks = b.chunks[1:]
 		}
-		return n, nil
+		if n > 0 || len(p) == 0 {
+			return n, nil
+		}
 	}
 	if b.tail != nil {
 		return 0, b.tail
@@ -266,13 +368,13 @@ type nulFrame struct {
 // jsonNULPath walks the first JSON value of raw — the one a json.Decoder
 // hands the handler — and returns the path of the first string (a value or
 // an object's key) that carries a NUL character, its escape or the raw byte,
-// whose path skip does not exempt. Paths read "metadata.source", "tags[0]",
+// whose frames skip does not exempt. Paths read "metadata.source", "tags[0]",
 // "items[0]: content" (an element of a list of objects, the batch form); a
 // key that carries one is named by the object that holds it ("" for the top
 // level), so the answer does not echo the character. Invalid JSON before a
 // NUL ends the walk without one: the handler's decoder refuses that body.
 // One pass, no allocation until a NUL is found.
-func jsonNULPath(raw []byte, skip func(string) bool) (string, bool) {
+func jsonNULPath(raw []byte, skip func([]nulFrame) bool) (string, bool) {
 	if bytes.IndexByte(raw, 0) < 0 && !jsonCarriesNUL(raw) {
 		return "", false
 	}
@@ -320,7 +422,7 @@ type nulScanner struct {
 	raw   []byte
 	i     int
 	stack []nulFrame
-	skip  func(string) bool
+	skip  func([]nulFrame) bool
 	path  string
 	found bool
 	at    []nulFrame // the frames of the NUL found
@@ -353,14 +455,28 @@ func (sc *nulScanner) skipWS() {
 }
 
 // hit records a NUL at the path of frames unless skip exempts it; it
-// reports whether the walk ends.
+// reports whether the walk ends. The exemption reads the frames, so an exempt
+// NUL renders no path.
 func (sc *nulScanner) hit(frames []nulFrame) bool {
-	p := renderNULPath(frames)
-	if sc.skip != nil && sc.skip(p) {
+	if sc.skip != nil && sc.skip(frames) {
 		return false
 	}
-	sc.path, sc.found, sc.at = p, true, frames
+	sc.path, sc.found, sc.at = renderNULPath(frames), true, frames
 	return true
+}
+
+// is reports whether the frame is an object's member whose key the JSON
+// decoder maps to the field name: the key's text, escapes decoded, equal
+// under Unicode case folding — strings.EqualFold, which is how encoding/json
+// matches a key to a field when no key matches exactly.
+func (f nulFrame) is(name string) bool {
+	if f.array || f.key == nil {
+		return false
+	}
+	if bytes.IndexByte(f.key, '\\') < 0 {
+		return bytes.EqualFold(f.key, []byte(name))
+	}
+	return strings.EqualFold(jsonKeyText(f.key), name)
 }
 
 func (sc *nulScanner) value() nulState {
