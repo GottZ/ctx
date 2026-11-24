@@ -1037,6 +1037,18 @@ type SchedulerConfig struct {
 	// over the one hypertable; per-tenant retention needs a scope-aware janitor
 	// (telemetry achse, own wave). The operator owns the egress-audit policy.
 	LLMLogRetentionDays int `key:"scheduler.llmlog_retention_days" env:"CTX_LLMLOG_RETENTION_DAYS" default:"90" mut:"hot" parse:"strict" tenancy:"global-only"`
+	// WriteLogRetentionDays is the age after which the six-hour janitor
+	// deletes rows of context_write_log, the audit of the guard batch, the
+	// dream's link writes and resolves (store.EvictWriteLog, issue #277): in
+	// batches over idx_write_log_created, rows past the horizon only. 0 keeps
+	// every row forever, as before the key existed — an upgrade changes
+	// nothing. A value from 1 to WriteLogRetentionFloorDays-1 is refused (V69):
+	// the daily synthesis report reads the decisions of the 24 hours before
+	// its run. With a horizon set, guard-stats' write_log_entries counts the
+	// rows inside it, and a report backfill (?date=) of a day whose window
+	// reaches past it is refused. global-only like its llmlog sibling: one
+	// janitor over one process-wide table.
+	WriteLogRetentionDays int `key:"scheduler.writelog_retention_days" env:"CTX_WRITELOG_RETENTION_DAYS" default:"0" mut:"hot" parse:"strict" tenancy:"global-only"`
 	// BlockCountReconcileInterval is the cadence of the block-counter
 	// reconcile (issue #266, store.ReconcileBlockCounts): every interval the
 	// scheduler compares context_block_counts with a real count, scope by

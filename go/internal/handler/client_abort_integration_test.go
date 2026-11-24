@@ -260,7 +260,11 @@ func TestClientAbortStoreWrite(t *testing.T) {
 		}
 	})
 
-	t.Run("abort after the upsert committed keeps the block", func(t *testing.T) {
+	// Since issue #211 a store that names a parent writes the block and the
+	// link in ONE transaction: a client that goes away while the write waits
+	// for its parent leaves nothing — before, the upsert had committed and the
+	// block stayed without its parent (write_outcome committed).
+	t.Run("abort while the write waits for its parent rolls the block back", func(t *testing.T) {
 		const title = "i417-abort-after-commit"
 		parent, err := store.UpsertBlock(ctx, pool, "i417", "i417-parent", "parent", nil, nil, "private", true,
 			store.SensitivityWrite{Value: backends.SensPublic}, "")
@@ -274,11 +278,11 @@ func TestClientAbortStoreWrite(t *testing.T) {
 		waitDone(t, done)
 		release()
 		assertClientGone(t, logs)
-		if got := outcomeOf(t, logs, "store: parent link failed after the upsert — the block exists without its parent"); got != "committed" {
-			t.Errorf("write_outcome = %q, want committed", got)
+		if got := outcomeOf(t, logs, "store: upsert error"); got != "rolled_back" {
+			t.Errorf("write_outcome = %q, want rolled_back", got)
 		}
-		if n := blockCount(t, title); n != 1 {
-			t.Errorf("the committed write left %d rows, want 1", n)
+		if n := blockCount(t, title); n != 0 {
+			t.Errorf("the rolled-back write left %d rows, want 0", n)
 		}
 	})
 

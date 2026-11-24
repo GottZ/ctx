@@ -655,12 +655,19 @@ func (h *ManageHandler) handleListMeta(w http.ResponseWriter, r *http.Request, a
 // empty-value convention above is claimReject's reading of an ABSENT field; a
 // present empty one is a claim of no type, and there is no such type.
 func (h *ManageHandler) updateClaimReject(ctx context.Context, data store.UpdateBlockData) *writeReject {
-	if data.Type != nil && *data.Type == "" {
-		return classUnknownType.reject(emptyTypeMsg)
-	}
 	var set *blocktype.Set
 	if h.blocktypes != nil {
 		set = h.blocktypes.SnapshotForRequest(ctx)
+	}
+	return updateClaimRejectSet(set, data)
+}
+
+// updateClaimRejectSet is updateClaimReject over a registry snapshot the
+// caller already holds: the update items of a block batch (issue #211) run
+// the manage-update verdict through it, against the batch's one snapshot.
+func updateClaimRejectSet(set *blocktype.Set, data store.UpdateBlockData) *writeReject {
+	if data.Type != nil && *data.Type == "" {
+		return classUnknownType.reject(emptyTypeMsg)
 	}
 	return claimReject(set, strOrEmpty(data.Category), strOrEmpty(data.Type), "", updateMetadataClaim(data.Metadata, data.MetadataMerge))
 }
@@ -829,25 +836,39 @@ func strOrEmpty(s *string) string {
 // friction (confirm flag + metadata audit who/when/from→to). Upgrades stay
 // free. Empty msg = proceed; otherwise (status, msg) is the error response.
 func (h *ManageHandler) applySensitivityGuard(ctx context.Context, ar *auth.AuthResult, reqID, resolvedID string, data *store.UpdateBlockData) (int, string) {
+	if rej := sensitivityGuardReject(ctx, h.pool, ar, reqID, resolvedID, data); rej != nil {
+		return rej.Status, rej.Msg
+	}
+	return 0, ""
+}
+
+// sensitivityGuardReject is applySensitivityGuard's verdict as a rejection
+// class: an invalid level (invalid_sensitivity), a downgrade without its
+// confirm flag (missing_fields — the flag is what the remedy adds) and a read
+// fault (internal), each with the status and the message manage update has
+// always answered. nil = proceed; a confirmed downgrade sets
+// data.SensitivityAudit. The update items of a block batch (issue #211) run it
+// as manage update does.
+func sensitivityGuardReject(ctx context.Context, pool *pgxpool.Pool, ar *auth.AuthResult, reqID, resolvedID string, data *store.UpdateBlockData) *writeReject {
 	if data.Sensitivity == nil {
-		return 0, ""
+		return nil
 	}
 	newSens := backends.Sensitivity(*data.Sensitivity)
 	if !backends.ValidSensitivity(newSens) {
-		return http.StatusBadRequest, "Invalid sensitivity: must be credentials|personal|internal|public"
+		return classInvalidSensitivity.reject("Invalid sensitivity: must be credentials|personal|internal|public")
 	}
-	curSens, found, err := store.GetBlockSensitivity(ctx, h.pool, resolvedID, writableBlockScopes(ar))
+	curSens, found, err := store.GetBlockSensitivity(ctx, pool, resolvedID, writableBlockScopes(ar))
 	if err != nil {
 		logRequestError(ctx, "manage: sensitivity read error", "error", err, "request_id", reqID)
-		return http.StatusInternalServerError, "Internal server error"
+		return classInternal.reject("Internal server error")
 	}
 	if !found || newSens.Rank() >= curSens.Rank() {
-		return 0, ""
+		return nil
 	}
 	if !data.ConfirmSensitivityDowngrade {
-		return http.StatusBadRequest, fmt.Sprintf(
+		return classMissingFields.reject(fmt.Sprintf(
 			"sensitivity downgrade %s → %s opens this block to lower-trust backends — repeat with \"confirm_sensitivity_downgrade\": true",
-			curSens, newSens)
+			curSens, newSens))
 	}
 	data.SensitivityAudit = map[string]any{
 		"by":   ar.ApiKeyID,
@@ -858,7 +879,7 @@ func (h *ManageHandler) applySensitivityGuard(ctx context.Context, ar *auth.Auth
 	slog.Warn("manage: confirmed sensitivity downgrade",
 		"block_id", resolvedID, "from", string(curSens), "to", string(newSens),
 		"api_key_id", ar.ApiKeyID, "request_id", reqID)
-	return 0, ""
+	return nil
 }
 
 func (h *ManageHandler) handleDelete(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
@@ -959,6 +980,10 @@ func (h *ManageHandler) handleGuardStats(w http.ResponseWriter, r *http.Request,
 	// within the caller's read scopes, counted now (issue #341, migration
 	// 181) — the read scopes of the block numbers of this answer.
 	// last_guard_at and write_log_entries stay server-wide, as before.
+	// write_log_entries counts the rows of context_write_log that stand: with
+	// scheduler.writelog_retention_days set (issue #277), the rows inside the
+	// horizon (and those the janitor has not reached yet), not every decision
+	// ever logged.
 	stats, err := store.GetGuardStats(ctx, h.pool, ar.ReadScopes)
 	var (
 		pending    int

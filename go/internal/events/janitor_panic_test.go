@@ -61,6 +61,9 @@ func TestJanitorArmsContainPanics(t *testing.T) {
 		{"sso state gc", "scheduler: panic in sso state gc", withCfg(), (*Scheduler).runSSOStateGC},
 		{"recall retention", "scheduler: panic in recall retention", withCfg(), (*Scheduler).runRecallRetention},
 		{"pending-write eviction", "scheduler: panic in pending-write eviction", withCfg(), (*Scheduler).runPendingWriteEviction},
+		// store.EvictWriteLog returns early on a nil pool, like llmlog's: the
+		// nil config store panics in the hot-config read instead.
+		{"write log retention", "scheduler: panic in write log retention", nil, (*Scheduler).runWriteLogRetention},
 	}
 
 	for _, tc := range cases {
@@ -141,6 +144,8 @@ func TestJanitorArmContract(t *testing.T) {
 			`msg="scheduler: recall runs evicted" rows=7 retention_days=365`, `msg="scheduler: recall retention failed"`},
 		{"pending-write eviction", "scheduler: pending-write chunks dropped", "chunks", []any{"retention_hours", float64(24)},
 			`msg="scheduler: pending-write chunks dropped" chunks=7 retention_hours=24`, `msg="scheduler: pending-write eviction failed"`},
+		{"write log retention", "scheduler: write log rows evicted", "rows", []any{"retention_days", 30},
+			`msg="scheduler: write log rows evicted" rows=7 retention_days=30`, `msg="scheduler: write log retention failed"`},
 	}
 
 	capture := func(t *testing.T, fn func()) string {

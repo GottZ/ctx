@@ -33,6 +33,7 @@ import (
 	"fmt"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -229,12 +230,11 @@ func PutBlockParent(ctx context.Context, tx pgx.Tx, childID, parentID string, al
 // plus same category plus same title is the same row, because that triple is the
 // partial unique key of the live corpus.
 //
-// It is a PRE-check for the one caller that cannot compose the link into its
-// write's own transaction: handler /api/store, where store.UpsertBlock owns its
-// Tx and the link is a second bracket (context_store.go). Checking first is what
-// keeps the routine refusals — typo, foreign parent, archived parent — BEFORE
-// the block exists, instead of answering an error next to a block that was
-// written anyway.
+// It is the pre-check of handler /api/store, before the write's transaction
+// takes its locks (context_store.go). Since issue #211 that transaction checks
+// the parent again, locked (lockBatchParent), and links it in the same
+// transaction as the write (LinkBlockParent), so a parent that changes in
+// between refuses the write instead of leaving a block without its parent.
 //
 // It grants nothing and replaces nothing: PutBlockParent re-validates inside the
 // transaction that performs the write, and its verdict is the authoritative one.
@@ -242,24 +242,80 @@ func PutBlockParent(ctx context.Context, tx pgx.Tx, childID, parentID string, al
 // deliberately stricter, because an archived parent is exactly the parent a
 // caller must not hang new blocks under, and InsertCommentBlock excludes it too.
 func ParentLinkable(ctx context.Context, q pgxdb.Rower, parentID, childScope, childCategory, childTitle string) error {
+	return parentLinkable(ctx, q, "", parentID, childScope, childCategory, childTitle)
+}
+
+// lockBatchParent is ParentLinkable inside a write's own transaction, the
+// parent row locked FOR SHARE by the same read — the lock PutBlockParent takes
+// on it (blockScopes) — so it can neither be archived, deleted nor moved to
+// another scope before the link the write makes commits (issue #211: a block
+// batch, and /api/store with a parent, which writes block and link in ONE
+// transaction since then).
+func lockBatchParent(ctx context.Context, tx pgx.Tx, parentID, childScope, childCategory, childTitle string) error {
+	return parentLinkable(ctx, tx, " FOR SHARE", parentID, childScope, childCategory, childTitle)
+}
+
+// parentLinkable is ParentLinkable's check, its read ending in lockClause.
+// The child's scope is part of the read's WHERE, not a comparison after it: a
+// block of another scope is no row here, so a locking read never takes — or
+// waits for — a lock on a block the caller may not see, and the time of the
+// answer says no more than its text does (review of #211).
+func parentLinkable(ctx context.Context, q pgxdb.Rower, lockClause, parentID, childScope, childCategory, childTitle string) error {
 	if !IsFullUUID(parentID) {
 		return ErrLinkScopeViolation
 	}
-	var parentScope, parentCategory, parentTitle string
+	var parentCategory, parentTitle string
 	err := q.QueryRow(ctx,
-		`SELECT scope, category, title FROM context_blocks WHERE id = $1::uuid AND NOT is_archived`,
-		parentID).Scan(&parentScope, &parentCategory, &parentTitle)
+		`SELECT category, title FROM context_blocks WHERE id = $1::uuid AND scope = $2 AND NOT is_archived`+lockClause,
+		parentID, childScope).Scan(&parentCategory, &parentTitle)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrLinkScopeViolation
 	}
 	if err != nil {
 		return fmt.Errorf("structural link: parent lookup: %w", err)
 	}
-	if parentScope != childScope {
-		return ErrLinkScopeViolation
-	}
 	if parentCategory == childCategory && parentTitle == childTitle {
 		return ErrLinkScopeViolation
 	}
 	return nil
+}
+
+// parentCycleSQL answers whether the block $2 is $1 or one of $1's ancestors
+// through parent_id: hanging $2 under $1 would then close a cycle. UNION (not
+// UNION ALL) drops an id already walked, so an existing cycle above $1 ends
+// the walk instead of looping; each step is a primary-key probe, so the cost
+// is the depth of $1's chain. It runs in the linking transaction and sees the
+// links the transaction set before it (the earlier items of a batch).
+const parentCycleSQL = `WITH RECURSIVE up(id) AS (
+		SELECT $1::uuid
+		UNION
+		SELECT b.parent_id FROM context_blocks b JOIN up ON b.id = up.id WHERE b.parent_id IS NOT NULL)
+	SELECT EXISTS (SELECT 1 FROM up WHERE id = $2::uuid)`
+
+// LinkBlockParent hangs childID under parentID in the caller's transaction,
+// the parent check of /api/store and of a block batch's parents (issue #211):
+// a parent that would close a cycle — the child itself, or a block below the
+// child — is refused with the one ErrLinkScopeViolation every other unlinkable
+// parent answers (no oracle), then PutBlockParent re-asserts the scope
+// invariant (child and parent in scope) and writes the link. parent_id is the
+// ONE structural parent (K3): a tree, which ParentLinkable already kept free
+// of the one-block cycle (a block as its own parent) and a two-step write
+// could close with two (issue #211).
+func LinkBlockParent(ctx context.Context, tx pgx.Tx, childID, parentID, scope string) error {
+	parsed, err := uuid.Parse(parentID)
+	if err != nil || !IsFullUUID(parentID) {
+		return ErrLinkScopeViolation
+	}
+	// PutBlockParent matches the ids against the canonical lowercase form the
+	// database returns (blockScopes): a parent named in capitals is the same
+	// block and links as such.
+	parentID = parsed.String()
+	var cycle bool
+	if err = tx.QueryRow(ctx, parentCycleSQL, parentID, childID).Scan(&cycle); err != nil {
+		return fmt.Errorf("structural link: parent cycle check: %w", err)
+	}
+	if cycle {
+		return ErrLinkScopeViolation
+	}
+	return PutBlockParent(ctx, tx, childID, parentID, []string{scope})
 }

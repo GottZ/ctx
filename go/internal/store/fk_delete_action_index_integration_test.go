@@ -35,8 +35,9 @@ import (
 // nothing. A key whose referenced row no code path deletes costs its scan only
 // on a manual delete. The rest grow with use: migrations 184 and 185 gave
 // their keys an index and removed their lines here (an exception that no
-// longer matches a violation fails the gate); the one left is a key on a
-// hypertable, which no index serves.
+// longer matches a violation fails the gate). The key on the hypertable
+// context_pending_writes went with migration 194 (issue #277);
+// TestHypertablesCarryNoForeignKey keeps hypertables free of keys.
 var fkDeleteActionExceptions = map[string]string{
 	// Operator-managed registries.
 	"context_disable_profile_backends(backend_id) -> context_backends":   "registry: one row per (disable profile, backend)",
@@ -55,8 +56,6 @@ var fkDeleteActionExceptions = map[string]string{
 	"context_embed_failures(migration_id) -> context_embed_migrations": "no code path deletes an embed migration (the row is the migration's history); a manual delete pays one scan",
 	"context_access_tokens(principal_id) -> context_principals":        "no code path deletes a principal; a manual delete pays one scan",
 	"context_oauth_codes(principal_id) -> context_principals":          "no code path deletes a principal; a manual delete pays one scan",
-	// A table that grows with use, the key on a hypertable.
-	"context_pending_writes(api_key_id) -> context_api_keys": "issue #277: a key on a hypertable; replacement of the key drafted",
 }
 
 // extensionOwned reports a key the schema does not own: a TimescaleDB chunk

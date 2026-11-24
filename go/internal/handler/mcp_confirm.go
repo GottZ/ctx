@@ -226,7 +226,7 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 			// the card; an execute rejection consumed it, and says so.
 			return errResultReject(out.Reject), nil, nil
 		case confirmTOCTOUGone:
-			return errResult(confirmTOCTOUGoneMsg(out.Op)), nil, nil
+			return errResult(out.Item+confirmTOCTOUGoneMsg(out.Op)), nil, nil
 		case confirmTOCTOUDrift, confirmExecDrift:
 			return errResult(out.driftMsg()), nil, nil
 		case confirmBlockRefGone:
@@ -246,7 +246,7 @@ func mcpConfirmHandler(cfg MCPConfig) mcp.ToolHandlerFor[confirmInput, any] {
 				return errResult("confirmed blob_link failed to execute: blob no longer accessible — the stage token is consumed; re-stage the link"), nil, nil
 			}
 			noun := confirmBlockOpNoun(out.Op)
-			return errResult(fmt.Sprintf("confirmed %s failed to execute: block no longer accessible — the stage token is consumed; re-stage the %s", noun, noun)), nil, nil
+			return errResult(out.Item + fmt.Sprintf("confirmed %s failed to execute: block no longer accessible — the stage token is consumed; re-stage the %s", noun, noun)), nil, nil
 		default: // confirmInfraErr
 			logRequestError(ctx, "mcp: confirm infrastructure error", "error", out.Err, "op", out.Op, "request_id", RequestIDFromContext(ctx))
 			return errResult("confirm failed: internal error"), nil, nil
