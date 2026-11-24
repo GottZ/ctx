@@ -614,7 +614,9 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 //
 // STAGED WRITES (issue #277): step 7 deletes the staged writes of the keys
 // it deletes (context_pending_writes, which hold block content), right after
-// them and in the same transaction. Their foreign key on context_api_keys
+// them and in the same transaction; every writer of a stage holds its key
+// row while it writes, so none is left behind (see the statement). Their
+// foreign key on context_api_keys
 // cascaded that until migration 194 dropped it: a key on the hypertable gave
 // every chunk a copy of the key, so creating a chunk locked context_api_keys
 // against every authentication's last_used_at write and dropping one (the
@@ -708,14 +710,20 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 		// The keys, then the staged writes of exactly the keys deleted, in a
 		// statement of its own (issue #277): since migration 194 no foreign
 		// key cascades a key delete onto context_pending_writes. The key
-		// delete takes the row lock a stage's key read conflicts with
-		// (StagePendingWrite, FOR KEY SHARE): it waits for a stage that holds
-		// a key and then deletes that key, whose stage the next statement —
-		// a snapshot of its own — sees and deletes; a stage that comes after
-		// finds its key gone and stages nothing. Deleting by the ids the key
-		// delete returned, not by the tenant, also takes the stages of a key
-		// minted while the prune ran. The order key rows, then stage rows is
-		// the one the cascade had.
+		// delete takes the row lock the key read of every stage writer
+		// conflicts with (FOR KEY SHARE: a new stage, a re-arm, a consume —
+		// pendingWriteKeySQL): it waits for a writer that holds a key
+		// and then deletes that key, whose stage the next statement — a
+		// snapshot of its own — sees as the writer left it and deletes; a
+		// writer that comes after finds its key gone and writes nothing. So
+		// the stage delete never waits for a stage row: on this hypertable a
+		// delete that waited for an update of its row deleted nothing once
+		// the update committed (PostgreSQL 18.6, TimescaleDB 2.31.0), which
+		// is why the re-arm and the consume hold the key too. Deleting by the
+		// ids the key delete returned, not by the tenant, also takes the
+		// stages of a key minted while the prune ran. The order key rows,
+		// then stage rows is the one the cascade had and the one every stage
+		// writer takes.
 		rows, err := tx.Query(ctx, `DELETE FROM context_api_keys WHERE tenant_id = $1::uuid RETURNING id::text`, tenantID)
 		if err != nil {
 			return err

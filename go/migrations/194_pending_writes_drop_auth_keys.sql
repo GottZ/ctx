@@ -115,14 +115,24 @@
 --     1 000.
 -- No index helps (the key is copied per chunk), so the keys go. What they
 -- carried moves into the code of this release:
---   * a stage reads its key row FOR KEY SHARE and takes the principal from it
---     (store.StagePendingWrite): the row lock the foreign-key check took; a
---     key that is gone stages nothing;
+--   * every statement that writes a stage — a new stage, the re-arm of an
+--     open one, the consume — reads its key row FOR KEY SHARE before it
+--     touches a stage row (store.StagePendingWrite, ConsumePendingWrite): the
+--     row lock the foreign-key check took for an insert; a new stage takes
+--     the principal from it; a key that is gone stages, re-arms and consumes
+--     nothing;
 --   * the tenant prune deletes the tenant's keys and then, in a statement of
 --     its own, the stages of exactly those keys (store.PruneTenant): the key
---     delete waits for a stage that holds a key and the next statement sees
---     that stage, one that comes after finds its key gone, and a key minted
---     while the prune ran goes with its stages;
+--     delete waits for a writer that holds a key and the next statement sees
+--     that writer's stage, one that comes after finds its key gone, and a key
+--     minted while the prune ran goes with its stages. The re-arm and the
+--     consume hold the key for a reason of this table: a DELETE on the
+--     hypertable that waited for a concurrent UPDATE of its row deleted
+--     nothing once the update committed (executed on PostgreSQL 18.6 with
+--     TimescaleDB 2.31.0, on the production image and the CI image; a plain
+--     table deletes the updated row, and the cascade of the dropped key did
+--     too), so a re-arm or consume beside the prune without the key lock
+--     left the stage of a deleted key behind;
 --   * every read of a stage selects by the caller's key id (lookup, consume,
 --     re-arm), and a deleted key does not authenticate.
 -- No other path deletes a key row (a revoke sets active = false; key ids are
@@ -135,9 +145,9 @@
 -- it takes ACCESS EXCLUSIVE on context_pending_writes, every chunk,
 -- context_api_keys and context_principals until the file commits, so every
 -- authentication of every instance waits for the drop. ALTER TABLE takes the
--- hypertable first, as a single stage does (its statement names
--- context_pending_writes before context_api_keys, and the parser locks in
--- that order), and as the confirm-retention eviction does; an authentication
+-- hypertable first, as a single stage and a consume do (their statements
+-- name context_pending_writes before context_api_keys, and the parser locks
+-- in that order), and as the confirm-retention eviction does; an authentication
 -- never locks context_pending_writes. A staged MCP batch locks in the other
 -- order: its transaction books the write budget (context_access_log, whose
 -- key on context_api_keys reads the key) before it stages. A batch caught
