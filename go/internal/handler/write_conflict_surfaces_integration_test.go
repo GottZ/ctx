@@ -65,6 +65,12 @@ func wcsDeadlock(t *testing.T, f *sbFixture, holdSQL string, holdArgs []any, sec
 	if err := holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
 		t.Fatal(err)
 	}
+	// The request must be the deadlock's victim: PostgreSQL ends the backend
+	// whose deadlock_timeout runs out first, and under load the holder's,
+	// started a moment later, ran out first in 1 of 200 cases.
+	if _, err := holder.Exec(ctx, `SET LOCAL deadlock_timeout = '10s'`); err != nil {
+		t.Fatalf("holder deadlock_timeout: %v", err)
+	}
 	if _, err := holder.Exec(ctx, holdSQL, holdArgs...); err != nil {
 		t.Fatalf("hold: %v", err)
 	}
