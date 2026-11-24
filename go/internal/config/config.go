@@ -967,7 +967,9 @@ type QueryConfig struct {
 	//
 	// auto translates German and Swedish, Danish, Norwegian and Finnish
 	// questions (whatever letters they are written with) and leaves English
-	// ones as written: right for an English or German corpus. For a corpus in
+	// ones with English function words as written (llm.NeedsTranslation says
+	// what it reads and misses): right for an English corpus, no measurable
+	// difference for a German one. For a corpus in
 	// the users' own third language the English text works against the
 	// full-text and title arms, and no detector fixes that — the step has to
 	// go. Temporal normalisation is unaffected (it reads the original

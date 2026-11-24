@@ -862,7 +862,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		"request_id", requestID,
 	)
 
-	// Step 3: Detect German and translate if needed.
+	// Step 3: Detect a question to translate (German, Nordic) and translate it.
 	originalQuery := query
 	searchQuery := query
 	translated := false
@@ -886,7 +886,8 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		// Norwegian and Finnish questions, whatever letters they are written
 		// with, and leaves English ones as written (#210: measured on 100
 		// Swedish and Danish questions, the translation raised MRR@10 against
-		// an English corpus and left it level against a German one). A tenant
+		// an English corpus and made no measurable difference against a
+		// German one). A tenant
 		// whose blocks are in the language its users ask in switches the step
 		// off with query.translate = off — then no question is translated,
 		// whatever the detector says. The pin above stays first, so a

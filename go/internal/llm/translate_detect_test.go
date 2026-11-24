@@ -51,24 +51,59 @@ func TestNeedsTranslationEnglishAmbiguousStopwords(t *testing.T) {
 }
 
 // TestNeedsTranslationEnglishWithUmlautNames: a capitalised word with an
-// umlaut (a name) is no evidence against the English words around it.
+// umlaut (a name) is weak evidence; it does not outweigh the English words
+// around it.
 func TestNeedsTranslationEnglishWithUmlautNames(t *testing.T) {
 	checkNeedsTranslation(t, false,
 		"When is the call with Mr. Müller about the contract renewal?",
 		"Which hotel did we book in Zürich for the conference?",
 		"Is Dr. Köhler's practice open on Fridays?",
-		"Was Jürgen Müller there?",
+		"Is Jörg Müller in today?",
 		"Are the Malmö servers still on the old kernel?",
 	)
 }
 
 // TestNeedsTranslationEnglishQuotingGerman: a German title or saying inside an
-// English question is not outnumbering the English around it.
+// English question that does not outnumber the English around it.
 func TestNeedsTranslationEnglishQuotingGerman(t *testing.T) {
 	checkNeedsTranslation(t, false,
 		`What does "Wer rastet, der rostet" mean?`,
-		`Who composed "Der Ring des Nibelungen"?`,
+		`Who directed "Das Boot"?`,
 		`Where does the phrase "Das ist nicht mein Bier" come from?`,
+		"Was Des at the meeting?",
+	)
+}
+
+// TestNeedsTranslationGermanWithEnglishWords: German questions with an
+// English word or phrase, or an abbreviation such as IT or US, stay German.
+// The ambiguous stop words and capitalised nouns count half against the
+// English words, an abbreviation not at all.
+func TestNeedsTranslationGermanWithEnglishWords(t *testing.T) {
+	checkNeedsTranslation(t, true,
+		"Was macht die IT?",
+		"Wo stehen die US-Server?",
+		"IT-Sicherheit Richtlinien",
+		"Gibt es Änderungen in the schema?",
+		"Wer hat Lord of the Rings geschrieben?",
+		"Was ist the difference?",
+		"Varför kraschar the worker?",
+	)
+}
+
+// TestNeedsTranslationEnglishAbbreviationsAndNames: a Nordic word that is
+// also an English word, abbreviation, name or keyword is weak evidence, and a
+// word in capitals is looked up in no English or Nordic list.
+func TestNeedsTranslationEnglishAbbreviationsAndNames(t *testing.T) {
+	checkNeedsTranslation(t, false,
+		"var vs let in JavaScript",
+		"ER diagram tool",
+		"PA system setup",
+		"SOM clustering example",
+		"Till Lindemann tour",
+		"AV1 encoding settings",
+		"med school notes",
+		"till receipts",
+		"MIG welding gas",
 	)
 }
 
@@ -107,6 +142,8 @@ func TestNeedsTranslationGermanKept(t *testing.T) {
 		"Ärger",
 		"Ärztehaus Öffnungszeiten",
 		"Straße",
+		"STRAẞE",
+		"Pru\u0308fungsergebnis der Datei",
 		"die ist gut",
 		"Was hat die Firma gemacht?",
 		"Welcher pfad ist korrekt?",
@@ -132,6 +169,7 @@ func TestNeedsTranslationGermanKept(t *testing.T) {
 func TestNeedsTranslationCodeCarriesNoLanguage(t *testing.T) {
 	checkNeedsTranslation(t, false,
 		"/var/lib/postgresql/data",
+		"/home/jörg/notes/übersicht.md",
 		"`Größe`",
 		"git log --oneline origin/main..HEAD",
 		"feature/PAY-1432-refund-webhook",

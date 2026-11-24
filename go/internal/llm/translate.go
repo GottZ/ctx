@@ -13,9 +13,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// germanStopwords are common German words that English does not use as words
-// of its own. Matched as whole words, case-insensitive. The German stop words
-// English uses too sit in germanAmbiguousStopwords.
+// germanStopwords are common German words that are no common English words.
+// Matched as whole words, case-insensitive. The German stop words English uses
+// too sit in germanAmbiguousStopwords.
 var germanStopwords = map[string]struct{}{
 	"wie": {}, "der": {}, "das": {}, "und": {},
 	"ist": {}, "fur": {}, "auf": {}, "ein": {}, "nicht": {},
@@ -31,9 +31,8 @@ var germanStopwords = map[string]struct{}{
 }
 
 // germanAmbiguousStopwords are German stop words that are English words too:
-// "what was the die roll", "Red Hat", "the den", "DES", "DEM". In a question
-// that carries an English function word they are no evidence at all; without
-// one they still count towards the two-stop-word rule.
+// "what was the die roll", "Red Hat", "the den", "DES", "DEM". They are weak
+// evidence (see NeedsTranslation).
 var germanAmbiguousStopwords = map[string]struct{}{
 	"was": {}, "die": {}, "den": {}, "hat": {}, "des": {}, "dem": {},
 }
@@ -48,47 +47,60 @@ var germanTechTerms = map[string]struct{}{
 
 // nordicFunctionWords are Swedish, Danish, Norwegian and Finnish function and
 // question words, with their own letters and in the ASCII spelling a keyboard
-// without them produces (vad, ar/är, nar/när, hvornaar/hvornår, mika/mikä).
-// None of them is an English function word. They make a Nordic question
-// count whatever letters it is written with (#210: å-only and ASCII-only
-// questions were left untranslated while the same question with ä or ö was
-// translated).
+// without them produces (vad, nar/när, hvornaar/hvornår, mita/mitä). None of
+// them is an English word, an abbreviation or a code keyword. They make a
+// Nordic question count whatever letters it is written with (#210: å-only and
+// ASCII-only questions were left untranslated while the same question with ä
+// or ö was translated).
 var nordicFunctionWords = map[string]struct{}{
 	// Swedish
-	"och": {}, "att": {}, "som": {}, "inte": {}, "vad": {}, "hur": {}, "vem": {},
-	"vilka": {}, "vilken": {}, "vilket": {}, "nar": {}, "när": {}, "jag": {}, "mig": {},
-	"har": {}, "kan": {}, "ska": {}, "skall": {}, "till": {}, "fran": {}, "från": {},
-	"med": {}, "pa": {}, "på": {}, "av": {}, "om": {}, "ett": {}, "ni": {}, "oss": {},
-	"finns": {}, "det": {}, "är": {}, "för": {}, "varfor": {}, "varför": {}, "också": {},
+	"och": {}, "att": {}, "som": {}, "inte": {}, "vad": {}, "vem": {},
+	"vilka": {}, "vilken": {}, "vilket": {}, "nar": {}, "när": {},
+	"skall": {}, "från": {}, "på": {}, "är": {}, "för": {},
+	"varfor": {}, "varför": {}, "också": {},
 	// Danish and Norwegian
-	"er": {}, "og": {}, "hvad": {}, "hva": {}, "hvordan": {}, "hvem": {}, "hvor": {},
+	"og": {}, "hvad": {}, "hva": {}, "hvordan": {}, "hvem": {}, "hvor": {},
 	"hvornar": {}, "hvornaar": {}, "hvornår": {}, "hvorfor": {}, "ikke": {}, "ikkje": {},
-	"jeg": {}, "skal": {}, "fra": {}, "af": {}, "paa": {}, "naar": {}, "når": {},
+	"jeg": {}, "skal": {}, "paa": {}, "naar": {}, "når": {},
 	"noen": {}, "nogen": {}, "hvilke": {}, "hvilken": {}, "hvilket": {}, "blev": {},
-	"ble": {}, "bliver": {}, "blir": {}, "vores": {}, "var": {}, "vart": {}, "vår": {},
+	"ble": {}, "bliver": {}, "blir": {}, "vores": {}, "vår": {},
 	// Finnish
-	"mika": {}, "mikä": {}, "mita": {}, "mitä": {}, "miten": {}, "miksi": {},
-	"missa": {}, "missä": {}, "milloin": {}, "kuka": {}, "onko": {}, "voiko": {},
-	"ei": {}, "tama": {}, "tämä": {}, "kun": {}, "jos": {}, "mutta": {}, "kanssa": {},
-	"ovat": {}, "oli": {}, "kuinka": {}, "montako": {}, "paljonko": {}, "kauanko": {},
+	"mikä": {}, "mita": {}, "mitä": {}, "miten": {}, "miksi": {},
+	"missä": {}, "milloin": {}, "kuka": {}, "onko": {}, "voiko": {},
+	"tämä": {}, "mutta": {}, "kanssa": {}, "ja": {},
+	"ovat": {}, "kuinka": {}, "montako": {}, "paljonko": {}, "kauanko": {},
 	"mihin": {}, "mista": {}, "saako": {}, "mitka": {}, "ketka": {}, "kenen": {},
 	"millainen": {},
 }
 
+// nordicAmbiguousWords are Nordic function words that are also English words,
+// abbreviations, names or code keywords (av, med, till, var, det, kan, er, om,
+// ni, Fran, Mika, Tama, "Missa Solemnis"). Like the ambiguous German stop
+// words they are weak evidence: on their own they make "med school notes" or
+// "var vs let" no Nordic question.
+var nordicAmbiguousWords = map[string]struct{}{
+	"av": {}, "med": {}, "till": {}, "til": {}, "kan": {}, "mig": {}, "var": {},
+	"vart": {}, "det": {}, "ni": {}, "om": {}, "er": {}, "kun": {}, "jos": {},
+	"oli": {}, "ei": {}, "pa": {}, "af": {}, "fra": {}, "ett": {}, "har": {},
+	"vi": {}, "ska": {}, "oss": {}, "finns": {}, "jag": {}, "mika": {},
+	"missa": {}, "tama": {}, "fran": {}, "hur": {}, "ar": {},
+}
+
 // englishFunctionWords are the counterweight (#210, effect 2): frequent
-// English words that no language the step translates uses as a common word of
-// its own. Left out on purpose because they are: a, i, in, an, on, at, to,
-// for, by, of, her, so, man, am, be, do, no, me, he, will.
+// English words that are no common word of a language the step translates.
+// Left out on purpose because they are: a, i, in, an, on, at, to, for, by, of,
+// her, so, man, am, be, do, no, me, he, will, still, and the abbreviations
+// it (IT) and us (US).
 var englishFunctionWords = map[string]struct{}{
 	"the": {}, "is": {}, "are": {}, "were": {}, "been": {}, "being": {},
 	"does": {}, "did": {}, "done": {}, "what": {}, "which": {}, "who": {},
 	"whom": {}, "whose": {}, "when": {}, "where": {}, "why": {}, "how": {},
 	"with": {}, "from": {}, "about": {}, "and": {}, "or": {}, "but": {},
-	"not": {}, "this": {}, "that": {}, "these": {}, "those": {}, "it": {},
-	"its": {}, "we": {}, "our": {}, "us": {}, "you": {}, "your": {}, "my": {},
+	"not": {}, "this": {}, "that": {}, "these": {}, "those": {},
+	"its": {}, "we": {}, "our": {}, "you": {}, "your": {}, "my": {},
 	"she": {}, "they": {}, "them": {}, "their": {}, "his": {}, "has": {},
 	"have": {}, "had": {}, "can": {}, "could": {}, "should": {}, "would": {},
-	"there": {}, "any": {}, "after": {}, "before": {}, "ever": {}, "still": {},
+	"there": {}, "any": {}, "after": {}, "before": {}, "ever": {},
 	"again": {}, "into": {}, "than": {}, "then": {},
 }
 
@@ -152,18 +164,22 @@ const (
 )
 
 // translateEvidence is what NeedsTranslation reads off the words of a
-// question. Every word counts once, in the first class it belongs to.
+// question.
 type translateEvidence struct {
-	// strong is the evidence of a language the step translates that English
-	// does not share: German stop words and domain terms, Nordic function
-	// words, and lower-case words written with ä ö ü ß å æ ø.
+	// strong is evidence of a language the step translates that English does
+	// not share: German stop words and domain terms, Nordic function words,
+	// and lower-case words written with ä ö ü ß å æ ø.
 	strong int
-	// germanStops counts German stop words, the ambiguous ones included
-	// (the two-stop-word rule).
-	germanStops int
+	// weak is evidence English shares: the ambiguous German stop words and
+	// Nordic words, and capitalised words with ä ö ü ß å æ ø — a German noun
+	// or a name such as Müller or Zürich.
+	weak int
+	// stops counts German stop words and the ambiguous Nordic words (the
+	// two-stop-word rule).
+	stops int
 	// signal counts the single words that are enough on their own in a
 	// question without English: domain terms, Nordic function words and every
-	// word with ä ö ü ß å æ ø, capitalised or not.
+	// word with ä ö ü ß å æ ø.
 	signal int
 	// english counts English function words.
 	english int
@@ -179,26 +195,26 @@ const maxDetectWordBytes = 32
 //
 // Read over the words outside code — a `backtick span`, and any token with a
 // path, identifier or URL character (/ \ _ = < > { } [ ] $ @ # | or a dot or
-// colon between letters) carries no language:
+// colon between two letters or digits) carries no language; a word in
+// capitals (IT, US, ER) is an abbreviation and no English or Nordic word:
 //   - a question with English function words is translated only when its
-//     non-English evidence (German stop words and domain terms, Nordic
-//     function words, lower-case words with ä ö ü ß å æ ø) outnumbers them. A
-//     capitalised word with an umlaut (Müller, Zürich) and the German stop
-//     words English uses too (was, die, den, hat, des, dem) are no evidence
-//     there;
+//     non-English evidence outnumbers them, a weak word counting half
+//     (2·strong + weak > 2·english; see translateEvidence): "what was the die
+//     roll", a name such as Müller and a short German title quoted in an
+//     English question stay English, "Gibt es Änderungen in the schema?"
+//     stays German;
 //   - a question without English function words is translated on one word
 //     with ä ö ü ß å æ ø, one domain term, one Nordic function word, or two
-//     German stop words — the rule before #210, which counted no Nordic
-//     function word and no å æ ø.
+//     stop words — the rule before #210, which knew no Nordic word and no
+//     å æ ø.
 //
-// It scans the input once, allocates nothing, and takes time linear in its
-// length.
+// It allocates nothing and takes time linear in the length of the input.
 func NeedsTranslation(query string) bool {
 	ev := scanTranslateEvidence(query)
 	if ev.english > 0 {
-		return ev.strong > ev.english
+		return 2*ev.strong+ev.weak > 2*ev.english
 	}
-	return ev.signal > 0 || ev.germanStops >= 2
+	return ev.signal > 0 || ev.stops >= 2
 }
 
 // scanTranslateEvidence walks the query once. A backtick span (a backtick up
@@ -251,23 +267,29 @@ func isCodeToken(tok string) bool {
 func isWordRune(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
 
 // detectWord is one word being read: its lower-cased bytes (as far as they
-// fit), whether it starts with a capital and whether it has one of the
-// letters the step translates on.
+// fit), whether it starts with a capital, whether it has a lower-case letter
+// (a word of two or more letters without one is an abbreviation), and whether
+// it has one of the letters the step translates on.
 type detectWord struct {
 	buf     [maxDetectWordBytes]byte
 	n       int
+	runes   int
 	long    bool
-	started bool
 	capital bool
+	lower   bool
 	letters bool
 }
 
 func (w *detectWord) add(r rune) {
-	if !w.started {
-		w.started, w.capital = true, unicode.IsUpper(r)
+	if w.runes == 0 {
+		w.capital = unicode.IsUpper(r)
+	}
+	w.runes++
+	if unicode.IsLower(r) {
+		w.lower = true
 	}
 	switch r {
-	case 'ä', 'ö', 'ü', 'Ä', 'Ö', 'Ü', 'ß', 'å', 'Å', 'æ', 'Æ', 'ø', 'Ø':
+	case 'ä', 'ö', 'ü', 'Ä', 'Ö', 'Ü', 'ß', 'ẞ', 'å', 'Å', 'æ', 'Æ', 'ø', 'Ø':
 		w.letters = true
 	}
 	if w.long {
@@ -281,57 +303,70 @@ func (w *detectWord) add(r rune) {
 	w.n += utf8.EncodeRune(w.buf[w.n:], lr)
 }
 
-// addToken counts the words of one token, unless it is code.
+// addToken counts the words of one token, unless it is code. A combining
+// mark continues the word it follows; a combining diaeresis or ring above
+// (a decomposed ä or å) counts as one of the letters.
 func (ev *translateEvidence) addToken(tok string) {
 	if tok == "" || isCodeToken(tok) {
 		return
 	}
 	var w detectWord
 	for _, r := range tok {
-		if unicode.IsLetter(r) {
+		switch {
+		case unicode.IsLetter(r):
 			w.add(r)
-			continue
-		}
-		if w.started {
+		case w.runes > 0 && unicode.Is(unicode.Mn, r):
+			if r == '̈' || r == '̊' {
+				w.letters = true
+			}
+		case w.runes > 0:
 			ev.addWord(&w)
 			w = detectWord{}
 		}
 	}
-	if w.started {
+	if w.runes > 0 {
 		ev.addWord(&w)
 	}
 }
 
-// addWord files one word into the first class it belongs to.
+// addWord counts one word: by the list it is on (the first that has it), and
+// by its letters.
 func (ev *translateEvidence) addWord(w *detectWord) {
 	if !w.long {
-		lw := w.buf[:w.n]
-		switch {
-		case has(germanTechTerms, lw):
-			ev.strong++
-			ev.signal++
-			return
-		case has(germanStopwords, lw):
-			ev.strong++
-			ev.germanStops++
-			return
-		case has(germanAmbiguousStopwords, lw):
-			ev.germanStops++
-			return
-		case has(nordicFunctionWords, lw):
-			ev.strong++
-			ev.signal++
-			return
-		case has(englishFunctionWords, lw):
-			ev.english++
-			return
-		}
+		ev.addListed(w.buf[:w.n], w.runes >= 2 && !w.lower)
 	}
 	if w.letters {
 		ev.signal++
-		if !w.capital {
+		if w.capital {
+			ev.weak++
+		} else {
 			ev.strong++
 		}
+	}
+}
+
+// addListed counts a lower-cased word by the first list that has it. An
+// abbreviation is looked up only in the German lists, as before #210.
+func (ev *translateEvidence) addListed(lw []byte, abbreviation bool) {
+	switch {
+	case has(germanTechTerms, lw):
+		ev.strong++
+		ev.signal++
+	case has(germanStopwords, lw):
+		ev.strong++
+		ev.stops++
+	case has(germanAmbiguousStopwords, lw):
+		ev.weak++
+		ev.stops++
+	case abbreviation:
+	case has(nordicAmbiguousWords, lw):
+		ev.weak++
+		ev.stops++
+	case has(nordicFunctionWords, lw):
+		ev.strong++
+		ev.signal++
+	case has(englishFunctionWords, lw):
+		ev.english++
 	}
 }
 
