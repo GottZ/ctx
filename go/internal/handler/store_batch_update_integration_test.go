@@ -514,3 +514,148 @@ func TestStoreParentWrittenWithTheBlock(t *testing.T) {
 		t.Fatalf("blocks before %d after %d; want only the deleted parent gone, the orphan not written", before.blocks, after.blocks)
 	}
 }
+
+// sbuSnapshot is every block of the fixture's database (all columns but ids
+// and times, its parent and supersedes head as titles), the temporal rows per
+// block and dimension and the block-count deltas: the end state the
+// difference probe compares.
+func (f *sbFixture) sbuSnapshot(t *testing.T) string {
+	t.Helper()
+	var doc string
+	if err := f.pool.QueryRow(context.Background(), `
+		WITH dropped AS (
+		  SELECT array_agg(column_name::text) AS cols FROM information_schema.columns
+		   WHERE table_name = 'context_blocks' AND table_schema = current_schema()
+		     AND (data_type IN ('uuid', 'timestamp with time zone', 'timestamp without time zone') OR column_name = 'content_times'))
+		SELECT jsonb_build_object(
+		  'blocks', (SELECT jsonb_agg((to_jsonb(b) - d.cols) || jsonb_build_object(
+		       'superseded_by', (SELECT x.title FROM context_blocks x WHERE x.id = b.superseded_by),
+		       'parent', (SELECT x.title FROM context_blocks x WHERE x.id = b.parent_id))
+		     ORDER BY b.title, b.scope) FROM context_blocks b, dropped d),
+		  'temporal', (SELECT jsonb_agg(jsonb_build_object('block', b.title, 'dimension', tm.dimension, 'rows', tm.n)
+		     ORDER BY b.title, tm.dimension)
+		     FROM (SELECT block_id, dimension, count(*) AS n FROM context_temporal GROUP BY 1, 2) tm
+		     JOIN context_blocks b ON b.id = tm.block_id),
+		  'count_deltas', (SELECT jsonb_agg(to_jsonb(c) ORDER BY c) FROM (
+		     SELECT scope, category, is_archived, guard_status, sum(n) AS n FROM context_block_count_deltas
+		      GROUP BY 1, 2, 3, 4 HAVING sum(n) <> 0) c))::text`,
+	).Scan(&doc); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	return doc
+}
+
+// TestStoreBatchUpdateMatchesSingleUpdates is the difference probe over the
+// MCP surface: one sequence of updates — edits with a merge that names a
+// guard key, a new content with tags, a rename with a type and a metadata
+// replacement, an update that changes nothing — once as single `update`
+// calls, once as one `store_batch`, each in its own database seeded alike.
+// The rows, the temporal rows the afterwork writes and the count deltas end
+// the same.
+func TestStoreBatchUpdateMatchesSingleUpdates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	type world struct {
+		f   *sbFixture
+		k   sbKey
+		ids map[string]string
+	}
+	// Seeded through the store tool, afterwork included, so every block holds
+	// the temporal rows its write gave it.
+	seed := func(t *testing.T) world {
+		f := newSBFixture(t)
+		k := f.key(t, false)
+		ids := map[string]string{}
+		for _, title := range []string{"sbd-a", "sbd-b", "sbd-c", "sbd-e"} {
+			if a := f.mcpCall(t, k, "store", sbItem(title, title+" body, first line")); a.IsError {
+				t.Fatalf("seed %s: %+v", title, a)
+			}
+			ids[title] = f.idOf(t, title)
+		}
+		if _, err := f.pool.Exec(context.Background(),
+			`UPDATE context_blocks SET metadata = '{"source":"seed","guard_status":"needs_review"}'::jsonb WHERE id = $1`, ids["sbd-a"]); err != nil {
+			t.Fatal(err)
+		}
+		return world{f: f, k: f.key(t, false), ids: ids}
+	}
+	updates := func(ids map[string]string) []map[string]any {
+		return []map[string]any{
+			sbuUpdate(ids["sbd-a"], "edits", []map[string]any{{"old": "first line", "new": "edited line"}},
+				"metadata_merge", map[string]any{"k": "v", "source": nil, "guard_status": "kept"}),
+			sbuUpdate(ids["sbd-b"], "content", "sbd-b new content on 2026-03-04", "tags", []string{"x", "y"}),
+			sbuUpdate(ids["sbd-c"], "title", "sbd-c renamed", "type", "reference", "metadata", map[string]any{"source": "replaced"}),
+			sbuUpdate(ids["sbd-e"], "content", "sbd-e body, first line"),
+		}
+	}
+	singles := seed(t)
+	for _, u := range updates(singles.ids) {
+		if a := singles.f.mcpCall(t, singles.k, "update", u); a.IsError {
+			t.Fatalf("single update %v: %+v", u, a)
+		}
+	}
+	batched := seed(t)
+	if a := batched.f.mcpCall(t, batched.k, "store_batch", sbItems(updates(batched.ids)...)); a.IsError ||
+		!strings.HasPrefix(a.Text, "Batch written in one transaction: 0 stored, 3 updated, 1 unchanged.") {
+		t.Fatalf("batch: %+v", a)
+	}
+	if got, want := batched.f.sbuSnapshot(t), singles.f.sbuSnapshot(t); got != want {
+		t.Fatalf("the batch left another state than the single updates:\nbatch:   %s\nsingles: %s", got, want)
+	}
+}
+
+// TestStoreBatchAfterworkFaultIsPerItem: the afterwork of a written batch —
+// classify and the temporal rows — runs per block after the commit and is
+// non-fatal. A fault in one block's afterwork (here the temporal insert of
+// one update item refused by a trigger) leaves the other items and their
+// afterwork as they are, rolls nothing back and books nothing twice: the
+// batch answers success, every item is written, the budget holds one write
+// per written item.
+func TestStoreBatchAfterworkFaultIsPerItem(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	f := newSBFixture(t)
+	ctx := context.Background()
+	k := f.key(t, false)
+	a := f.seed(t, "sbaw-a", "a body")
+	b := f.seed(t, "sbaw-b", "b body")
+	if _, err := f.pool.Exec(ctx, fmt.Sprintf(`
+		CREATE FUNCTION sbaw_fault() RETURNS trigger LANGUAGE plpgsql AS $f$
+		BEGIN
+		  IF NEW.block_id = '%s'::uuid THEN RAISE EXCEPTION 'injected afterwork fault'; END IF;
+		  RETURN NEW;
+		END $f$;
+		CREATE TRIGGER sbaw_fault BEFORE INSERT ON context_temporal FOR EACH ROW EXECUTE FUNCTION sbaw_fault();`, b)); err != nil {
+		t.Fatalf("fault trigger: %v", err)
+	}
+	before := f.counts(t, k)
+	status, resp := f.rest(t, k, sbItems(sbItem("sbaw-new", "new body"),
+		sbuUpdate(a, "content", "a rewritten"), sbuUpdate(b, "content", "b rewritten")))
+	if status != http.StatusOK || resp["success"] != true {
+		t.Fatalf("status %d body %v; want the batch answered as written", status, resp)
+	}
+	after := f.counts(t, k)
+	if f.content(t, a) != "a rewritten" || f.content(t, b) != "b rewritten" || after.blocks != before.blocks+1 ||
+		after.budget != 3 || after.writes != before.writes+3 {
+		t.Fatalf("before %+v after %+v; want three items written and three writes booked", before, after)
+	}
+	withRows := map[string]bool{}
+	rows, err := f.pool.Query(ctx, `SELECT b.title, count(t.block_id) > 0 FROM context_blocks b
+		LEFT JOIN context_temporal t ON t.block_id = b.id WHERE b.title LIKE 'sbaw-%' GROUP BY b.title`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var title string
+		var has bool
+		if err := rows.Scan(&title, &has); err != nil {
+			t.Fatal(err)
+		}
+		withRows[title] = has
+	}
+	rows.Close()
+	if !withRows["sbaw-new"] || !withRows["sbaw-a"] || withRows["sbaw-b"] {
+		t.Fatalf("temporal rows %v; want the faulted item without, the other two with theirs", withRows)
+	}
+}
