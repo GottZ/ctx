@@ -35,7 +35,7 @@ func TestTenantPruneCascadesAChildOfAnotherScope(t *testing.T) {
 	var dreamErr error
 	tr := &p547Tracer{}
 	tr.before = func(pid uint32, sql string, _ []any) {
-		if !strings.Contains(sql, "DELETE FROM context_blocks WHERE ctid") {
+		if !strings.Contains(sql, "DELETE FROM context_blocks WHERE id = ANY") {
 			return
 		}
 		if blockStatements.Add(1) != 1 { // the first block batch, after its link delete

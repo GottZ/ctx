@@ -16,10 +16,32 @@ import (
 // pruneScopeDeletes); idx_dream_links_scope_created serves the scope.
 const pruneLinksSQL = `DELETE FROM context_dream_links WHERE ctid IN (SELECT ctid FROM context_dream_links WHERE scope = ANY($1::text[]) LIMIT $2)`
 
-// pruneBlocksSQL deletes up to $2 blocks of the scopes $1 (idx_context_scope);
-// everything that holds a row per block follows its foreign key (CASCADE or
-// SET NULL, see scope_purge.go).
-const pruneBlocksSQL = `DELETE FROM context_blocks WHERE ctid IN (SELECT ctid FROM context_blocks WHERE scope = ANY($1::text[]) LIMIT $2)`
+// prunePickSQL picks and locks up to $2 blocks of the scopes $1
+// (idx_context_scope) — the blocks a batch deletes (pruneBlockBatch).
+const prunePickSQL = `SELECT id::text FROM context_blocks WHERE scope = ANY($1::text[]) LIMIT $2 FOR UPDATE`
+
+// pruneChildrenSQL locks the children of one level of a batch's closure that
+// lie in the tenant's scopes $2 — the rows the parent_id cascade deletes with
+// the level (idx on parent_id, migration 172).
+const pruneChildrenSQL = `SELECT id::text FROM context_blocks WHERE parent_id = ANY($1::uuid[]) AND scope = ANY($2::text[]) FOR UPDATE`
+
+// pruneForeignChildrenSQL reads the children of the closure $1 that lie
+// OUTSIDE the tenant's scopes $2, with their scope.
+const pruneForeignChildrenSQL = `SELECT id::text, scope FROM context_blocks WHERE parent_id = ANY($1::uuid[]) AND NOT scope = ANY($2::text[]) ORDER BY id`
+
+// pruneDetachSQL detaches those children from the parent the batch deletes:
+// the cascade must not take a row of another scope (issue #547).
+const pruneDetachSQL = `UPDATE context_blocks SET parent_id = NULL WHERE id = ANY($1::uuid[]) AND parent_id = ANY($2::uuid[])`
+
+// pruneClosureLinksSQL deletes the dream links that name a block of the
+// closure, whatever scope the link carries (their foreign keys are NO
+// ACTION), as a purge batch does.
+const pruneClosureLinksSQL = `DELETE FROM context_dream_links WHERE source_block_id = ANY($1::uuid[]) OR target_block_id = ANY($1::uuid[])`
+
+// pruneBlocksSQL deletes the batch's blocks; the rest of the closure goes
+// with them through the parent_id cascade, and everything that holds a row
+// per block follows its foreign key (CASCADE or SET NULL, see scope_purge.go).
+const pruneBlocksSQL = `DELETE FROM context_blocks WHERE id = ANY($1::uuid[])`
 
 // pruneClosingRounds bounds the closing rounds of a prune (pruneTenantClose)
 // that still find rows. A fixed bound, not a policy: a round finds rows only
@@ -51,8 +73,8 @@ const pruneClosingRounds = 10
 // cascade (a lock cycle, 40P01) — the review of #547 ran both. A dream batch
 // waits for the lock while a batch runs and may write a link between two
 // batches, which the next batch deletes first. A child in a scope of ANOTHER
-// tenant is not covered: the cascade has always deleted it, without that
-// scope's lock.
+// tenant (or of no tenant) stays: the batch detaches it from the parent it
+// deletes, under that scope's lock (pruneBlockBatch).
 func pruneScopeBlocks(ctx context.Context, pool *pgxpool.Pool, scopes []string) error {
 	for {
 		links, err := pruneScopeBatch(ctx, pool, scopes, nil)
@@ -78,23 +100,26 @@ func pruneScopeBlocks(ctx context.Context, pool *pgxpool.Pool, scopes []string) 
 }
 
 // pruneScopeBatch runs one batch of pruneScopeBlocks in its own transaction
-// (pruneBatchTx). It returns the rows it deleted (0 ends the pass).
+// (pruneBatchTx), again with the scopes of another tenant's children it met
+// (writeSupersedesSourceScopes). It returns the rows it deleted (0 ends the
+// pass).
 func pruneScopeBatch(ctx context.Context, pool *pgxpool.Pool, scopes, blockScopes []string) (int64, error) {
 	var n int64
-	err := pgxdb.Write(ctx, pool, pgxdb.At("store: prune batch"), func(tx pgx.Tx) error {
+	err := writeSupersedesSourceScopes(ctx, pool, pgxdb.At("store: prune batch"), func(tx pgx.Tx, extra []string) error {
 		var err error
-		n, err = pruneBatchTx(ctx, tx, scopes, blockScopes)
+		n, err = pruneBatchTx(ctx, tx, scopes, blockScopes, extra)
 		return err
 	})
 	return n, err
 }
 
 // pruneBatchTx is one batch inside its transaction: the supersedes locks of
-// scopes (sorted), then up to pruneBatchSize of their dream links; with
-// blockScopes set and no link left, up to pruneBatchSize blocks of those
-// scopes. It returns the rows it deleted.
-func pruneBatchTx(ctx context.Context, tx pgx.Tx, scopes, blockScopes []string) (int64, error) {
-	for _, scope := range scopes {
+// scopes and extra in one sorted pass, then up to pruneBatchSize of the
+// scopes' dream links; with blockScopes set and no link left, a block batch
+// of those scopes (pruneBlockBatch). It returns the rows it deleted.
+func pruneBatchTx(ctx context.Context, tx pgx.Tx, scopes, blockScopes, extra []string) (int64, error) {
+	held := sortedScopes(append(slices.Clone(scopes), extra...))
+	for _, scope := range held {
 		if err := LockSupersedesScope(ctx, tx, scope); err != nil {
 			return 0, err
 		}
@@ -106,11 +131,93 @@ func pruneBatchTx(ctx context.Context, tx pgx.Tx, scopes, blockScopes []string) 
 	if n := tag.RowsAffected(); n > 0 || len(blockScopes) == 0 {
 		return n, nil
 	}
-	tag, err = tx.Exec(ctx, pruneBlocksSQL, blockScopes, pruneBatchSize)
+	return pruneBlockBatch(ctx, tx, scopes, blockScopes, held)
+}
+
+// pruneBlockBatch deletes up to pruneBatchSize blocks of blockScopes and
+// everything below them in the tenant's scopes (issue #547, review round 1):
+//
+//  1. the blocks, picked and locked FOR UPDATE;
+//  2. their closure in the tenant's scopes, one level per statement, each
+//     locked FOR UPDATE before the next is read — the scope purge's
+//     discipline (lockPurgeClosure): a new child needs the key-share lock of
+//     a held parent, so the next statement sees it;
+//  3. the children of the closure in any OTHER scope — another tenant's, or
+//     no tenant's — are detached (parent_id = NULL) instead of going with
+//     the cascade: before, the prune deleted them and their subtrees, and a
+//     dream link of their scope onto one of them made every run fail with
+//     23503. The detach writes rows of that scope, so it runs under that
+//     scope's supersedes lock; a scope the batch does not hold sends it
+//     through a run of its own with the lock in the sorted pass
+//     (scopesToLockError). A scope purge refuses such a closure instead
+//     (ErrPurgeChildOutsideScope) — a purge names one scope and may refuse;
+//     an archive cascades nothing. Neither removes a row of another scope;
+//  4. the dream links that name a block of the closure, whatever their scope;
+//  5. the blocks — the cascade takes the rest of the closure.
+//
+// It returns the blocks of step 1 (0 ends the pass).
+func pruneBlockBatch(ctx context.Context, tx pgx.Tx, scopes, blockScopes, held []string) (int64, error) {
+	ids, err := collectStrings(ctx, tx, prunePickSQL, blockScopes, pruneBatchSize)
+	if err != nil || len(ids) == 0 {
+		return 0, err
+	}
+	closure := slices.Clone(ids)
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		seen[id] = struct{}{}
+	}
+	for level := ids; len(level) > 0; {
+		kids, err := collectStrings(ctx, tx, pruneChildrenSQL, level, scopes)
+		if err != nil {
+			return 0, err
+		}
+		level = nil
+		for _, k := range kids {
+			if _, ok := seen[k]; !ok {
+				seen[k] = struct{}{}
+				level = append(level, k)
+			}
+		}
+		closure = append(closure, level...)
+	}
+	if err := pruneDetachForeignChildren(ctx, tx, closure, scopes, held); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, pruneClosureLinksSQL, closure); err != nil {
+		return 0, err
+	}
+	tag, err := tx.Exec(ctx, pruneBlocksSQL, ids)
 	if err != nil {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
+}
+
+// pruneDetachForeignChildren is step 3 of pruneBlockBatch: the children of
+// closure outside the tenant's scopes, detached under their scopes' locks;
+// a scope not in held ends the run with a scopesToLockError naming it.
+func pruneDetachForeignChildren(ctx context.Context, tx pgx.Tx, closure, scopes, held []string) error {
+	rows, err := tx.Query(ctx, pruneForeignChildrenSQL, closure, scopes)
+	if err != nil {
+		return err
+	}
+	type child struct{ ID, Scope string }
+	kids, err := pgx.CollectRows(rows, pgx.RowToStructByPos[child])
+	if err != nil || len(kids) == 0 {
+		return err
+	}
+	var missing, detach []string
+	for _, k := range kids {
+		if !slices.Contains(held, k.Scope) && !slices.Contains(missing, k.Scope) {
+			missing = append(missing, k.Scope)
+		}
+		detach = append(detach, k.ID)
+	}
+	if len(missing) > 0 {
+		return &scopesToLockError{scopes: missing}
+	}
+	_, err = tx.Exec(ctx, pruneDetachSQL, detach, closure)
+	return err
 }
 
 // markTenantOffboarding is the prune's first step (issue #547): the tenant's
@@ -146,9 +253,9 @@ func markTenantOffboarding(ctx context.Context, pool *pgxpool.Pool, tenantID str
 func pruneTenantClose(ctx context.Context, pool *pgxpool.Pool, tenantID string, scopes []string) error {
 	for round := 1; ; round++ {
 		var left int64
-		err := pgxdb.Write(ctx, pool, pgxdb.At("store: prune closing round"), func(tx pgx.Tx) error {
+		err := writeSupersedesSourceScopes(ctx, pool, pgxdb.At("store: prune closing round"), func(tx pgx.Tx, extra []string) error {
 			var err error
-			if left, err = pruneClosingRound(ctx, tx, scopes); err != nil || left > 0 {
+			if left, err = pruneClosingRound(ctx, tx, scopes, extra); err != nil || left > 0 {
 				return err
 			}
 			_, err = tx.Exec(ctx, `DELETE FROM context_tenants WHERE id = $1::uuid`, tenantID)
@@ -167,12 +274,13 @@ func pruneTenantClose(ctx context.Context, pool *pgxpool.Pool, tenantID string, 
 }
 
 // pruneClosingRound deletes, in tx, what the closing round finds in scopes
-// (sorted) and returns how many rows that was.
-func pruneClosingRound(ctx context.Context, tx pgx.Tx, scopes []string) (int64, error) {
+// (sorted; extra: the scopes of another tenant's children an earlier run met)
+// and returns how many rows that was.
+func pruneClosingRound(ctx context.Context, tx pgx.Tx, scopes, extra []string) (int64, error) {
 	if len(scopes) == 0 {
 		return 0, nil
 	}
-	left, err := pruneBatchTx(ctx, tx, scopes, scopes)
+	left, err := pruneBatchTx(ctx, tx, scopes, scopes, extra)
 	if err != nil || left > 0 {
 		return left, err
 	}
