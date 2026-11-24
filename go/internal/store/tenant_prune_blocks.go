@@ -246,8 +246,9 @@ func markTenantOffboarding(ctx context.Context, pool *pgxpool.Pool, tenantID str
 // nothing, the tenant row (ON DELETE CASCADE takes its scope mappings), so no
 // row of a scope outlives a prune that reports success. A request that
 // authenticated before markTenantOffboarding and writes after its scope's
-// pass leaves such a row; one whose write commits after the last round's
-// statements and without a supersedes lock (a single store) is not seen.
+// pass leaves such a row; one whose write commits after the last round — a
+// single store, which takes no supersedes lock, or a batch that waited for
+// one behind the last round — is not seen.
 // More than pruneClosingRounds rounds with rows: an error, the tenant row
 // stays.
 func pruneTenantClose(ctx context.Context, pool *pgxpool.Pool, tenantID string, scopes []string) error {

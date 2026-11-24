@@ -294,7 +294,9 @@ func batchIdentityClash(items []BatchUpsert, holds []batchHold) error {
 // The link is the one of /api/store (LinkBlockParent), so a refusal is its
 // ErrLinkScopeViolation, named by the item; held are the scopes whose locks
 // the batch holds — the chains of every item that reach beyond them are
-// walked first, and the batch runs again with all their scopes locked.
+// walked first, and the batch runs again with all their scopes locked. A
+// refusal that follows such a skipped link in the list is not final in that
+// run: the next one judges it with the earlier links written.
 func linkBatchParents(ctx context.Context, tx pgx.Tx, items []BatchUpsert, results []BatchResult, held []string) error {
 	var missing []string
 	first := -1
@@ -327,6 +329,13 @@ func linkBatchParents(ctx context.Context, tx pgx.Tx, items []BatchUpsert, resul
 			continue
 		}
 		if err != nil {
+			if first >= 0 {
+				// An earlier link of this run is not written (its chain
+				// reaches a scope not held yet), and this verdict may rest
+				// on the chain that link changes: the next run decides it,
+				// in list order (second review of PR #554).
+				continue
+			}
 			return &BatchItemError{Index: i, Err: err}
 		}
 	}

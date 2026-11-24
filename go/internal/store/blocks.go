@@ -1496,7 +1496,7 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
 	if IsFullUUID(idOrPrefix) {
-		if idTextUnsendable(idOrPrefix) {
+		if !idIsUUIDText(idOrPrefix) {
 			return "", nil, nil // names no block (issue #547)
 		}
 		return idOrPrefix, nil, nil

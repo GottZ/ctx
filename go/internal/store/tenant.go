@@ -639,10 +639,13 @@ const pruneSecretsSQL = `DELETE FROM context_secrets WHERE scope = ANY($1::text[
 // authenticated before it can still write after its scope's pass — the
 // closing rounds after the key step (pruneTenantClose) delete what such a
 // write left, under the scopes' supersedes locks, and delete the tenant row
-// in the round that finds nothing. Not covered: a write without a supersedes
-// lock (a single store) whose request authenticated before the first step
-// and that commits after the last round's statements — a request in flight
-// for the whole prune.
+// in the round that finds nothing. Not covered: a write whose request
+// authenticated before the first step and that commits after the last round
+// — a request in flight for the whole prune: a single store, which takes no
+// supersedes lock, or a block batch that waits for a scope's lock behind the
+// last round (second review of PR #554). Its rows lie in a scope no tenant
+// owns, and the next tenant assigned that scope name owns them
+// (AssignTenantScope adopts the rows of a tenantless scope).
 //
 // STAGED WRITES (issue #277): step 7 deletes the staged writes of the keys
 // it deletes (context_pending_writes, which hold block content), right after

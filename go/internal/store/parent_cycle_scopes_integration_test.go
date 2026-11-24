@@ -197,3 +197,65 @@ func TestParentItemsCrossingSeveralScopes(t *testing.T) {
 		}
 	}
 }
+
+// TestBatchLinkAfterASkippedLinkIsDecidedOnTheNextRun (second review of PR
+// #554): a link whose chain reaches a scope the batch does not hold is left
+// for the batch's next run, which takes that scope's lock too. A later link
+// of the same run was still judged — on a chain the skipped link had not
+// changed yet: x under q (q's parent lies in B), then y under p, with p under
+// x under y before the batch. On the base both links are written (x leaves y
+// first); the run that skipped the first link refused the second as a cycle,
+// before the next run could decide it in list order. No concurrent writer.
+func TestBatchLinkAfterASkippedLinkIsDecidedOnTheNextRun(t *testing.T) {
+	f := newP547Fixture(t)
+	ctx := context.Background()
+	a, b := "skip547-a", "skip547-b"
+	id := func(title string) string {
+		t.Helper()
+		var id string
+		if err := f.pool.QueryRow(ctx, `SELECT id::text FROM context_blocks WHERE title = $1 AND NOT is_archived`, title).Scan(&id); err != nil {
+			t.Fatalf("%s: %v", title, err)
+		}
+		return id
+	}
+	r := f.block(t, b, "skip547 r")
+	q := f.c547Moved(t, b, a, "skip547 q", r) // in A, its parent r in B
+	y := f.block(t, a, "skip547 y")
+	for _, link := range [][2]string{{"skip547 x", y}, {"skip547 p", ""}} {
+		parent := link[1]
+		if parent == "" {
+			parent = id("skip547 x")
+		}
+		if err := f.c547Link(f.pool, a, link[0], parent); err != nil {
+			t.Fatalf("seed %s: %v", link[0], err)
+		}
+	}
+	x, p := id("skip547 x"), id("skip547 p")
+	_, err := store.UpsertBlocks(ctx, f.pool, []store.BatchUpsert{
+		{Category: "learnings", Title: "skip547 x", Content: "x under q", Scope: a, ScopeExplicit: true, ParentID: q},
+		{Category: "learnings", Title: "skip547 y", Content: "y under p", Scope: a, ScopeExplicit: true, ParentID: p},
+	}, "", f.set, nil)
+	if err != nil {
+		t.Fatalf("x under q, then y under p: %v, want both links written", err)
+	}
+	for child, want := range map[string]string{x: q, y: p} {
+		var got *string
+		if err := f.pool.QueryRow(ctx, `SELECT parent_id::text FROM context_blocks WHERE id = $1::uuid`, child).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got == nil || *got != want {
+			t.Errorf("parent of %s: %v, want %s", child, got, want)
+		}
+	}
+	if n := c547Cycles(t, f.pool); n != 0 {
+		t.Errorf("%d blocks are their own ancestor, want none", n)
+	}
+	// A cycle that remains once the earlier links are written is refused on
+	// the run that holds every scope: q under x closes x → q → x.
+	_, err = store.UpsertBlocks(ctx, f.pool, []store.BatchUpsert{
+		{Category: "learnings", Title: "skip547 q", Content: "q under x", Scope: a, ScopeExplicit: true, ParentID: x},
+	}, "", f.set, nil)
+	if !errors.Is(err, store.ErrLinkScopeViolation) {
+		t.Errorf("q under x, with x under q: %v, want the link refused", err)
+	}
+}

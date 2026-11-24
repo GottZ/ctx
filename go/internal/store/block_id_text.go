@@ -2,8 +2,6 @@ package store
 
 import (
 	"fmt"
-	"strings"
-	"unicode/utf8"
 )
 
 // ErrIDPrefixTooShort is ResolveBlockID's refusal of a prefix shorter than
@@ -11,11 +9,23 @@ import (
 // length the caller sent (the wording every surface has answered with).
 var ErrIDPrefixTooShort = fmt.Errorf("store: id prefix must be at least %d characters", MinIDPrefixLen)
 
-// idTextUnsendable reports an id the database cannot receive as text: a NUL
-// character or invalid UTF-8 (22021). Such an id names no block (issue #547:
-// it reached the resolve's query and came back as a server error).
-func idTextUnsendable(s string) bool {
-	return strings.IndexByte(s, 0) >= 0 || !utf8.ValidString(s)
+// idIsUUIDText reports whether an id of the full shape (IsFullUUID) is a UUID
+// as the database's cast reads it: hex digits in either case around the four
+// hyphens. Any other text of that shape names no block (second review of PR
+// #554: it reached the cast and came back as a server error, 22P02) — a NUL
+// and invalid UTF-8 included, which the database cannot even receive as text
+// (22021, issue #547).
+func idIsUUIDText(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			continue // the hyphens IsFullUUID read
+		}
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // idPrefixMatchesNothing reports a prefix with a character no block id's
