@@ -457,7 +457,7 @@ func (s *Scheduler) migrateOneEmbedding(ctx context.Context, router *dream.Route
 		err := tx.QueryRow(ctx, migratePickSQL(cursor != nil), args...).
 			Scan(&blockID, &title, &content, &sens, &scope, &pickedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
-			// The peeked block vanished under us (concurrent ClearEmbedding /
+			// The peeked block vanished under us (concurrent InvalidateEmbeddingTx /
 			// archive / lock) — defer, don't advance.
 			return errPickReleased
 		}

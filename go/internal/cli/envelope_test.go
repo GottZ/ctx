@@ -303,6 +303,9 @@ func envelopeInventory() map[string]inventoryEntry {
 		"project issues resolve":     e1(-1, "project", "issues", "resolve", "i1", "--keep", "local", "--project", fixtureProject),
 		"project issues stamp-reset": e1(-1, "project", "issues", "stamp-reset", "--all", "--project", fixtureProject),
 
+		// ── #236: a new command (no pre-T03-13 exit code) ──────────────────
+		"admin embed-backfill release": e1(-1, "admin", "embed-backfill", "release", "--class", "oversize"),
+
 		// ── #318: ingest leaves the silent group, 0 → 1 ────────────────────
 		// It never ran in a hook. The vault is the one TestEnvelopeContractPerCommand
 		// writes into its working directory; the server's success:false fails the
