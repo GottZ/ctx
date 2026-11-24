@@ -261,7 +261,7 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 		}
 		msg, err := h.pastWriteLogBoundary(ctx, windowStart)
 		if err != nil {
-			slog.Error("synthesize: daily backfill: write-log eviction boundary unreadable", "request_id", requestID, "error", err)
+			logRequestError(ctx, "synthesize: daily backfill: write-log eviction boundary unreadable", "request_id", requestID, "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write-log eviction boundary unreadable; backfill refused"})
 			return
 		}
