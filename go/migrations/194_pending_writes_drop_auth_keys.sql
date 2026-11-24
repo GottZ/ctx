@@ -108,9 +108,9 @@
 -- decision back, and a backfill would replace the day's report with one
 -- without them. The 03:00 report never meets it (its window starts 24 h
 -- back, the boundary at least 48 h). context_guard_state is the state row of
--- the scheduler's guard, the main writer of the write log, and the only
--- state a background job of the scheduler keeps in the database; the
--- column is its second writer beside the guard's last_guard_at.
+-- the scheduler's guard, the main writer of the write log; no line of the
+-- six-hour janitor bundle keeps state of its own. The retention is the row's
+-- second writer beside the guard's last_guard_at.
 -- ADD COLUMN of a nullable column without a default changes the catalog
 -- only: ACCESS EXCLUSIVE on the one-row table until the file commits (the
 -- guard's end-of-run stamp and guard-stats wait that long). Way back: DROP
