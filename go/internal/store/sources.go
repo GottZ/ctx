@@ -103,6 +103,8 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 		// (issue #275): the caller's input, typed like UpdateBlock's.
 		return nil, fmt.Errorf("store: insert chunk: %w", blockIdentityTaken(err))
 	}
-	b.written = &writtenDates{content: content, times: times} // for the afterwork (issue #434)
+	if b.Content == content { // the afterwork's dates, as in execHeld (issue #434)
+		b.written = &writtenDates{content: b.Content, times: times}
+	}
 	return b, nil
 }

@@ -12,7 +12,10 @@
 // every temporal writer uses (store.SetTemporalExtractionForTest): the exact
 // measure, independent of the clock and of other tests' writes, because it
 // counts by content. An extraction is the afterwork's when the stack holds the
-// afterwork (store.Refresh…), the write's otherwise.
+// afterwork (store.Refresh…), the write's otherwise. What it sees is every
+// extraction through that function, which the store's writers and afterwork
+// all call; a direct store.ExtractDates elsewhere (a handler, the dream's
+// phase 1) is outside its view.
 //
 // Besides the count, each door's rows are compared with what the extraction
 // of the content the block holds yields (the behaviour before the handover),

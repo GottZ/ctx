@@ -349,8 +349,9 @@ func RefreshBlockTemporal(ctx context.Context, pool *pgxpool.Pool, b *Block) (ap
 }
 
 // writtenDates is what a content write hands its temporal afterwork (issue
-// #434): the content it stored and temporalExtraction of exactly that content,
-// the dates its statement wrote into content_times.
+// #434): the content it stored, as its statement returned it, and
+// temporalExtraction of those bytes, the dates its statement wrote into
+// content_times.
 type writtenDates struct {
 	content string
 	times   []time.Time
@@ -364,12 +365,13 @@ func refreshTemporal(ctx context.Context, pool *pgxpool.Pool, blockID, content s
 	return writeTemporalGuarded(ctx, pool, blockID, times, createdAt, mark, temporalContentGuardSQL, blockID, content)
 }
 
-// temporalExtraction is the extraction of every temporal writer
+// temporalExtraction is the extraction of the store's temporal writers
 // (ExtractDates): the content writes compute a block's content_times with it
 // (UpsertBlock, UpsertBlockSupersedes, UpsertBlocks, UpdateBlock and its
 // edits, InsertChunk) and hand those dates to their afterwork
 // (RefreshBlockTemporal); the afterwork without them (RefreshTemporal), the
-// backfill and the dream's review record extract with it themselves. A
+// backfill and the dream's review record extract with it themselves (the
+// dream's phase 1 calls ExtractDates on its own, validate_temporal.go). A
 // variable only so a test can stand in a different extraction for the same
 // content, as a later release's would be (issue #466 point 8), or count the
 // extractions a write makes (issue #434; SetTemporalExtractionForTest).

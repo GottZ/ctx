@@ -1128,8 +1128,13 @@ func (u upsertStatement) execHeld(ctx context.Context, tx pgx.Tx, hadRow bool) (
 			return nil, fmt.Errorf("store: upsert block: invalidate embedding: %w", err)
 		}
 	}
-	w := u.written
-	b.written = &w
+	// The handover names the content as the statement returned it, the bytes
+	// the dates were computed from (the statement stores its argument as it
+	// is), so the afterwork holds one copy of it; were they ever to differ,
+	// the afterwork would extract.
+	if b.Content == u.written.content {
+		b.written = &writtenDates{content: b.Content, times: u.written.times}
+	}
 	return b, nil
 }
 
@@ -2059,10 +2064,11 @@ func UpdateBlock(ctx context.Context, pool *pgxpool.Pool, id string, data Update
 	if contentSent {
 		// The content the statement stored and its content_times, for the
 		// afterwork (issue #434); for edits, the ones the held row resolved.
+		// As in execHeld, the handover names the returned content.
 		content, okContent := args[contentArg].(string)
 		times, okTimes := args[contentArg+1].([]time.Time)
-		if okContent && okTimes {
-			b.written = &writtenDates{content: content, times: times}
+		if okContent && okTimes && content == b.Content {
+			b.written = &writtenDates{content: b.Content, times: times}
 		}
 	}
 	return b, needsReEmbed, nil
