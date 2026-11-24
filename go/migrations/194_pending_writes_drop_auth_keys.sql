@@ -227,8 +227,8 @@
 -- back with it — block writers then waited for the build and the wait, and
 -- the next boot builds again.
 --
--- OLDER BINARY. v5.79.0 (the rollback image), run on a database at 194: its
--- runner leaves version 194 alone; its stage statement reads the key
+-- OLDER BINARY. v5.80.0 (the rollback image, eaa42622), its binary run on a
+-- database at 194: its runner leaves version 194 alone; its stage statement reads the key
 -- without a lock and, without the key, writes a stage for a key id that has
 -- no row (principal NULL) — unreachable, no key of that id authenticates;
 -- its tenant prune leaves the tenant's stages to the cascade, which is gone
@@ -240,7 +240,8 @@
 -- removes them. In a rolling deploy the prune of this release deletes the
 -- stages of the keys it deletes, not those an older instance's prune left.
 -- Its schema-contract check finds
--- _migrations:194 without an embedded file (breaking): in mode warn (the
+-- _migrations:194 without an embedded file (breaking), and the index of part 1
+-- and the column of part 2 it does not know (param): in mode warn (the
 -- default) it starts and /health reports schema_contract attention; in mode
 -- enforce it refuses to start until CTX_CONTRACT_MODE=warn or off is set. The
 -- manifest lists no constraints, so the keys' absence is no finding of it.
@@ -263,7 +264,7 @@
 -- its definition (any validity) — a same-named object of another kind or
 -- definition is one this file left alone with a WARNING, and it stays —
 -- DROP INDEX CONCURRENTLY idx_blocks_dream_eligible; QueueDepth counts as
--- before 194. The older binary (v5.79.0) pays the index's writes and reads it
+-- before 194. The older binary (v5.80.0) pays the index's writes and reads it
 -- with the same statement; its schema-contract check reports the index it
 -- does not know (param) beside _migrations:194.
 --
