@@ -83,6 +83,9 @@ func mcpStageStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inpu
 		if rej := supersedesReject(err); rej != nil {
 			return errResultReject(rej), nil, nil
 		}
+		if rej := writeConflictReject(err); rej != nil {
+			return errResultReject(rej), nil, nil // the stage check lost to concurrent writes (issue #547)
+		}
 		if err != nil {
 			logRequestError(ctx, "mcp: stage supersedes check failed", "error", err, "request_id", reqID)
 			return classInternal.errResult("stage failed: cannot check supersedes"), nil, nil

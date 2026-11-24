@@ -21,8 +21,12 @@ const writeConflictMsg = "the write met concurrent changes of the rows it needed
 // single-write mappers, the update surfaces through updateFailureReject, a
 // batch item through batchItemReject, which prefixes the item) or calls it
 // where its mapping does not pass there (a batch failure outside an item, a
-// confirmed batch or the stage check of a batch outside an item, the
-// guard-resolve batch, the dream-link resolve, the confirmed archive).
+// confirmed batch or the stage check of a batch outside an item, the stage
+// checks of a staged store with supersedes and of a staged batch with one
+// supersedes item, the guard-resolve batch on REST and MCP, the dream-link
+// resolve, the confirmed archive, the MCP issue tools). Not mapped: the
+// writes of a stage (they write a staged write, no block) and the blob
+// writes (blob store, link and delete) — a deadlock there answers 500.
 func writeConflictReject(err error) *writeReject {
 	if err == nil || !store.IsWriteConflict(err) {
 		return nil
