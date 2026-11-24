@@ -1294,6 +1294,47 @@ SELECT id, scope, category, title, guard_status, metadata->>'guard_resolution' A
 
 Until the guard has run, the rows without a resolution show `guard_status = active` without `guard_checked_at`; afterwards they carry the guard's new decision next to the marker.
 
+### Guard keys written by a caller
+
+Since issue #238 no client write stores a metadata key with the prefix `guard_` ([api](api.md#manage-actions): the keys are dropped from the request and the block keeps its own). A database written before holds whatever its callers sent there; nothing has to be done about it at upgrade time. The readers take such values for what they are: the review queue's age falls back to `updated_at` for a `guard_checked_at` that cannot be a flag time of its row, and `guard-list` sorts a `guard_similarity` that is no number last. A caller-written `guard_checked_at` still keeps its block out of the guard's queue until the block's content changes. To see how many blocks carry a `guard_*` key that no server writer of this release produces (applyDecision, `guard-resolve`, migrations 121/156/157) — one row per key and the distinct blocks, each with how many of them are in the review queue now:
+
+```sql
+WITH foreign_keys AS (
+  SELECT b.id, k.key,
+         (NOT b.is_archived AND b.guard_status IN ('needs_review', 'near_duplicate', 'possible_duplicate')) AS flagged
+    FROM context_blocks b
+   CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(b.metadata) = 'object' THEN b.metadata ELSE '{}'::jsonb END) AS k(key, value)
+   WHERE starts_with(k.key, 'guard_')
+     AND NOT CASE k.key
+       WHEN 'guard_status' THEN k.value IN ('"clean"', '"needs_review"', '"near_duplicate"', '"possible_duplicate"')
+       WHEN 'guard_checked_at' THEN jsonb_typeof(k.value) = 'string'
+            AND (k.value #>> '{}') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+            AND CASE WHEN pg_input_is_valid(k.value #>> '{}', 'timestamptz')
+                     THEN (k.value #>> '{}')::timestamptz BETWEEN date_trunc('second', b.created_at) AND now()
+                     ELSE false END
+       WHEN 'guard_similarity' THEN jsonb_typeof(k.value) = 'number'
+       WHEN 'guard_threshold_duplicate' THEN jsonb_typeof(k.value) = 'number'
+       WHEN 'guard_threshold_review' THEN jsonb_typeof(k.value) = 'number'
+       WHEN 'guard_is_cross_scope' THEN jsonb_typeof(k.value) = 'boolean'
+       WHEN 'guard_matched_id' THEN jsonb_typeof(k.value) = 'string'
+            AND ((k.value #>> '{}') = ''
+                 OR (k.value #>> '{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+       WHEN 'guard_resolution' THEN k.value IN ('"keep"', '"archive"')
+       WHEN 'guard_resolved_at' THEN jsonb_typeof(k.value) = 'string' AND pg_input_is_valid(k.value #>> '{}', 'timestamptz')
+       WHEN 'guard_repair' THEN k.value IN ('"M121"', '"M156"', '"M157"')
+       ELSE false
+     END
+)
+SELECT key, count(*) AS blocks, count(*) FILTER (WHERE flagged) AS flagged_blocks
+  FROM foreign_keys GROUP BY key
+UNION ALL
+SELECT '(distinct blocks)', count(DISTINCT id), count(DISTINCT id) FILTER (WHERE flagged)
+  FROM foreign_keys
+ ORDER BY 1;
+```
+
+The statement reads every row of `context_blocks`: run it off-peak with a raised `statement_timeout`, or on a replica. A `guard_checked_at` in another form than `2006-01-02T15:04:05Z` counts too, which includes stamps of a guard older than the Go code, if such a database still carries them. To hand such a block back to the guard, drop the key in SQL (`UPDATE context_blocks SET metadata = metadata - 'guard_checked_at' WHERE id = …`); the next guard batch checks it.
+
 ### Migration 158: `consumer_id` on `context_llm_log`
 
 `context_llm_log` gets a nullable `consumer_id UUID`: the external consumer of the OpenAI-compatible API (`/v1`) a row is attributed to. Consumers are a credential class of their own (`ctxm_` model keys); they never authenticate as a knowledge key and so never fill `api_key_id`. Like `api_key_id` the column has no foreign key — the log references a credential, it does not depend on it, so deleting a consumer never anonymises or deletes its history. A `CHECK` (`ck_llm_log_one_identity`, `num_nonnulls(api_key_id, consumer_id) <= 1`) holds on the hypertable and on every chunk, existing and future: a row names a knowledge key, a consumer or nobody (background work), never both. An insert with both fails with `23514`; through the daemon's write path such a row is lost and counted (`llmlog.insert_failures` on `/api/status`). A partial index `idx_llm_log_consumer` on `(consumer_id, created_at DESC) WHERE consumer_id IS NOT NULL` serves per-consumer windows and stays empty until the first `/v1` row. No existing row changes and there is no backfill: every row so far is internal, so `consumer_id` is NULL everywhere, and nothing in this release writes it yet.
