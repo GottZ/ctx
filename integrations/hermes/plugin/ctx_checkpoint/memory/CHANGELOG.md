@@ -6,6 +6,116 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.17.0] — 2026-11-24
+
+The chains of one process share one state per ctx server entry, the required facts pace against
+it, and with the operator's grant a call the checkpoint gives up on ends in Hermes as well
+(GottZ/ctx#299, points 2, 3 and 5).
+
+- **One state per server entry.** Each chain counted its own refusals in a row and its own
+  writes in the rate window. Two chains of one process at the write limit (two sessions of a
+  gateway, a compaction and its retry) therefore showed the entry up to four error answers in a
+  row — Hermes opens its circuit breaker at the third (`_CIRCUIT_BREAKER_THRESHOLD`) and refuses
+  every call to the entry for 60 s — and booked `2 × (max_parts + 2)` writes in one window.
+  `checkpoint.EntryState`, one per entry and process (`entry_state`; MCP: the entry's name and a
+  digest of what makes it one Hermes connection — route and credentials, the fields Hermes
+  compares before one profile of a multiplexed gateway adopts another profile's connection
+  (`_connection_identity`), so two profiles on one connection share one state, a timeout change
+  keeps it, and an OAuth entry, never adopted, is keyed by its profile too; REST: base URL and key
+  digest), admits a call only while the entry's error answers in a row plus the calls in flight
+  stay below `MAX_RATE_REFUSALS` (2), and a write only while fewer than `max_parts + 2` writes are
+  booked or in flight in the window. An answer ends the errors released before its call was sent:
+  answers reach their threads in another order than the entry gave them, and a read answered before
+  a refusal but released after it must not end it (a first version did, and two chains showed three
+  refusals in a row in 2 of 15 runs). At the limit no write goes out; a read still does, alone
+  (every chain starts with the head search, and a chain that wants to write then sends one read
+  first; its answer ends the run). A write that failed other than by a refusal keeps its slot (ctx
+  may still book an abandoned write). A chain alone behaves as before (one wait, one retry, then it
+  stops). A chain plans the windows the entry's booked writes take together with its own (its
+  deadline grows by them, still never past Hermes' wait), and a chain that waits for writes of
+  another checkpoint before its own fill a window tells the user why. Not covered: several Hermes
+  processes of one profile share nothing, each keeps its own state; other callers of the entry
+  (recall, the agent's tools, ctx_handover) are not counted; an entry whose route or key changes
+  gets a fresh state at once, while Hermes keeps the old connection (and its count) until it
+  reconnects (`/reload-mcp`); against a ctx server before GottZ/ctx#342 a typed search is one
+  refused answer and its repeat without types one call of the plugin.
+- **Required facts.** They were stored after the chain unpaced and outside its count of error
+  answers. They are stored in the chain's run now (`ChainWriter.store_paced`, `ChainReceipt.run`):
+  the chain's plan holds their windows, each fact waits for a slot of the entry's window and counts
+  in its error answers, and none runs past the chain's deadline (so none past Hermes' wait). A
+  refused fact still ends the facts at once, logged, its claim released for a later compaction.
+- **A call the checkpoint gives up on.** Through the tool dispatch the plugin could only stop
+  waiting: Hermes' MCP handler kept running the call under the entry's RPC lock until the entry's
+  own tool timeout (300 s by default), and the next compaction's head search failed behind it
+  (`head search failed [timeout]`) although the server would answer at once. When the operator
+  lists the entry in `plugins.entries.ctx_checkpoint.mcp_allowlist`, the checkpoint's bounded calls
+  go through `PluginContext.call_mcp(server, tool, args, timeout)` with their own timeout; Hermes
+  cancels such a call on its MCP loop when it runs out (`tools/mcp_tool_loop.py`
+  `_run_on_mcp_loop`), which releases the lock. A memory provider's `register()` receives Hermes'
+  provider collector, which forwards only `register_*` calls: `call_mcp` is taken from the context
+  where it has one, else from the `PluginContext` the collector holds for the plugin
+  (`_plugin_context()`); only the method of a real `hermes_cli.plugins.PluginContext` counts (under
+  `plugins.isolation: host` the plugin's context forwards `call_mcp` to a collector that has none).
+  `call_mcp` reaches every tool of a granted server, so a call goes through it only for a tool
+  Hermes registered for the entry (`tools.registry`: what its `tools.include`/`tools.exclude`
+  filter left); any other goes through the dispatch as before. An answer Hermes cut at its 64 KB
+  plugin cap fails the call (the largest head and manifest reads stay far below it). With the grant
+  a call Hermes gives up on reads `MCP call failed: TimeoutError: …` instead of the plugin's
+  `no answer within …; the call was abandoned`. Without the grant, on a Hermes without `call_mcp`
+  and after Hermes refused the grant (`PermissionError`, before any transport work; remembered
+  until the provider connects again) the calls go through the dispatch as before. Recall and the
+  agent tools are unbounded calls and keep the dispatch.
+- **Setup** offers the grant on every surface ("Let Hermes end a ctx call the checkpoint gives up
+  on": the Desktop memory form, the web dashboard form, `hermes memory setup`), writes or removes
+  only this entry in the list, and the terminal setup's summary names it — and says when the
+  loading Hermes hands the plugin no `call_mcp`, so the grant has no effect there.
+- **Chains side by side are served in the order they started** (review of the pull request).
+  Each chain planned its windows from the writes booked when it started, not from the writes the
+  chains beside it would make; the free slots went to whichever thread came first, and every chain
+  whose next slot lay past its deadline stopped. In virtual time with Hermes' 300 s wait: two
+  chains of ten writes at `max_parts` 3 both failed, four of twelve chains of eight writes at the
+  defaults, fifty chains of eight writes at the defaults all fifty. Every run now registers the
+  writes it plans at the entry (`EntryState.register`; the writer ends the registration of a
+  failed chain and of one without required facts, the provider the one its facts continue, on
+  every way out, and a registration holds no place past its run's deadline). A run plans its
+  deadline behind the booked, in-flight and planned writes of the runs that started before it
+  (never past Hermes' wait); a write goes out only while the window has a slot beyond those
+  planned writes; at the limit of calls in flight a later run's call gives way to a waiting call
+  of an earlier one. When the chains together do not fit Hermes' wait, the first ones complete; a
+  chain that would fit from an empty window but not behind them stops before its next write with
+  `other checkpoints of this Hermes process started first …`, and a chain too long for the wait
+  even alone saves what fits after them. A chain alone and chains one after another behave as
+  before.
+- **Errors** (same review). A call that raised in the client (RuntimeError, MemoryError,
+  KeyboardInterrupt, SystemExit) released its place already; tests over the provider pin it now
+  on both transports. A failure envelope the REST client returns instead of raising (`success:
+  false`, a body that is no JSON) counted as an answer and ended the run of error answers; it is
+  an error answer now and a write keeps its slot (ctx may have stored it) unless its code is
+  `rate_limit`. The shared count stopped every chain once two of them were refused one after the
+  other (other writers holding the key's window: two chains of twenty writes at the defaults with
+  90 foreign writes in ctx's window both failed, the base completed both): a chain now gives up on
+  a write only when ctx refused it twice with no answer of the entry in between, and at the limit
+  of two error answers in a row a chain that wants to write first sends one read alone
+  (`ChainWriter._probe`), whose answer ends the run in the plugin's count and in Hermes' breaker.
+  So a failed manifest read directly before a refusal no longer costs a chain its retry. Writes
+  never draw a third error answer in a row; a read sent at the limit (a head search, the read
+  before a write) goes out alone, and when it fails its chain ends — the wording before said no
+  more than two error answers in a row for every call. A chain held behind others follows their
+  delay (a refusal that cost one of them a window) up to Hermes' wait instead of stopping at the
+  deadline it planned at its start, and of a run that cannot finish within its own deadline only
+  the writes it can still send count ahead of the chains after it.
+- **Setup** (same review). The entry's key follows Hermes' own `_connection_identity` where the
+  loading Hermes has it (two entries Hermes treats as one connection — tool filters in another
+  order, `ssl_verify: true` named, an empty `env` or `args`, `strict_redirect_headers: false`,
+  another `tools` key — shared two states before); on a Hermes without it the raw fields as
+  before. The web dashboard offers the grant as keep (the default), on and off: it sends back
+  every field it loaded, and an unrelated save restored a grant taken back elsewhere meanwhile.
+  `hermes memory setup` asks for the grant after the operating mode and names its current state.
+  With `transport: rest` the grant has no effect: setup no longer offers or writes it, and the
+  summary says so (it said "yes"). An `mcp_allowlist`, or a section above it, that is not of the
+  shape Hermes reads is no longer replaced with `["ctx"]`: setup refuses the change with a message
+  naming the key.
+
 ## [ctx_checkpoint 0.16.2] — 2026-11-19
 
 A checkpoint ends inside Hermes' wait for the compaction, a retry adds no window it does not

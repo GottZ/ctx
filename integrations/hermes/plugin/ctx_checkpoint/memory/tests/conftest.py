@@ -134,6 +134,16 @@ def _isolated_hermes_home(tmp_path, monkeypatch):
     yield home
 
 
+@pytest.fixture(autouse=True)
+def _fresh_entry_states():
+    """Each test starts with the server-entry states of a fresh process (GottZ/ctx#299)."""
+    from ctx_plugin import checkpoint
+
+    checkpoint.reset_entry_states()
+    yield
+    checkpoint.reset_entry_states()
+
+
 @pytest.fixture
 def fake_client_cls(monkeypatch):
     import ctx_plugin.provider as provider_mod

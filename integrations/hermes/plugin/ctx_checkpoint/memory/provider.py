@@ -110,6 +110,44 @@ _PRUNED_HOMES: set = set()
 _PRUNE_LOCK = threading.Lock()
 
 
+class _PacedFactStore:
+    """The client the required facts are stored through (GottZ/ctx#299, point 5): each store goes
+    through the chain writer's ``store_paced`` in ``run`` — the windows and the deadline of the
+    chain before it, paced against the server entry's booked writes and counted in its error
+    answers in a row. Its failures raise (``CtxCheckpointError``), which the caller logs."""
+
+    def __init__(self, writer: ChainWriter, run: Any) -> None:
+        self._writer = writer
+        self._run = run
+        self._stored = 0
+
+    def store(
+        self,
+        category: str,
+        title: str,
+        content: str,
+        sensitivity: str | None = None,
+        tags: list[str] | None = None,
+        *,
+        metadata: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        # ``timeout`` is the caller's bound of the call; the writer bounds it the same way
+        # (what is left of the run's deadline, at most api_timeout).
+        self._stored += 1
+        extra: dict[str, Any] = {"metadata": metadata} if metadata else {}
+        return self._writer.store_paced(
+            f"required fact {self._stored}",
+            self._run,
+            category=category,
+            title=title,
+            content=content,
+            sensitivity=sensitivity,
+            tags=tags,
+            **extra,
+        )
+
+
 def _count_noise_rows(messages: list[dict[str, Any]]) -> tuple:
     """(compaction carriers, tool rows) in a pre-compress batch — for the live-gate log line."""
     carriers = tools = 0
@@ -463,6 +501,13 @@ class CtxMemoryProvider(MemoryProvider):
         """
         key_digest = hashlib.sha256(self._api_key.encode("utf-8")).hexdigest() if self._api_key else ""
         return (self._hermes_home, self._base_url, key_digest, self._whoami_label)
+
+    def _entry_key(self) -> tuple[str, ...]:
+        """The server entry the checkpoint writes to (``checkpoint.entry_state``, GottZ/ctx#299): on
+        REST the base URL and the key's digest — ctx counts writes per key, so every binding of the
+        process to that key shares one window (the umbrella keys an MCP entry by profile and name)."""
+        key_digest = hashlib.sha256(self._api_key.encode("utf-8")).hexdigest() if self._api_key else ""
+        return ("rest", self._base_url, key_digest)
 
     def _invalidate_prefetch(self) -> None:
         """Drop the pre-warmed recall and orphan warm-ups still in flight."""
@@ -883,7 +928,30 @@ class CtxMemoryProvider(MemoryProvider):
         and the facts still run — never raises. Required: any chain/fact failure raises
         ``CtxCheckpointError`` (host keeps the uncompressed transcript); success returns a
         non-empty receipt (chain head/manifest IDs + SHA-256, fact block IDs; < 6000 chars).
+
+        The runs this checkpoint registers at its server entry (the chain's, which the required
+        facts continue, or one for the facts alone) end with this call, whichever way it ends
+        (GottZ/ctx#299): their planned writes never hold the entry's windows after it.
         """
+        runs: list[Any] = []
+        try:
+            return self._pre_compress(
+                messages, runs, require_checkpoint=require_checkpoint, tool_evidence=tool_evidence, **kwargs
+            )
+        finally:
+            for run in runs:
+                run.close()
+
+    def _pre_compress(
+        self,
+        messages: list[dict[str, Any]],
+        runs: list[Any],
+        *,
+        require_checkpoint: bool = False,
+        tool_evidence: list[dict[str, Any]] | None = None,
+        **kwargs,
+    ) -> str:
+        """:meth:`on_pre_compress`; every run it registers at the entry is appended to ``runs``."""
         # P5: the host calls on_session_end right after a compaction (commit_memory_session,
         # conversation_compression.py:3733) → that digest is the compaction segment digest.
         self._compaction_pending = True
@@ -927,6 +995,9 @@ class CtxMemoryProvider(MemoryProvider):
                 raise CtxCheckpointError(f"CTX pre-compress checkpoint unavailable: {reason}")
             return ""
         client = self._client
+        # #299: the chain and the required facts after it write against the process-wide state of
+        # this server entry (its error answers in a row, its booked writes of the window).
+        self._chain().entry = _cp.entry_state(self._entry_key())
 
         # P4: select facts BEFORE the chain write so their dedupe keys ride in the head/
         # manifest metadata (``fact_hashes``); keys already stored for this root are skipped.
@@ -957,6 +1028,9 @@ class CtxMemoryProvider(MemoryProvider):
                     fact_hashes=new_keys,
                     wait_limit=wait_limit,
                     host_wait_s=host_wait or 0.0,
+                    # The required facts are stored in the chain's run after it (#299): planned with it.
+                    extra_writes=len(facts) if require_checkpoint else 0,
+                    runs=runs,
                 )
             except CtxCheckpointError as exc:
                 self._last_chain_error = exc
@@ -1025,8 +1099,27 @@ class CtxMemoryProvider(MemoryProvider):
             # within the host's wait (#299): the chain's deadline never moves past wait_limit.
             deadline = max(deadline, float(getattr(receipt, "deadline", 0.0) or 0.0))
         if require_checkpoint:
+            # #299 point 5: the required facts go through the chain writer, in the chain's run when
+            # one was written: paced against the entry's window, counted in its error answers.
+            run = getattr(receipt, "run", None)
+            if run is None:
+                run = self._chain().new_run(
+                    started=started,
+                    deadline=deadline,
+                    budget_s=budget,
+                    planned_writes=len(facts),
+                    wait_limit=wait_limit,
+                    host_wait_s=host_wait or 0.0,
+                )
+                runs.append(run)
             facts_text = self._checkpoint_facts_sync(
-                client, facts, sensitivity, len(source), deadline=deadline, ledger=ledger, chain_stored=bool(chain_text)
+                _PacedFactStore(self._chain(), run),
+                facts,
+                sensitivity,
+                len(source),
+                deadline=run.deadline,
+                ledger=ledger,
+                chain_stored=bool(chain_text),
             )
             return self._join_receipt(chain_text, facts_text)
         if not facts:
@@ -1098,8 +1191,11 @@ class CtxMemoryProvider(MemoryProvider):
         fact_hashes: list[str] | None = None,
         wait_limit: float | None = None,
         host_wait_s: float = 0.0,
+        extra_writes: int = 0,
+        runs: list[Any] | None = None,
     ) -> str:
-        """Synchronous chain write; raises ``CtxCheckpointError``. Returns the upstream receipt frame."""
+        """Synchronous chain write; raises ``CtxCheckpointError``. Returns the upstream receipt frame.
+        A run the chain leaves open for the required facts (``extra_writes``) goes to ``runs``."""
         root = self._checkpoint_root()
         host_api = self._probe_host_api()
         receipt = self._chain().write(
@@ -1117,7 +1213,10 @@ class CtxMemoryProvider(MemoryProvider):
             fact_hashes=fact_hashes,
             wait_limit=wait_limit,
             host_wait_s=host_wait_s,
+            extra_writes=extra_writes,
         )
+        if runs is not None and getattr(receipt, "run", None) is not None:
+            runs.append(receipt.run)
         self._last_manifest_by_root[root] = receipt.manifest_id
         self._last_chain_receipt = receipt
         logger.info(
