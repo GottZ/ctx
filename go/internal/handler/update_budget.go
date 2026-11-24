@@ -21,10 +21,10 @@ import (
 // nothing, one that does not fit writes nothing and answers 429 rate_limit,
 // the single store's answer at the budget. A staged update — the MCP update
 // tool for a confirm_writes key, the web chat's ctx_update — pays at intent
-// in the stage's transaction, as every staged write does, and its confirm
-// books nothing. This file is the one place the rule is applied: to stop
-// booking single updates, the two surfaces call store.UpdateBlock and
-// store.StagePendingWrite again.
+// in the stage's transaction, as every staged write does (the web chat's
+// staged ctx_store too), and its confirm books nothing. This file is the one
+// place the rule is applied: to stop booking single updates, the two
+// surfaces call store.UpdateBlock and store.StagePendingWrite again.
 
 // updateWriteBudget is the key's write budget of a single update, the limit
 // read from the request's snapshot (0 = no limit: nothing refused, every

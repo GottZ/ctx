@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GottZ/ctx/internal/chat"
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
@@ -93,10 +94,12 @@ func TestChatStageRefusesNUL(t *testing.T) {
 	}
 }
 
-// TestChatStageUpdateBooksIntent (issue #519): the web chat's staged update
-// pays its write intent at stage time, in the stage's transaction, as every
-// staged write does; at the budget it gets no card.
-func TestChatStageUpdateBooksIntent(t *testing.T) {
+// TestChatStageBooksIntent (issue #519): the web chat's staged update and
+// staged store pay their write intent at stage time, in the stage's
+// transaction, as every staged write does; at the budget they get no card.
+// The staged store booked nothing before (review of PR #553): a chat that
+// stages stores never moved its key's count.
+func TestChatStageBooksIntent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
@@ -111,45 +114,59 @@ func TestChatStageUpdateBooksIntent(t *testing.T) {
 	if config.HasErrors(append(issues, config.Validate(envCfg)...)) {
 		t.Fatalf("env fixture invalid: %v", issues)
 	}
-	keyRow, keyPlain, err := store.CreateApiKey(ctx, pool, "n519-chat-budget", "private", nil, store.DefaultTenantID)
-	if err != nil {
-		t.Fatalf("create key: %v", err)
-	}
-	var actx context.Context
-	req := httptest.NewRequest(http.MethodPost, "/probe", nil)
-	req.Header.Set("Authorization", "Bearer "+keyPlain)
-	Auth(pool)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { actx = r.Context() })).ServeHTTP(httptest.NewRecorder(), req)
-	if actx == nil || AuthResultFromContext(actx) == nil {
-		t.Fatalf("auth probe resolved no identity")
-	}
 	b, err := store.UpsertBlock(ctx, pool, "learnings", "n519 chat budget", "body", nil, nil, "private", true, store.SensitivityWrite{}, "")
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	runner := &chatStageRunner{pool: pool, cfg: config.NewStore(envCfg)}
-	counts := func() (bookings, cards int) {
-		if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM context_access_log WHERE api_key_id = $1 AND action = 'write'),
-			(SELECT count(*) FROM context_pending_writes WHERE api_key_id = $1)`, keyRow.ID).Scan(&bookings, &cards); err != nil {
-			t.Fatalf("counts: %v", err)
-		}
-		return bookings, cards
-	}
 	title := func(v string) *string { return &v }
-	for i := range 2 {
-		staged, rej, err := runner.StageUpdate(actx, b.ID, nil, title(fmt.Sprintf("n519 chat budget %d", i)), nil, nil, nil)
-		if err != nil || rej != "" || staged == nil {
-			t.Fatalf("stage %d: rej %q err %v", i, rej, err)
-		}
-		if bk, cards := counts(); bk != i+1 || cards != i+1 {
-			t.Errorf("after stage %d: %d bookings, %d cards; want %d and %d", i, bk, cards, i+1, i+1)
-		}
-	}
-	_, rej, err := runner.StageUpdate(actx, b.ID, nil, title("n519 chat budget over"), nil, nil, nil)
-	if err != nil || rej != "Rate limit exceeded: max 2 writes per 60 seconds" {
-		t.Errorf("over the budget: rej %q err %v", rej, err)
-	}
-	if bk, cards := counts(); bk != 2 || cards != 2 {
-		t.Errorf("over the budget: %d bookings, %d cards; want 2 and 2", bk, cards)
+	for _, tc := range []struct {
+		name  string
+		stage func(actx context.Context, i int) (*chat.StagedWrite, string, error)
+	}{
+		{"update", func(actx context.Context, i int) (*chat.StagedWrite, string, error) {
+			return runner.StageUpdate(actx, b.ID, nil, title(fmt.Sprintf("n519 chat budget %d", i)), nil, nil, nil)
+		}},
+		{"store", func(actx context.Context, i int) (*chat.StagedWrite, string, error) {
+			return runner.StageWrite(actx, "learnings", fmt.Sprintf("n519 chat store %d", i), "body", nil, nil)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keyRow, keyPlain, err := store.CreateApiKey(ctx, pool, "n519-chat-budget-"+tc.name, "private", nil, store.DefaultTenantID)
+			if err != nil {
+				t.Fatalf("create key: %v", err)
+			}
+			var actx context.Context
+			req := httptest.NewRequest(http.MethodPost, "/probe", nil)
+			req.Header.Set("Authorization", "Bearer "+keyPlain)
+			Auth(pool)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { actx = r.Context() })).ServeHTTP(httptest.NewRecorder(), req)
+			if actx == nil || AuthResultFromContext(actx) == nil {
+				t.Fatalf("auth probe resolved no identity")
+			}
+			counts := func() (bookings, cards int) {
+				if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM context_access_log WHERE api_key_id = $1 AND action = 'write'),
+					(SELECT count(*) FROM context_pending_writes WHERE api_key_id = $1)`, keyRow.ID).Scan(&bookings, &cards); err != nil {
+					t.Fatalf("counts: %v", err)
+				}
+				return bookings, cards
+			}
+			for i := range 2 {
+				staged, rej, err := tc.stage(actx, i)
+				if err != nil || rej != "" || staged == nil {
+					t.Fatalf("stage %d: rej %q err %v", i, rej, err)
+				}
+				if bk, cards := counts(); bk != i+1 || cards != i+1 {
+					t.Errorf("after stage %d: %d bookings, %d cards; want %d and %d", i, bk, cards, i+1, i+1)
+				}
+			}
+			_, rej, err := tc.stage(actx, 2)
+			if err != nil || rej != "Rate limit exceeded: max 2 writes per 60 seconds" {
+				t.Errorf("over the budget: rej %q err %v", rej, err)
+			}
+			if bk, cards := counts(); bk != 2 || cards != 2 {
+				t.Errorf("over the budget: %d bookings, %d cards; want 2 and 2", bk, cards)
+			}
+		})
 	}
 }
 

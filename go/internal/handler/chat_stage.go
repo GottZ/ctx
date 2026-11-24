@@ -96,7 +96,14 @@ func (s *chatStageRunner) StageWrite(ctx context.Context, category, title, conte
 		slog.Error("chat: canonicalize staged write failed", "error", err, "request_id", reqID)
 		return nil, "", err
 	}
-	pw, err := store.StagePendingWrite(ctx, s.pool, ar.ApiKeyID, res.WriteScope, "store", "chat", canonical, hash, ttl)
+	// The write intent is booked with the card, in the stage's transaction
+	// (stageWithIntent), as the update stage does (issue #519).
+	pw, err := stageWithIntent(ctx, s.pool, updateWriteBudget(ctx, s.cfg, ar), func(q pgxdb.Rower) (*store.PendingWrite, error) {
+		return store.StagePendingWrite(ctx, q, ar.ApiKeyID, res.WriteScope, "store", "chat", canonical, hash, ttl)
+	})
+	if rej := updateBudgetReject(err); rej != nil {
+		return nil, rej.Msg, nil
+	}
 	if err != nil {
 		logRequestError(ctx, "chat: stage pending write failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return nil, "", err
