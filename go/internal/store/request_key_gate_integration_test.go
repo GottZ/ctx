@@ -562,8 +562,10 @@ func TestKeyStepWaitsForOneWriteOfALongRequest(t *testing.T) {
 		}
 		refusedAt <- time.Time{}
 	}()
-	for written.Load() < 20 {
-		time.Sleep(time.Millisecond)
+	for deadline := time.Now().Add(10 * time.Second); written.Load() < 20; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the long request wrote %d chunks in 10 s", written.Load())
+		}
 	}
 	// The delete's pool marks when the key step asks for the first gate.
 	cfg, err := pgxpool.ParseConfig(f.dsn)
