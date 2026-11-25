@@ -204,8 +204,11 @@ type BatchResult struct {
 //     nothing but its own count and booking.
 //
 // An update item whose block left the scope read in step 1 before the lock
-// pass reached it runs the whole transaction again (writeSupersedesSource):
-// the next read names the new scope, and its lock is taken in order.
+// pass reached it runs the whole transaction again
+// (writeSupersedesSourceScopes): the next run takes the lock of the scope the
+// block was found in as well, in order, and finds the block in one of the two
+// (issue #547). A batch that still finds it elsewhere after the last run
+// answers ErrWriteConflict.
 //
 // Paths that hold several block rows without the scope lock remain: the guard
 // run (its picked blocks FOR NO KEY UPDATE, then the key-share lock of a
@@ -224,9 +227,9 @@ func UpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, 
 		return nil, err
 	}
 	var results []BatchResult
-	err = writeSupersedesSource(ctx, pool, pgxdb.At("store: upsert block batch"), func(tx pgx.Tx) error {
+	err = writeSupersedesSourceScopes(ctx, pool, pgxdb.At("store: upsert block batch"), func(tx pgx.Tx, extra []string) error {
 		var err error
-		if results, err = upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types); err != nil {
+		if results, err = upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types, extra); err != nil {
 			return err
 		}
 		if budget == nil {
@@ -267,8 +270,8 @@ func CheckUpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUps
 	if err != nil {
 		return err
 	}
-	err = writeSupersedesSource(ctx, pool, pgxdb.At("store: check block batch"), func(tx pgx.Tx) error {
-		if _, err := upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types); err != nil {
+	err = writeSupersedesSourceScopes(ctx, pool, pgxdb.At("store: check block batch"), func(tx pgx.Tx, extra []string) error {
+		if _, err := upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types, extra); err != nil {
 			return err
 		}
 		return pgxdb.ErrRollback
@@ -333,15 +336,17 @@ type batchHold struct {
 type batchIdentity struct{ scope, category, title string }
 
 // upsertBlocksTx is the batch inside its transaction (see UpsertBlocks): the
-// update items' scopes read, the scope locks, the lock pass over every item
+// update items' scopes read, the scope locks (with extra, the scopes an
+// earlier run of the transaction asked for), the lock pass over every item
 // with its no-op decision, the writes, then the parent links. The budget is
 // the caller's, spent after this (WriteBudget.spend).
-func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep batchPrep, apiKeyID string, types *blocktype.Set) ([]BatchResult, error) {
+func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep batchPrep, apiKeyID string, types *blocktype.Set, extra []string) ([]BatchResult, error) {
 	current, err := readBatchUpdateTargets(ctx, tx, items)
 	if err != nil {
 		return nil, err
 	}
-	for _, scope := range batchScopes(items, current) {
+	held := batchScopes(items, current, extra)
+	for _, scope := range held {
 		if err := LockSupersedesScope(ctx, tx, scope); err != nil {
 			return nil, err
 		}
@@ -350,7 +355,7 @@ func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep ba
 	holds := make([]batchHold, len(items))
 	rows := make(map[string]int, len(items))
 	for _, i := range order {
-		h, err := lockBatchItem(ctx, tx, items[i], prep.updates[i], current[i])
+		h, err := lockBatchItem(ctx, tx, items[i], prep.updates[i], held)
 		if err != nil {
 			return nil, &BatchItemError{Index: i, Err: err}
 		}
@@ -381,7 +386,7 @@ func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep ba
 		}
 		results[i].Block = b
 	}
-	if err := linkBatchParents(ctx, tx, items, results); err != nil {
+	if err := linkBatchParents(ctx, tx, items, results, held); err != nil {
 		return nil, err
 	}
 	return results, nil
@@ -393,9 +398,9 @@ func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep ba
 // item's identity row with its no-op comparison (lockBatchMatch). A parent
 // named by id is locked after the item's row (lockBatchParent), and an item
 // with a parent is never a no-op: the link is part of its write.
-func lockBatchItem(ctx context.Context, tx pgx.Tx, it BatchUpsert, u *blockUpdate, cur batchIdentity) (batchHold, error) {
+func lockBatchItem(ctx context.Context, tx pgx.Tx, it BatchUpsert, u *blockUpdate, held []string) (batchHold, error) {
 	if u != nil {
-		return lockBatchUpdate(ctx, tx, u, cur)
+		return lockBatchUpdate(ctx, tx, u, held)
 	}
 	var h batchHold
 	if it.Supersedes != "" {
@@ -612,14 +617,18 @@ func batchLockOrder(items []BatchUpsert, current []batchIdentity) []int {
 	return order
 }
 
-// batchScopes is the sorted set of scopes the items write: a store item's
-// scope, an update item's current scope (current) and the scope it moves to.
-func batchScopes(items []BatchUpsert, current []batchIdentity) []string {
-	scopes := make([]string, 0, 1)
+// batchScopes is the sorted set of scopes the batch locks: a store item's
+// scope, an update item's current scope (current) and the scope it moves to,
+// and the scopes an earlier run asked for (extra, scopesToLockError).
+func batchScopes(items []BatchUpsert, current []batchIdentity, extra []string) []string {
+	scopes := make([]string, 0, 1+len(extra))
 	add := func(s string) {
 		if !slices.Contains(scopes, s) {
 			scopes = append(scopes, s)
 		}
+	}
+	for _, s := range extra {
+		add(s)
 	}
 	for i, it := range items {
 		if it.Update == nil {

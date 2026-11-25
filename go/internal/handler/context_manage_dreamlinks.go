@@ -103,6 +103,10 @@ func (h *ManageHandler) handleDreamLinkResolve(w http.ResponseWriter, r *http.Re
 		writeJSONReject(w, rej)
 		return
 	}
+	if rej := writeConflictReject(err); rej != nil {
+		writeJSONReject(w, rej)
+		return
+	}
 	if err != nil {
 		logRequestError(ctx, "manage: dream-link-resolve error", "error", err, "write_outcome", writeOutcome(err), "request_id", reqID)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{

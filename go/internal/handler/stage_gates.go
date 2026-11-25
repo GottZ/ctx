@@ -428,8 +428,13 @@ func reservedCategoryReject(category string) *writeReject {
 // vocabulary: the S3 sentinel becomes 403 provenance_protected, everything else
 // stays the caller's generic verdict. It is the single place that binds
 // store.ErrProvenanceProtected to a status, so a surface cannot answer the same
-// refusal with 500.
+// refusal with 500. Every write surface's failure mapping passes through it,
+// so it also answers a write that lost to concurrent writes (writeConflictReject,
+// issue #547) — before the provenance check, which such a write never reached.
 func provenanceRejectOr(err error, fallback *writeReject) *writeReject {
+	if rej := writeConflictReject(err); rej != nil {
+		return rej
+	}
 	if errors.Is(err, store.ErrProvenanceProtected) {
 		return classProvenanceProtected.reject(
 			"block carries derived provenance — a client write cannot replace its content or metadata")
@@ -477,11 +482,17 @@ func retypeBoundReject(err error) *writeReject {
 
 // updateFailureReject is the refusal of a failed store.UpdateBlock on every
 // update surface (REST manage update, the MCP update tool, the confirm of a
-// staged update): the I7/S3 sentinel, an identity collision (#227) or a
-// re-type of a comment or an issue (#280). nil = an unexpected fault.
+// staged update): the I7/S3 sentinel, an identity collision (#227), a
+// re-type of a comment or an issue (#280), a sensitivity downgrade without
+// its confirm decided under the row lock (#547) or a write conflict (#547,
+// through provenanceRejectOr). nil = an unexpected fault.
 func updateFailureReject(err error) *writeReject {
 	if rej := retypeBoundReject(err); rej != nil {
 		return rej
+	}
+	var downgrade *store.SensitivityDowngradeError
+	if errors.As(err, &downgrade) {
+		return sensitivityDowngradeReject(downgrade.From, downgrade.To)
 	}
 	if rej := contentEditReject(err); rej != nil {
 		return rej

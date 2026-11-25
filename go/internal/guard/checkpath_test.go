@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/pashagolub/pgxmock/v5"
+
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // TestRunGuardBatch_RoutesByCandidateCircle (#381): after the pick the batch
@@ -21,7 +23,7 @@ func TestRunGuardBatch_RoutesByCandidateCircle(t *testing.T) {
 	mock := newMockPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectPickIndexReady(mock, true)
 	mock.ExpectExec(`^` + regexp.QuoteMeta("SAVEPOINT "+guardPickSavepoint+"; "+guardPickNoSort) + `$`).
 		WillReturnResult(pgxmock.NewResult("SET", 0))
@@ -113,7 +115,7 @@ func TestRunGuardBatch_ExactLimitZeroReadsNoCircles(t *testing.T) {
 	mock := newMockPool(t)
 	defer mock.Close()
 
-	mock.ExpectBegin()
+	mock.ExpectBeginTx(pgxdb.WriteTxOptions)
 	expectPickIndexReady(mock, true)
 	mock.ExpectExec(`^` + regexp.QuoteMeta("SAVEPOINT "+guardPickSavepoint+"; "+guardPickNoSort) + `$`).
 		WillReturnResult(pgxmock.NewResult("SET", 0))

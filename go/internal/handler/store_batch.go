@@ -190,13 +190,18 @@ func storeBatchOutcome(results []store.BatchResult, items []storeBatchEntry) []s
 }
 
 // storeBatchFailureReject renders a failed store.UpsertBlocks on the direct
-// path: the budget refusal, an item's refusal (storeBatchRefusal), else the
-// opaque 500 with the cause in the log.
+// path: the budget refusal, an item's refusal (storeBatchRefusal: a write
+// conflict met at an item names it), a write conflict met outside any item
+// (writeConflictReject), else the opaque 500 with the cause in the log.
 func storeBatchFailureReject(ctx context.Context, err error, reqID string) *writeReject {
 	if rej := storeBatchBudgetReject(err); rej != nil {
 		return rej
 	}
 	if rej := storeBatchRefusal(err); rej != nil {
+		return rej
+	}
+	if rej := writeConflictReject(err); rej != nil {
+		// Lost outside any item (the scope locks, the booking): unnamed.
 		return rej
 	}
 	noteToolWrite(ctx, err)
@@ -339,7 +344,7 @@ func gateStoreItem(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, 
 // the patch's shape (a field named at all, CheckUpdatePatch's combinations,
 // the size caps), the I7 claim gates (manage update's verdict,
 // updateClaimRejectSet), the scope a move names (writableBlockScopes), the id
-// within the key's writable scopes (resolveUpdateTargetIn), and a sensitivity
+// within the key's writable scopes (resolveBatchUpdateTarget), and a sensitivity
 // downgrade's confirm (sensitivityGuardReject). The MCP form carries no scope
 // and no sensitivity, so its two gates are inert there. Returns the resolved
 // block id. Each refusal carries a class; the single update surfaces answer
@@ -363,9 +368,9 @@ func gateUpdateItem(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set,
 	if u.Data.Scope != nil && !contains(writableBlockScopes(ar), *u.Data.Scope) {
 		return "", classScopeDenied.reject("Cannot set scope to requested value")
 	}
-	id, miss := resolveUpdateTargetIn(ctx, pool, ar, u.ID)
-	if miss != "" {
-		return "", classUnknownBlock.reject(miss)
+	id, rej := resolveBatchUpdateTarget(ctx, pool, ar, u.ID, reqID)
+	if rej != nil {
+		return "", rej
 	}
 	if rej := sensitivityGuardReject(ctx, pool, ar, reqID, id, &u.Data); rej != nil {
 		return "", rej
@@ -574,6 +579,10 @@ func confirmedBatchFailure(ctx context.Context, cw store.CanonicalWrite, err err
 		}
 	}
 	if rej := storeBatchRefusal(err); rej != nil {
+		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmStoreBatchPrefix)}
+	}
+	if rej := writeConflictReject(err); rej != nil {
+		// Lost to concurrent writes outside any item (issue #547).
 		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmStoreBatchPrefix)}
 	}
 	noteToolWrite(ctx, err)

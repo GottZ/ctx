@@ -1256,7 +1256,7 @@ func TestGuardRunBuffersOverAHundredBlocks(t *testing.T) {
 		rows.Close()
 		n := 0
 		for _, b := range blocks {
-			if processBlock(ctx, tx, b, set) {
+			if processBlock(ctx, tx, b, set) == blockProcessed {
 				n++
 			}
 		}
@@ -1269,7 +1269,7 @@ func TestGuardRunBuffersOverAHundredBlocks(t *testing.T) {
 		}
 		n := 0
 		for _, b := range blocks {
-			if processBlock(ctx, tx, b, set) {
+			if processBlock(ctx, tx, b, set) == blockProcessed {
 				n++
 			}
 		}

@@ -192,10 +192,16 @@ func stageBatchSupersedesCheck(ctx context.Context, cfg MCPConfig, set *blocktyp
 		if rej := supersedesReject(err); rej != nil {
 			return errResultReject(rej.prefixed(batchItemPrefix(0)))
 		}
+		if rej := writeConflictReject(err); rej != nil {
+			return errResultReject(rej.prefixed(batchItemPrefix(0))) // as the batch names its item (issue #547)
+		}
 	default:
 		err = store.CheckUpsertBlocks(ctx, cfg.Pool, plan.upserts(), ar.ApiKeyID, set)
 		if rej := storeBatchRefusal(err); rej != nil {
 			return errResultReject(rej)
+		}
+		if rej := writeConflictReject(err); rej != nil {
+			return errResultReject(rej) // the stage check lost to concurrent writes (issue #547)
 		}
 	}
 	if err != nil {

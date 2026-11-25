@@ -199,6 +199,26 @@ def test_rate_limit_twice_raises_with_code(wire):
     assert ei.value.code == "rate_limit" and not ei.value.permanent and len(sent) == 2
 
 
+def test_write_conflict_retried_once(wire):
+    # GottZ/ctx#547: 409 write_conflict wrote nothing; the same write sent again normally goes through.
+    sent, plan = wire
+    plan["responses"] = [
+        _http_error(409, {"success": False, "code": "write_conflict", "error": "the write met concurrent changes"}),
+        {"success": True, "block": {"id": "b1"}},
+    ]
+    out = CtxClient("http://ctx.invalid", "k").store("learnings", "t", "c")
+    assert out["success"] and len(sent) == 2
+
+
+def test_write_conflict_twice_raises_retryable(wire):
+    sent, plan = wire
+    wc = {"success": False, "code": "write_conflict", "error": "the write met concurrent changes"}
+    plan["responses"] = [_http_error(409, wc), _http_error(409, wc)]
+    with pytest.raises(CtxApiError) as ei:
+        CtxClient("http://ctx.invalid", "k").store("learnings", "t", "c")
+    assert ei.value.code == "write_conflict" and ei.value.status == 409 and not ei.value.permanent and len(sent) == 2
+
+
 def test_uncoded_error_keeps_legacy_message(wire):
     _, plan = wire
     plan["responses"] = [urllib.error.HTTPError("u", 500, "boom", {}, io.BytesIO(b"plain text"))]

@@ -276,7 +276,11 @@ func applyEditsAndDates(content string, edits []ContentEdit) (string, []time.Tim
 // update makes ("" = it makes none) and appends its arguments. Exactly one
 // assignment per column is legal in SQL, so the replacement or the merge, the
 // guard_checked_at strip of a content write and the sensitivity_audit of a
-// confirmed downgrade compose into a single expression.
+// confirmed downgrade compose into a single expression. auditArg is the index
+// in args of the audit entry's argument (-1 without a sensitivity): an update
+// that names a sensitivity decides the entry under its row lock
+// (sensitivityPlan) and binds NULL when there is none, which leaves the rest
+// of the expression's value as it is.
 //
 // The caller's document and merge carry no guard_ key (stripGuardKeys, issue
 // #238): the replacement keeps the stored guard keys on top
@@ -287,7 +291,7 @@ func applyEditsAndDates(content string, edits []ContentEdit) (string, []time.Tim
 //
 // The merge (issue #406) reads the column of the row the statement locked:
 // (stored || set) - removed. A NULL metadata merges as {}.
-func updateMetadataExpr(data UpdateBlockData, contentSent bool, args []any) (string, []any) {
+func updateMetadataExpr(data UpdateBlockData, contentSent bool, args []any) (string, []any, int) {
 	metaExpr := ""
 	switch {
 	case data.Metadata != nil:
@@ -308,14 +312,17 @@ func updateMetadataExpr(data UpdateBlockData, contentSent bool, args []any) (str
 		// No explicit metadata update — strip guard_checked_at from existing metadata.
 		metaExpr = "metadata - 'guard_checked_at'"
 	}
-	if data.SensitivityAudit != nil {
-		if metaExpr == "" {
-			metaExpr = "COALESCE(metadata, '{}'::jsonb)"
-		}
-		metaExpr = fmt.Sprintf("(%s) || jsonb_build_object('sensitivity_audit', $%d::jsonb)", metaExpr, len(args)+1)
-		args = append(args, data.SensitivityAudit)
+	if data.Sensitivity == nil {
+		return metaExpr, args, -1
 	}
-	return metaExpr, args
+	unchanged, withAudit := metaExpr, metaExpr
+	if metaExpr == "" {
+		unchanged, withAudit = "metadata", "COALESCE(metadata, '{}'::jsonb)"
+	}
+	n := len(args) + 1
+	metaExpr = fmt.Sprintf("CASE WHEN $%d::jsonb IS NULL THEN %s ELSE (%s) || jsonb_build_object('sensitivity_audit', $%d::jsonb) END",
+		n, unchanged, withAudit, n)
+	return metaExpr, append(args, nil), n - 1
 }
 
 // splitMetadataMerge turns a merge object into the two arguments of its SQL

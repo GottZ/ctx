@@ -794,8 +794,18 @@ jobs:
             job_timeout: 25
           - shard: store
             packages: "./internal/store/..."
-            pkg_timeout: 15m
-            job_timeout: 25
+            # 25m / 35 since 2026-11-25 (was 15m / 25): the package ran into
+            # its 15m budget on PR #554 without a failing or hanging test
+            # (run 45512143969: the dump shows one test at 0s and the reaper).
+            # It was 402s on 2026-11-17 and is 811s locally on four cores now,
+            # 701 tests, the longest 78s, thirty of them 8s or more — scale
+            # and cost tests of the migrations and of the write paths added
+            # since. The job before the last merge took 15 min, the one on
+            # root 12. 25m is 1.85x the local run; a hang still ends inside
+            # the job, with the goroutine dump. Splitting the package's
+            # scale tests into a shard of their own is recorded on #369.
+            pkg_timeout: 25m
+            job_timeout: 35
           - shard: guard
             packages: "./internal/guard/..."
             pkg_timeout: 15m

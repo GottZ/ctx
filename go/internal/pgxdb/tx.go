@@ -86,15 +86,27 @@ func rollbackDetached(ctx context.Context, tx pgx.Tx) {
 	_ = tx.Rollback(rctx)
 }
 
-// Write runs fn inside a read-write transaction: BeginTx, deferred rollback,
-// fn, commit.
+// WriteTxOptions are the options Write opens its transaction with: READ
+// COMMITTED, named (issue #547). The write transactions of this tree rely on
+// it — a statement that waited for a row lock sees, in the NEXT statement's
+// snapshot, what the holder committed (the tenant prune's stage delete after
+// its key delete, the guard's neighbour read after its archive locks, a purge
+// level after the level above it, the lock passes that re-read after their
+// locks) — and before this they ran at the session's default level, which a
+// role or database setting (default_transaction_isolation) could raise: under
+// REPEATABLE READ a stage written while the prune's key delete waited stayed
+// behind. A transaction that needs another level says so (WriteOpts).
+var WriteTxOptions = pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
+
+// Write runs fn inside a read-write transaction at READ COMMITTED
+// (WriteTxOptions): BeginTx, deferred rollback, fn, commit.
 //
 // An error from fn is passed through UNCHANGED (no %w wrapping), so
 // errors.Is/As across the boundary stays intact (store.ErrPendingWriteNotFound,
 // store.ErrTenantNotFound and their kind). ErrRollback travels on that same
 // pass-through, which is what makes it usable as a commit-less exit.
 func Write(ctx context.Context, db Beginner, s Stages, fn func(pgx.Tx) error) error {
-	return WriteOpts(ctx, db, pgx.TxOptions{}, s, fn)
+	return WriteOpts(ctx, db, WriteTxOptions, s, fn)
 }
 
 // WriteOpts is Write with explicit pgx.TxOptions, for the sites that need an

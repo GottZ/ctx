@@ -80,23 +80,6 @@ func sqlState(err error) string {
 	return ""
 }
 
-// waitForLockWaiter polls until n backends of this database wait for a lock.
-func waitForLockWaiter(t *testing.T, pool *pgxpool.Pool, n int) {
-	t.Helper()
-	for i := 0; i < 500; i++ {
-		var got int
-		if err := pool.QueryRow(context.Background(), `SELECT count(*)::int FROM pg_stat_activity
-			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&got); err != nil {
-			t.Fatal(err)
-		}
-		if got >= n {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("no %d lock waiter(s) within 5 s", n)
-}
-
 // Pflichttest 1: an open block write does not hold a second block writer.
 func TestGuardState_OpenBlockWriteDoesNotHoldOtherWriters(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
@@ -117,9 +100,10 @@ func TestGuardState_OpenBlockWriteDoesNotHoldOtherWriters(t *testing.T) {
 	}
 }
 
-// Pflichttest 2: a guard run that stands still (here at its audit-log insert,
-// held by a third transaction on the matched neighbour) does not hold an
-// unrelated block writer.
+// Pflichttest 2: a guard run that stands still (here at its audit step, held
+// by a stop on its first statement; until issue #547 a third transaction
+// holding the matched neighbour FOR UPDATE stood it there, but the run now
+// defers such a block) does not hold an unrelated block writer.
 func TestGuardState_StandingGuardRunDoesNotHoldWriters(t *testing.T) {
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
@@ -132,29 +116,22 @@ func TestGuardState_StandingGuardRunDoesNotHoldWriters(t *testing.T) {
 	p := stateLockBlock(t, pool, "pending p", stateLockVec(base, 0.2))
 	z := stateLockBlock(t, pool, "unrelated z", nil)
 
-	gate, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = gate.Rollback(ctx) }()
-	if _, err := gate.Exec(ctx, `SELECT 1 FROM context_blocks WHERE id = $1 FOR UPDATE`, m); err != nil {
-		t.Fatal(err)
-	}
+	_ = m
+	tr := newStopTracer("SELECT title, category, scope FROM context_blocks", p, true)
+	runPool := tracedPool(t, pool, tr)
 	type res struct {
 		n   int
 		err error
 	}
 	done := make(chan res, 1)
 	go func() {
-		n, err := guard.RunGuardBatch(ctx, pool, set, 100, guard.SearchIndexForTest)
+		n, err := guard.RunGuardBatch(ctx, runPool, set, 100, guard.SearchIndexForTest)
 		done <- res{n, err}
 	}()
-	waitForLockWaiter(t, pool, 1) // the run waits for m at its audit-log insert
+	tr.waitReached(t) // the run stands at p's audit step
 
 	werr := writeWithLockTimeout(ctx, pool, z)
-	if err := gate.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
+	close(tr.release)
 	r := <-done
 	if werr != nil {
 		t.Errorf("an unrelated block writer during a standing guard run: %v (SQLSTATE %s), want no wait", werr, sqlState(werr))
@@ -200,11 +177,12 @@ func (f *deadlockFixture) writeLogRows(t *testing.T) int {
 	return n
 }
 
-// Pflichttest 3, guard as the one that waits first: a writer locks the
-// neighbour m2 (the pre-read of UpsertBlock), the guard reaches its audit-log
-// insert for p2 and waits for m2, then the writer writes m2. Before 181 the
-// guard held the state row from its verdict and the writer needed it: 40P01,
-// the guard's verdict lost.
+// Pflichttest 3, the guard meets a writer of the neighbour: a writer locks the
+// neighbour m2 FOR UPDATE, the guard reaches its audit step for p2, then the
+// writer writes m2. Before 181 the guard held the state row from its verdict
+// and the writer needed it: 40P01, the guard's verdict lost. Since issue #547
+// the guard does not wait for m2 at all: p2 stays pending, and the next run
+// writes its verdict.
 func TestGuardState_GuardAuditInsertAndNeighbourWriterDoNotDeadlock(t *testing.T) {
 	f := newDeadlockFixture(t)
 	ctx := context.Background()
@@ -216,26 +194,19 @@ func TestGuardState_GuardAuditInsertAndNeighbourWriterDoNotDeadlock(t *testing.T
 	if _, err := w.Exec(ctx, `SELECT content FROM context_blocks WHERE id = $1 FOR UPDATE`, f.m2); err != nil {
 		t.Fatal(err)
 	}
-	type res struct {
-		n   int
-		err error
-	}
-	done := make(chan res, 1)
-	go func() {
-		n, err := guard.RunGuardBatch(ctx, f.pool, f.set, 100, guard.SearchIndexForTest)
-		done <- res{n, err}
-	}()
-	waitForLockWaiter(t, f.pool, 1)
+	n, rerr := guard.RunGuardBatch(ctx, f.pool, f.set, 100, guard.SearchIndexForTest)
 	_, werr := w.Exec(ctx, `UPDATE context_blocks SET content = content || ' changed' WHERE id = $1`, f.m2)
 	if werr == nil {
 		werr = w.Commit(ctx)
 	}
-	r := <-done
 	if werr != nil {
 		t.Errorf("writer: %v (SQLSTATE %s), want through", werr, sqlState(werr))
 	}
-	if r.err != nil || r.n != 2 {
-		t.Errorf("guard run: processed=%d err=%v, want 2 (a verdict lost to 40P01 leaves fewer)", r.n, r.err)
+	if rerr != nil || n != 1 {
+		t.Errorf("guard run beside the held neighbour: processed=%d err=%v, want 1 (p2 deferred)", n, rerr)
+	}
+	if n, err := guard.RunGuardBatch(ctx, f.pool, f.set, 100, guard.SearchIndexForTest); err != nil || n != 1 {
+		t.Errorf("the next run: processed=%d err=%v, want p2", n, err)
 	}
 	if n := f.writeLogRows(t); n != 2 {
 		t.Errorf("write-log rows for p1/p2: %d, want 2", n)
@@ -247,28 +218,25 @@ func TestGuardState_GuardAuditInsertAndNeighbourWriterDoNotDeadlock(t *testing.T
 // at p1's audit-log insert behind a gate on m1; the writer locks m2 and then
 // writes a block, which needed the state row; the gate opens, the guard
 // reaches p2's audit-log insert and waits for m2. The writer had waited
-// longer, so its deadlock check ran first and it was the one aborted.
+// longer, so its deadlock check ran first and it was the one aborted. Since
+// issue #547 a stop on the guard's first audit statement stands it at p1 (a
+// gate on m1 now defers p1 instead), and the guard defers p2 while the writer
+// holds m2; every verdict is written by the next run at the latest.
 func TestGuardState_ClientWriteIsNoDeadlockVictim(t *testing.T) {
 	f := newDeadlockFixture(t)
 	ctx := context.Background()
-	gate, err := f.pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = gate.Rollback(ctx) }()
-	if _, err := gate.Exec(ctx, `SELECT 1 FROM context_blocks WHERE id = $1 FOR UPDATE`, f.m1); err != nil {
-		t.Fatal(err)
-	}
+	tr := newStopTracer("SELECT title, category, scope FROM context_blocks", f.p1, true)
+	runPool := tracedPool(t, f.pool, tr)
 	type res struct {
 		n   int
 		err error
 	}
 	done := make(chan res, 1)
 	go func() {
-		n, err := guard.RunGuardBatch(ctx, f.pool, f.set, 100, guard.SearchIndexForTest)
+		n, err := guard.RunGuardBatch(ctx, runPool, f.set, 100, guard.SearchIndexForTest)
 		done <- res{n, err}
 	}()
-	waitForLockWaiter(t, f.pool, 1) // guard at p1's audit insert, behind the gate
+	tr.waitReached(t) // guard at p1's audit step, p1 and p2 picked
 
 	w, err := f.pool.Begin(ctx)
 	if err != nil {
@@ -287,18 +255,19 @@ func TestGuardState_ClientWriteIsNoDeadlockVictim(t *testing.T) {
 		wdone <- err
 	}()
 	// Before 181 the writer now waits for the state row; after it, it is
-	// through. Either way give it a moment, then open the gate.
+	// through. Either way give it a moment, then let the guard go on.
 	time.Sleep(150 * time.Millisecond)
-	if err := gate.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
+	close(tr.release)
 	werr := <-wdone
 	r := <-done
 	if werr != nil {
 		t.Errorf("client write: %v (SQLSTATE %s), want through", werr, sqlState(werr))
 	}
-	if r.err != nil || r.n != 2 {
-		t.Errorf("guard run: processed=%d err=%v, want 2", r.n, r.err)
+	if r.err != nil || r.n < 1 {
+		t.Errorf("guard run: processed=%d err=%v, want p1 (and p2 unless the writer still held m2: deferred, issue #547)", r.n, r.err)
+	}
+	if _, err := guard.RunGuardBatch(ctx, f.pool, f.set, 100, guard.SearchIndexForTest); err != nil {
+		t.Errorf("the next run: %v", err)
 	}
 	if n := f.writeLogRows(t); n != 2 {
 		t.Errorf("write-log rows for p1/p2: %d, want 2", n)

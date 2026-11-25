@@ -15,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/backends"
 )
 
 // readBatchUpdateTargets reads, without a lock, the identity each update
@@ -108,41 +110,43 @@ func (u *blockUpdate) pinSQL() string {
 // lockBatchUpdate is the lock pass of an update item: its row FOR NO KEY
 // UPDATE — the lock the UPDATE itself takes — by id, within the write scopes,
 // live, not a derivative, at the pinned updated_at of a confirmed card, and in
-// the scope the batch read for it (cur), whose supersedes lock the batch
-// holds. In the same statement the row is compared with what the update
+// a scope whose supersedes lock the batch holds (held: the scope it read for
+// the item, and the one an earlier run found the block in). In the same statement the row is compared with what the update
 // writes (changedSQL): an update that changes nothing is the item's no-op.
-// Edits resolve on the content of the held row first (the content read with
-// the lock, the comparison a statement after it). A scope move then locks the
+// Edits resolve on the content of the held row first, and a sensitivity's
+// downgrade guard decides on its level (sensitivityPlan, issue #547) — read
+// with the lock, the comparison a statement after it. A scope move then locks the
 // targets of the block's supersedes links, in id order, so the reconcile after
 // its sweep waits for no row lock (lockSupersedesSource's discipline).
-func lockBatchUpdate(ctx context.Context, tx pgx.Tx, u *blockUpdate, cur batchIdentity) (batchHold, error) {
-	var rowID, content string
+func lockBatchUpdate(ctx context.Context, tx pgx.Tx, u *blockUpdate, held []string) (batchHold, error) {
+	var rowID, content, sens string
 	var ident batchIdentity
 	var changed bool
 	var err error
-	if u.edits == nil {
-		args := append(slices.Clone(u.args), cur.scope)
+	deferred := u.edits != nil || u.sens != nil // decided on the held row, compared after
+	if !deferred {
+		args := append(slices.Clone(u.args), held)
 		err = tx.QueryRow(ctx, fmt.Sprintf(
 			`SELECT id::text, scope, category, title, %s FROM context_blocks
-			  WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived AND `+notDerivedSQL+`%s AND scope = $%d
+			  WHERE id = $%d AND scope = ANY($%d::text[]) AND NOT is_archived AND `+notDerivedSQL+`%s AND scope = ANY($%d::text[])
 			  FOR NO KEY UPDATE`,
 			u.changedSQL(), u.idIdx, u.scopeIdx, u.pinSQL(), len(args)), args...,
 		).Scan(&rowID, &ident.scope, &ident.category, &ident.title, &changed)
 	} else {
-		args := []any{u.id, u.writeScopes, cur.scope}
+		args := []any{u.id, u.writeScopes, held}
 		pin := ""
 		if u.data.ExpectUpdatedAt != nil {
 			args = append(args, *u.data.ExpectUpdatedAt)
 			pin = " AND updated_at = $4"
 		}
 		err = tx.QueryRow(ctx,
-			`SELECT id::text, scope, category, title, content FROM context_blocks
-			  WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived AND `+notDerivedSQL+pin+` AND scope = $3
+			`SELECT id::text, scope, category, title, content, sensitivity FROM context_blocks
+			  WHERE id = $1 AND scope = ANY($2::text[]) AND NOT is_archived AND `+notDerivedSQL+pin+` AND scope = ANY($3::text[])
 			  FOR NO KEY UPDATE`, args...,
-		).Scan(&rowID, &ident.scope, &ident.category, &ident.title, &content)
+		).Scan(&rowID, &ident.scope, &ident.category, &ident.title, &content, &sens)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		return batchHold{}, batchUpdateMiss(ctx, tx, u, cur)
+		return batchHold{}, batchUpdateMiss(ctx, tx, u, held)
 	}
 	if err != nil {
 		return batchHold{}, fmt.Errorf("store: upsert block batch: lock update target: %w", err)
@@ -153,6 +157,13 @@ func lockBatchUpdate(ctx context.Context, tx pgx.Tx, u *blockUpdate, cur batchId
 			return batchHold{}, editErr
 		}
 		u.args[u.contentArg], u.args[u.contentArg+1] = edited, times
+	}
+	if u.sens != nil {
+		if err := u.sens.decide(backends.Sensitivity(sens), u.args); err != nil {
+			return batchHold{}, err
+		}
+	}
+	if deferred {
 		if err := tx.QueryRow(ctx, fmt.Sprintf(
 			`SELECT %s FROM context_blocks WHERE id = $%d AND scope = ANY($%d::text[])%s`,
 			u.changedSQL(), u.idIdx, u.scopeIdx, u.pinSQL()), u.args...).Scan(&changed); err != nil {
@@ -184,11 +195,11 @@ func lockBatchUpdate(ctx context.Context, tx pgx.Tx, u *blockUpdate, cur batchId
 // batchUpdateMiss is the reason an update item's lock found no row, read in
 // the batch's transaction: no live block of the write scopes
 // (ErrBlockNotFound), a derivative (ErrProvenanceProtected, UpdateBlock's
-// answer), a block another transaction moved out of the scope the batch read
-// and locked for it (errSupersedesSourceChanged: the batch runs again and
-// locks the new scope in order), or a confirmed card's block at another
-// updated_at (ErrBlockChanged).
-func batchUpdateMiss(ctx context.Context, tx pgx.Tx, u *blockUpdate, cur batchIdentity) error {
+// answer), a block another transaction moved out of the scopes the batch
+// locked for it (a scopesToLockError naming the scope it is in now: the batch
+// runs again and locks that scope too, in order), or a confirmed card's block
+// at another updated_at (ErrBlockChanged).
+func batchUpdateMiss(ctx context.Context, tx pgx.Tx, u *blockUpdate, held []string) error {
 	var scope string
 	var notDerived bool
 	var updatedAt time.Time
@@ -203,8 +214,8 @@ func batchUpdateMiss(ctx context.Context, tx pgx.Tx, u *blockUpdate, cur batchId
 		return fmt.Errorf("store: upsert block batch: update target: %w", err)
 	case !notDerived:
 		return ErrProvenanceProtected
-	case scope != cur.scope:
-		return errSupersedesSourceChanged
+	case !slices.Contains(held, scope):
+		return &scopesToLockError{scopes: []string{scope}}
 	case u.data.ExpectUpdatedAt != nil && !updatedAt.Equal(*u.data.ExpectUpdatedAt):
 		return ErrBlockChanged
 	}
@@ -281,8 +292,14 @@ func batchIdentityClash(items []BatchUpsert, holds []batchHold) error {
 // order, after every item is written: a ParentItem names the block the earlier
 // item wrote (or, for an item that changed nothing, the block it matched).
 // The link is the one of /api/store (LinkBlockParent), so a refusal is its
-// ErrLinkScopeViolation, named by the item.
-func linkBatchParents(ctx context.Context, tx pgx.Tx, items []BatchUpsert, results []BatchResult) error {
+// ErrLinkScopeViolation, named by the item; held are the scopes whose locks
+// the batch holds — the chains of every item that reach beyond them are
+// walked first, and the batch runs again with all their scopes locked. A
+// refusal that follows such a skipped link in the list is not final in that
+// run: the next one judges it with the earlier links written.
+func linkBatchParents(ctx context.Context, tx pgx.Tx, items []BatchUpsert, results []BatchResult, held []string) error {
+	var missing []string
+	first := -1
 	for i, it := range items {
 		if it.Update != nil || (it.ParentID == "" && it.ParentItem == nil) {
 			continue
@@ -295,9 +312,35 @@ func linkBatchParents(ctx context.Context, tx pgx.Tx, items []BatchUpsert, resul
 				parent = r.Block.ID
 			}
 		}
-		if err := LinkBlockParent(ctx, tx, results[i].Block.ID, parent, it.Scope); err != nil {
+		err := LinkBlockParent(ctx, tx, results[i].Block.ID, parent, it.Scope, held)
+		var more *scopesToLockError
+		if errors.As(err, &more) {
+			// Every item's chain is walked before the batch runs again, so the
+			// next run takes the locks of all of them at once (review of #547:
+			// one scope per run ran out of runs at three crossing items).
+			if first < 0 {
+				first = i
+			}
+			for _, sc := range more.scopes {
+				if !slices.Contains(missing, sc) {
+					missing = append(missing, sc)
+				}
+			}
+			continue
+		}
+		if err != nil {
+			if first >= 0 {
+				// An earlier link of this run is not written (its chain
+				// reaches a scope not held yet), and this verdict may rest
+				// on the chain that link changes: the next run decides it,
+				// in list order (second review of PR #554).
+				continue
+			}
 			return &BatchItemError{Index: i, Err: err}
 		}
+	}
+	if first >= 0 {
+		return &BatchItemError{Index: first, Err: &scopesToLockError{scopes: missing}}
 	}
 	return nil
 }

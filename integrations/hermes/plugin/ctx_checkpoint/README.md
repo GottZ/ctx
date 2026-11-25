@@ -368,7 +368,9 @@ reason is in the log and in the status. A rate limit is ctx's answer
 `Rate limit exceeded: max <n> … per 60 seconds` and a staged write an answer that
 starts `STAGED — NOT`; an error that only repeats such words (a search for a type
 named `rate_limit`, a transport error that mentions a rate limit) keeps its own text,
-without the wait of a rate limit (0.16.1).
+without the wait of a rate limit (0.16.1). ctx's `409 write_conflict` (GottZ/ctx#547: the
+write met concurrent changes of the rows it needed and wrote nothing) is retried once like a
+rate limit, and a tool answers it to the model as `retryable` (0.17.1).
 
 ## Recall of a checkpoint
 

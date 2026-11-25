@@ -107,8 +107,10 @@ run — additionally carry a machine code in `structuredContent`:
 The codes are the ones the HTTP API uses for the same class:
 `unauthorized`, `invalid_body`, `missing_fields`, `invalid_sensitivity`,
 `invalid_encoding`, `scope_denied`, `size_cap`, `unknown_type`, `reserved_type`,
-`parent_required`, `unknown_parent`, `reserved_category`, `provenance_protected`,
-`reserved_metadata`, `unknown_action`, `constraint`, `edit_mismatch`, `rate_limit`, `internal`.
+`parent_required`, `unknown_parent`, `unknown_supersedes`, `unknown_block`,
+`supersedes_conflict`, `supersedes_not_allowed`, `reserved_category`, `provenance_protected`,
+`reserved_metadata`, `unknown_action`, `constraint`, `edit_mismatch`, `rate_limit`, `write_conflict`, `internal`
+(`TestRejectClassesAreDocumented` holds this list and the one in [api](api.md) to the classes of the handler).
 Other errors (an unknown id, an invalid type filter, a failed lookup) carry text only,
 so a client must not rely on a code being present.
 
@@ -120,7 +122,9 @@ layer's provenance (no card is issued for an update the confirm cannot execute);
 `archive` codes `provenance_protected` and, when it stages,
 `rate_limit`; `confirm` codes the claim verdict and the identity collision of a
 confirmed update; the issue tools code
-`reserved_metadata` and the identity collision (`constraint`, issue #275); the read tools and the guard tools never code. Any tool can
+`reserved_metadata` and the identity collision (`constraint`, issue #275); the read tools and the guard tools never code, except for the one class below. Every write tool
+(`store`, `store_batch`, `update`, `archive`, `guard_resolve`, the issue tools) can answer `write_conflict` for a write that lost to concurrent
+writes of its rows and wrote nothing (issue #547; the same call can be sent again), and any tool can
 additionally answer `internal` for a server fault (below).
 
 **Server faults.** A panic while a tool call runs — in its handler or anywhere below it

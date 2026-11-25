@@ -375,6 +375,9 @@ func TestEmbedExcludedGroupMovesDuringLockWait(t *testing.T) {
 			if !errors.As(err, &pe) || pe.Code != "40001" {
 				t.Errorf("write over eight reassignments ended with %v, want 40001", err)
 			}
+			if !store.IsWriteConflict(err) { // the handlers' 409 write_conflict (issue #547)
+				t.Errorf("the 40001 of the bound is no write conflict: %v", err)
+			}
 		})
 	}
 }

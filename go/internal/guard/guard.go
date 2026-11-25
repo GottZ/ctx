@@ -19,6 +19,7 @@ package guard
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -437,6 +438,7 @@ func RunGuardBatch(ctx context.Context, pool interface {
 	var (
 		blocks    []pendingBlock
 		processed int
+		deferred  int64
 	)
 	err := pgxdb.Write(ctx, pool, pgxdb.Stages{
 		Begin:  "guard: begin tx",
@@ -473,24 +475,30 @@ func RunGuardBatch(ctx context.Context, pool interface {
 			return err
 		}
 
-		for _, block := range blocks {
-			// Check for context cancellation (demand interruption).
-			select {
-			case <-ctx.Done():
-				slog.Info("guard: interrupted by context cancellation", "processed", processed)
-				return ctx.Err()
-			default:
-			}
-
-			if processBlock(ctx, tx, block, set) {
-				processed++
-			}
+		if processed, deferred, err = checkBlocks(ctx, tx, blocks, set, 0); err != nil || deferred == 0 {
+			return err
 		}
-		return nil
+		// Deferred blocks stay at the front of the next pick (issue #547):
+		// as many blocks again, past this run's, so the newer ones get their
+		// verdict while the older wait for what holds them (pickPast).
+		more, err := pickPast(ctx, tx, checkTypes, blocks, len(blocks)-processed, int(deferred))
+		if err != nil || len(more) == 0 {
+			return err
+		}
+		if err := prepareChecks(ctx, tx, more, set, search); err != nil {
+			return err
+		}
+		blocks = append(blocks, more...)
+		n, d, err := checkBlocks(ctx, tx, more, set, processed)
+		processed, deferred = processed+n, deferred+d
+		return err
 	})
 
 	if err != nil {
 		return processed, err
+	}
+	if len(blocks) > 0 {
+		recordDeferrals(deferred) // an empty run leaves last_run to the last run that checked blocks
 	}
 
 	// After the commit, in a statement of its own: see the doc comment. A
@@ -516,12 +524,23 @@ func savepointName(blockID string) string {
 	return "block_" + strings.ReplaceAll(blockID, "-", "_")
 }
 
+// blockOutcome is what processBlock did with one block.
+type blockOutcome int
+
+const (
+	blockFailed    blockOutcome = iota // an error, logged; the block stays pending
+	blockProcessed                     // verdict and audit row written
+	blockDeferred                      // left pending without an error (deferral.go)
+)
+
 // processBlock runs checkBlock + applyDecision + writeAuditLog for a single
-// block inside its own SAVEPOINT. Returns true iff all three steps succeeded.
-// On any error the savepoint is rolled back so the surrounding transaction
-// stays usable for the next block. A verdict that would archive the block
-// first claims both of its blocks (claimArchivePair); an unclaimed verdict
-// rolls back the same way and leaves the block pending, without an error.
+// block inside its own SAVEPOINT. Returns blockProcessed iff all three steps
+// succeeded. On any error the savepoint is rolled back so the surrounding
+// transaction stays usable for the next block. A verdict that would archive
+// the block first claims both of its blocks (claimArchivePair); an unclaimed
+// verdict rolls back the same way and leaves the block pending, without an
+// error, and so does an audit row whose matched neighbour another transaction
+// holds against its key-share lock (neighbourKeyShare): blockDeferred.
 //
 // The per-type policy resolves HERE (by the block's type name) — one policy
 // source for the SQL decision, the persisted metadata and the audit row:
@@ -535,12 +554,12 @@ func savepointName(blockID string) string {
 // decision back too. That is acceptable: the block stays pending and will be
 // picked up on the next guard cycle, where it can succeed cleanly or, if the
 // underlying failure persists, fail again without poisoning the batch.
-func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *blocktype.Set) bool {
+func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *blocktype.Set) blockOutcome {
 	blockID := block.id
 	sp := savepointName(blockID)
 	if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
 		slog.Error("guard: savepoint create failed", "block_id", blockID, "error", err)
-		return false
+		return blockFailed
 	}
 
 	dup, review := set.GuardThresholds(block.typeName)
@@ -550,15 +569,18 @@ func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *block
 	if err != nil {
 		slog.Error("guard: check block failed", "block_id", blockID, "error", err)
 		rollbackToSavepoint(ctx, tx, sp)
-		return false
+		return blockFailed
 	}
 
 	var supersedesTargets []string
 	if archives(result.Decision, mode) {
-		targets, ok := claimArchive(ctx, tx, blockID, result)
+		targets, ok, failed := claimArchive(ctx, tx, blockID, result)
 		if !ok {
 			rollbackToSavepoint(ctx, tx, sp)
-			return false
+			if failed {
+				return blockFailed
+			}
+			return blockDeferred
 		}
 		supersedesTargets = targets
 	}
@@ -566,7 +588,7 @@ func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *block
 	if err := applyDecision(ctx, tx, blockID, result, mode); err != nil {
 		slog.Error("guard: apply decision failed", "block_id", blockID, "error", err)
 		rollbackToSavepoint(ctx, tx, sp)
-		return false
+		return blockFailed
 	}
 
 	// An archived block supersedes nothing: the targets of its supersedes
@@ -575,13 +597,18 @@ func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *block
 	if _, err := store.ReconcileSupersedesTargets(ctx, tx, supersedesTargets, ""); err != nil {
 		slog.Error("guard: supersedes reconcile failed", "block_id", blockID, "error", err)
 		rollbackToSavepoint(ctx, tx, sp)
-		return false
+		return blockFailed
 	}
 
 	if err := writeAuditLog(ctx, tx, blockID, result); err != nil {
-		slog.Error("guard: audit log failed", "block_id", blockID, "error", err)
 		rollbackToSavepoint(ctx, tx, sp)
-		return false
+		if errors.Is(err, errVerdictDeferred) {
+			slog.Info("guard: matched neighbour held by a deleting transaction or gone, block left for the next run",
+				"block_id", blockID, "matched_id", *result.MatchedID)
+			return blockDeferred
+		}
+		slog.Error("guard: audit log failed", "block_id", blockID, "error", err)
+		return blockFailed
 	}
 
 	if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+sp); err != nil {
@@ -595,7 +622,7 @@ func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *block
 		"decision", result.Decision,
 		"similarity", result.Similarity,
 	)
-	return true
+	return blockProcessed
 }
 
 // claimArchive takes what an archive verdict needs before applyDecision
@@ -610,33 +637,34 @@ func processBlock(ctx context.Context, tx pgx.Tx, block pendingBlock, set *block
 // or another transaction holds the guess lock exclusively or a target (a
 // dream batch with a supersedes guess of the scope, an update of a target):
 // the next run decides on what that transaction left, no half verdict stays
-// behind (issue #284).
-func claimArchive(ctx context.Context, tx pgx.Tx, blockID string, result *GuardResult) (targets []string, ok bool) {
+// behind (issue #284). failed=true marks an error (logged) rather than a
+// deferral.
+func claimArchive(ctx context.Context, tx pgx.Tx, blockID string, result *GuardResult) (targets []string, ok, failed bool) {
 	if result.MatchedID != nil {
 		claimed, err := claimArchivePair(ctx, tx, blockID, *result.MatchedID)
 		if err != nil {
 			slog.Error("guard: claim archive failed", "block_id", blockID, "error", err)
-			return nil, false
+			return nil, false, true
 		}
 		if !claimed {
 			// Not an error: the block stays pending and the next run checks
 			// it against what the concurrent decision left.
 			slog.Info("guard: archive verdict meets a concurrent one, block left for the next run",
 				"block_id", blockID, "matched_id", *result.MatchedID)
-			return nil, false
+			return nil, false, false
 		}
 	}
 	targets, held, err := store.TryLockSupersedesSource(ctx, tx, blockID)
 	if err != nil {
 		slog.Error("guard: archive supersedes locks failed", "block_id", blockID, "error", err)
-		return nil, false
+		return nil, false, true
 	}
 	if !held {
 		slog.Info("guard: archive verdict meets a supersedes write of its scope or target, block left for the next run",
 			"block_id", blockID)
-		return nil, false
+		return nil, false, false
 	}
-	return targets, true
+	return targets, true, false
 }
 
 // archives reports whether a verdict archives the checked block: a
@@ -929,7 +957,9 @@ func applyDecision(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 	return nil
 }
 
-// writeAuditLog inserts a guard audit entry into context_write_log.
+// writeAuditLog inserts a guard audit entry into context_write_log. A matched
+// neighbour is key-shared first, without waiting (neighbourKeyShare): a
+// neighbour held against it defers the verdict (errVerdictDeferred).
 func writeAuditLog(ctx context.Context, tx pgx.Tx, blockID string, result *GuardResult) error {
 	// Get block title, category, scope for the audit log.
 	var title, category, scope string
@@ -944,6 +974,9 @@ func writeAuditLog(ctx context.Context, tx pgx.Tx, blockID string, result *Guard
 	matchedIDArg := interface{}(nil)
 	if result.MatchedID != nil && *result.MatchedID != "" {
 		matchedIDArg = *result.MatchedID
+		if err := neighbourKeyShare(ctx, tx, *result.MatchedID); err != nil {
+			return err
+		}
 	}
 
 	_, err = tx.Exec(ctx,

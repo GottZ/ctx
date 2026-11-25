@@ -107,6 +107,9 @@ func mcpGuardResolveHandler(cfg MCPConfig) mcp.ToolHandlerFor[guardResolveInput,
 			// Every id skipped wrote nothing: the line keeps none.
 			noteToolWrite(ctx, err)
 		}
+		if rej := writeConflictReject(err); rej != nil {
+			return errResultReject(rej), nil, nil // lost to concurrent writes, nothing resolved (issue #547)
+		}
 		if err != nil {
 			logRequestError(ctx, "mcp: guard_resolve error", "error", err, "write_outcome", writeOutcome(err))
 			return errResult("guard_resolve failed: internal error"), nil, nil

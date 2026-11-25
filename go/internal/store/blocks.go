@@ -1496,10 +1496,16 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 		grantedBlockIDs = []string{} // deterministic '{}'::uuid[], never NULL
 	}
 	if IsFullUUID(idOrPrefix) {
+		if !idIsUUIDText(idOrPrefix) {
+			return "", nil, nil // names no block (issue #547)
+		}
 		return idOrPrefix, nil, nil
 	}
 	if len(idOrPrefix) < MinIDPrefixLen {
-		return "", nil, fmt.Errorf("store: id prefix must be at least %d characters (got %d)", MinIDPrefixLen, len(idOrPrefix))
+		return "", nil, fmt.Errorf("%w (got %d)", ErrIDPrefixTooShort, len(idOrPrefix))
+	}
+	if idPrefixMatchesNothing(idOrPrefix) {
+		return "", nil, nil // no LIKE wildcard, no unsendable text (issue #547)
 	}
 
 	// Cap candidates at 11: anything ≥10 is too ambiguous to surface usefully,
@@ -1761,6 +1767,10 @@ type UpdateBlockData struct {
 	// (who/when/from→to) and merged into metadata.sensitivity_audit. Never
 	// client-supplied (json:"-").
 	SensitivityAudit map[string]any `json:"-"`
+	// SensitivityDowngraded, when set, is called once after the update
+	// committed a confirmed downgrade, with the levels decided under the row
+	// lock (sensitivityPlan, issue #547) — the handler's WARN line.
+	SensitivityDowngraded func(from, to backends.Sensitivity) `json:"-"`
 	// Edits (issue #406) change the content by text replacement instead of
 	// replacing it: applied in order, all or none, to the content of the row
 	// UpdateBlock holds (ApplyContentEdits). Mutually exclusive with Content
@@ -2023,6 +2033,9 @@ type blockUpdate struct {
 	// edits is nil unless the update carries edits (issue #406); the content
 	// they produce fills args[contentArg] once the row is held.
 	edits *contentEditPlan
+	// sens is nil unless the update names a sensitivity; its downgrade guard
+	// and audit entry are decided once the row is held (issue #547).
+	sens *sensitivityPlan
 	// moveScopes is nil unless the update names a scope (a possible scope
 	// move); then it carries the caller's write scopes.
 	moveScopes []string
@@ -2088,8 +2101,9 @@ func prepareUpdate(id string, data UpdateBlockData, writeScopes []string) (block
 		argIdx++
 	}
 	var metaExpr string
+	var auditArg int
 	before := len(args)
-	metaExpr, args = updateMetadataExpr(data, u.contentSent, args)
+	metaExpr, args, auditArg = updateMetadataExpr(data, u.contentSent, args)
 	argIdx += len(args) - before
 	if metaExpr != "" {
 		u.assign = append(u.assign, updateAssignment{"metadata", metaExpr})
@@ -2100,7 +2114,10 @@ func prepareUpdate(id string, data UpdateBlockData, writeScopes []string) (block
 		argIdx++
 	}
 	if data.Sensitivity != nil {
-		// Handler has validated the level and enforced the downgrade confirm.
+		// Handler has validated the level; the downgrade confirm is decided
+		// under the row lock (sensitivityPlan, issue #547).
+		u.sens = &sensitivityPlan{to: backends.Sensitivity(*data.Sensitivity), confirm: data.ConfirmSensitivityDowngrade,
+			proposal: data.SensitivityAudit, arg: auditArg, writeScopes: writeScopes, report: data.SensitivityDowngraded}
 		u.assign = append(u.assign,
 			updateAssignment{"sensitivity", fmt.Sprintf("$%d", argIdx)},
 			updateAssignment{"sensitivity_source", "'manual'"})
@@ -2198,6 +2215,7 @@ func prepareUpdate(id string, data UpdateBlockData, writeScopes []string) (block
 // for the afterwork (issue #434); for edits, the ones the held row resolved.
 // As in execHeld, the handover names the returned content.
 func (u blockUpdate) handOver(b *Block) {
+	u.sens.reportDowngrade(u.args) // after the commit, as handOver itself (issue #547)
 	if !u.contentSent {
 		return
 	}
@@ -2269,7 +2287,8 @@ func updateBlockMissReason(ctx context.Context, pool *pgxpool.Pool, id string, w
 //
 // Edits (issue #406): the row is locked and read, and the content the edits
 // produce fills its argument slot, after the supersedes locks of a scope move
-// (which lock the block first) and before the statement.
+// (which lock the block first) and before the statement; a sensitivity is
+// decided on the locked row after them (sensitivityPlan, issue #547).
 func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, u blockUpdate, budget *WriteBudget) (found, needsReEmbed bool, err error) {
 	var swept int
 	scopeMove := u.moveScopes != nil
@@ -2287,6 +2306,9 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, u blockUp
 		}
 		if ok, err := u.edits.resolve(ctx, tx, u.id, u.args); !ok {
 			return cmp.Or(err, pgxdb.ErrRollback) // a miss writes nothing, as below
+		}
+		if ok, err := u.sens.resolve(ctx, tx, u.id, u.args); !ok {
+			return cmp.Or(err, pgxdb.ErrRollback)
 		}
 		charged, err := u.charge(ctx, tx, budget)
 		if err != nil {

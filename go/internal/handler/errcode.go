@@ -130,6 +130,14 @@ var (
 	// its number of matches. The remedy is to re-read the block and send an
 	// old that occurs once.
 	classEditMismatch = rejectClass{http.StatusConflict, "edit_mismatch"}
+	// classWriteConflict — the write lost to concurrent writes of the same
+	// rows and wrote nothing (issue #547): a deadlock (40P01) or serialization
+	// failure (40001) PostgreSQL ended its transaction with, or the bounded
+	// re-runs of a write whose block kept changing scope before its lock
+	// (store.ErrWriteConflict). 409 like the other state conflicts, but the
+	// one class whose remedy is to send the SAME write again: nothing about
+	// the payload or the row refuses it. The only class that says so.
+	classWriteConflict = rejectClass{http.StatusConflict, "write_conflict"}
 	// classConstraint — the payload violates a DB integrity constraint. The
 	// only class whose status varies per case (409 uniqueness, else 422), so
 	// its call sites use rejectStatus.

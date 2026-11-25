@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/google/uuid"
@@ -281,16 +282,18 @@ func parentLinkable(ctx context.Context, q pgxdb.Rower, lockClause, parentID, ch
 }
 
 // parentCycleSQL answers whether the block $2 is $1 or one of $1's ancestors
-// through parent_id: hanging $2 under $1 would then close a cycle. UNION (not
-// UNION ALL) drops an id already walked, so an existing cycle above $1 ends
-// the walk instead of looping; each step is a primary-key probe, so the cost
-// is the depth of $1's chain. It runs in the linking transaction and sees the
-// links the transaction set before it (the earlier items of a batch).
-const parentCycleSQL = `WITH RECURSIVE up(id) AS (
-		SELECT $1::uuid
+// through parent_id — hanging $2 under $1 would then close a cycle — and names
+// the scopes of $1 and its ancestors. UNION (not UNION ALL) drops a row
+// already walked, so an existing cycle above $1 ends the walk instead of
+// looping; each step is a primary-key probe, so the cost is the depth of $1's
+// chain. It runs in the linking transaction and sees the links the
+// transaction set before it (the earlier items of a batch).
+const parentCycleSQL = `WITH RECURSIVE up(id, scope, parent_id) AS (
+		SELECT id, scope, parent_id FROM context_blocks WHERE id = $1::uuid
 		UNION
-		SELECT b.parent_id FROM context_blocks b JOIN up ON b.id = up.id WHERE b.parent_id IS NOT NULL)
-	SELECT EXISTS (SELECT 1 FROM up WHERE id = $2::uuid)`
+		SELECT b.id, b.scope, b.parent_id FROM context_blocks b JOIN up ON b.id = up.parent_id)
+	SELECT EXISTS (SELECT 1 FROM up WHERE id = $2::uuid) OR $1::uuid = $2::uuid,
+	       ARRAY(SELECT DISTINCT scope FROM up ORDER BY 1)`
 
 // LinkBlockParent hangs childID under parentID in the caller's transaction,
 // the parent check of /api/store and of a block batch's parents (issue #211):
@@ -301,7 +304,18 @@ const parentCycleSQL = `WITH RECURSIVE up(id) AS (
 // ONE structural parent (K3): a tree, which ParentLinkable already kept free
 // of the one-block cycle (a block as its own parent) and a two-step write
 // could close with two (issue #211).
-func LinkBlockParent(ctx context.Context, tx pgx.Tx, childID, parentID, scope string) error {
+//
+// The walk is serialized against the other parent writes of every scope it
+// passes through (issue #547): held names the scopes whose supersedes locks
+// the transaction holds — every parent write takes the lock of its child's
+// scope, a scope move the lock of the scope it moves from. A chain that
+// crosses into a scope the transaction does not hold (a scope move keeps
+// parent_id) could be changed there by a write the walk cannot see — two such
+// writes, each in its own scope, closed a cycle together — so LinkBlockParent
+// then asks for the transaction to run again with those locks taken up front
+// (scopesToLockError, writeSupersedesSourceScopes) and decides nothing on
+// what it read. A chain within the held scopes adds no statement.
+func LinkBlockParent(ctx context.Context, tx pgx.Tx, childID, parentID, scope string, held []string) error {
 	parsed, err := uuid.Parse(parentID)
 	if err != nil || !IsFullUUID(parentID) {
 		return ErrLinkScopeViolation
@@ -311,8 +325,18 @@ func LinkBlockParent(ctx context.Context, tx pgx.Tx, childID, parentID, scope st
 	// block and links as such.
 	parentID = parsed.String()
 	var cycle bool
-	if err = tx.QueryRow(ctx, parentCycleSQL, parentID, childID).Scan(&cycle); err != nil {
+	var chain []string
+	if err = tx.QueryRow(ctx, parentCycleSQL, parentID, childID).Scan(&cycle, &chain); err != nil {
 		return fmt.Errorf("structural link: parent cycle check: %w", err)
+	}
+	var missing []string
+	for _, sc := range chain {
+		if !slices.Contains(held, sc) {
+			missing = append(missing, sc)
+		}
+	}
+	if len(missing) > 0 {
+		return &scopesToLockError{scopes: missing}
 	}
 	if cycle {
 		return ErrLinkScopeViolation

@@ -57,3 +57,11 @@ func AbsentOrMalformed(err error) bool {
 func UniqueViolation(err error) bool {
 	return hasCode(err, "23505")
 }
+
+// SerializationConflict reports a deadlock (40P01) or a serialization failure
+// (40001): PostgreSQL ended a statement because concurrent transactions held
+// or changed what it needed, and rolled back the transaction it ran in.
+// Running the same transaction again normally succeeds.
+func SerializationConflict(err error) bool {
+	return hasCode(err, "40P01") || hasCode(err, "40001")
+}

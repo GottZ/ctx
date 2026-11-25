@@ -219,6 +219,12 @@ func mcpIssueError(ctx context.Context, tool string, err error) *mcp.CallToolRes
 	if rej := identityTakenReject(err); rej != nil {
 		return errResultReject(rej)
 	}
+	// Issue #547: a write that lost to concurrent writes (a deadlock of the
+	// comment's sequence lock and its issue row) is the retryable
+	// write_conflict, as on the REST issue writes.
+	if rej := writeConflictReject(err); rej != nil {
+		return errResultReject(rej)
+	}
 	switch {
 	case errors.Is(err, errIssueRegistryUnavailable):
 		// Pre-store class from the core (issues_core.go): no policy data wired.

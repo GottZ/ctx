@@ -49,7 +49,7 @@ from .client import (
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.17.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
+PLUGIN_VERSION = "0.17.1"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
 UPSTREAM_REF = "GottZ/ctx integrations/hermes/plugin/ctx_checkpoint 0.4.3 @ 38fdb74 (MPL-2.0)"
 
 CATEGORY_CHECKPOINT = "compaction-checkpoints"
