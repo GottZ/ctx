@@ -162,39 +162,3 @@ func pruneTenantKeys(ctx context.Context, pool *pgxpool.Pool, tenantID string, s
 		return nil
 	})
 }
-
-// pruneTenantModelConsumers is step 7b (see PruneTenant, "MODEL CONSUMERS"):
-// the tenant's consumer rows FOR UPDATE, their grants, the gateway limits,
-// their model keys, the consumers.
-func pruneTenantModelConsumers(ctx context.Context, tx pgx.Tx, tenantID string) error {
-	// Consumer rows first, keys after: the lock order of every consumer
-	// writer (RotateKey/UpdateConsumer lock the consumer FOR UPDATE, then
-	// write its keys; so does the deactivation trigger). Deleting the keys
-	// first would hold them while waiting for a consumer such a writer
-	// holds — a deadlock (40P01) that rolls this step back.
-	if _, err := tx.Exec(ctx,
-		`SELECT 1 FROM context_model_consumers WHERE tenant_id = $1::uuid ORDER BY id FOR UPDATE`, tenantID); err != nil {
-		return fmt.Errorf("model consumers lock: %w", err)
-	}
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM context_model_consumer_grants WHERE consumer_id IN (SELECT id FROM context_model_consumers WHERE tenant_id = $1::uuid)`,
-		tenantID); err != nil {
-		return fmt.Errorf("model grants: %w", err)
-	}
-	// W06-15: the limits rows of the tenant and its consumers, here in
-	// the stamped transaction and before the consumers — a CASCADE
-	// would write their audit rows without the tenant (consumer gone)
-	// or without via (tenant row, step 8, outside this transaction).
-	if err := pruneGatewayLimits(ctx, tx, tenantID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM context_model_keys WHERE consumer_id IN (SELECT id FROM context_model_consumers WHERE tenant_id = $1::uuid)`,
-		tenantID); err != nil {
-		return fmt.Errorf("model keys: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM context_model_consumers WHERE tenant_id = $1::uuid`, tenantID); err != nil {
-		return fmt.Errorf("model consumers: %w", err)
-	}
-	return nil
-}
