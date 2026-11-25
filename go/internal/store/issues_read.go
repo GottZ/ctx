@@ -289,10 +289,10 @@ func issueSearchPlansEachTime(ctx context.Context, pool *pgxpool.Pool, sort stri
 		return true, nil
 	}
 	ix, err := listIndexReady(ctx, pool)
-	if err != nil {
+	if err = indexProbeFailed(ctx, err, "issue search"); err != nil {
 		return false, err
 	}
-	return ix.scope, nil
+	return ix.scope, nil // false after a probe that failed: the pool's default mode
 }
 
 // ListIssuesByCreated returns one keyset page ordered by the IMMUTABLE created_at

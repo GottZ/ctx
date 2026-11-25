@@ -458,8 +458,8 @@ func TestRangeReadsFullGraphSeed(t *testing.T) {
 			case c.planned && (merge || len(st[i].local) != 0 || st[i].mode != pgx.QueryExecModeCacheDescribe):
 				t.Errorf("%s: the seed ran the merge form, with settings %v or in mode %v, want the planned form planned on every execution", c.name, st[i].local, st[i].mode)
 			case !c.planned && (!merge || st[i].local["enable_sort"] != "off" || st[i].local["enable_incremental_sort"] == "off" ||
-				st[i].local["plan_cache_mode"] != "force_generic_plan" || st[i].mode != pgx.QueryExecModeCacheStatement):
-				t.Errorf("%s: the seed ran without the merge form, with settings %v or in mode %v, want full sorts off on the generic plan of a prepared statement", c.name, st[i].local, st[i].mode)
+				st[i].local["plan_cache_mode"] != "force_generic_plan" || st[i].mode != pgx.QueryExecModeExec):
+				t.Errorf("%s: the seed ran without the merge form, with settings %v or in mode %v, want full sorts off on the generic plan of an unnamed statement", c.name, st[i].local, st[i].mode)
 			}
 		}
 		for _, p := range rrPlans {

@@ -13,11 +13,14 @@ import (
 // the connection's description cache; a connection string can turn that cache
 // off (description_cache_capacity=0, through the sslmode setting the DSN
 // carries as written or a libpq service file), and pgx then refuses the mode
-// on every call. Such a pool gets QueryExecModeDescribeExec: the same unnamed
-// statement, described and executed in two round trips.
+// on every call. Such a pool gets QueryExecModeExec: the same unnamed
+// statement in one round trip, its parameters sent as text with the types pgx
+// derives from the Go values. (QueryExecModeDescribeExec describes and
+// executes in two round trips, which on a pool outside a transaction may
+// reach two server connections behind a connection pooler.)
 func CustomPlanMode(pool *pgxpool.Pool) pgx.QueryExecMode {
 	if pool.Config().ConnConfig.DescriptionCacheCapacity > 0 {
 		return pgx.QueryExecModeCacheDescribe
 	}
-	return pgx.QueryExecModeDescribeExec
+	return pgx.QueryExecModeExec
 }

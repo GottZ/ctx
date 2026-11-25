@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -60,4 +62,27 @@ func fullGraphSeedIndexReady(ctx context.Context, pool *pgxpool.Pool) (bool, err
 		fullGraphSeedIndexReadings.Unlock()
 	}
 	return ready, nil
+}
+
+// indexProbeLogged is when indexProbeFailed last wrote its line (unix nanos).
+var indexProbeLogged atomic.Int64
+
+// indexProbeFailed decides what a failed index probe of a read means (issue
+// #536, review of the pull request): the probes of the issue search and of
+// FullGraph's seed only choose between two forms of a statement that return
+// the same rows, so a probe that fails for a reason of its own — a role that
+// may not read pg_index, a timeout on the catalog — does not fail the read:
+// nil, and the caller takes the form that needs no index reading (the
+// statement before #536). The line is written once per
+// listIndexProbeInterval. A cancelled or expired request stays an error; err
+// nil stays nil.
+func indexProbeFailed(ctx context.Context, err error, what string) error {
+	if err == nil || ctx.Err() != nil {
+		return err
+	}
+	now := time.Now().UnixNano()
+	if last := indexProbeLogged.Load(); now-last >= int64(listIndexProbeInterval) && indexProbeLogged.CompareAndSwap(last, now) {
+		slog.Warn("store: index probe failed; the read goes on with the form that needs no index reading", "read", what, "error", err)
+	}
+	return nil
 }

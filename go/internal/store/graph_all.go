@@ -151,20 +151,23 @@ func fullGraphSeedMergeSQL(scopes int, after, before bool) string {
 // cheap — at random_page_cost 4 an arm of a scope of half the corpus, older
 // than the other half, walked the other half (4 895 buffers against 77 at
 // 200 000 rows). The generic plan is the same for every reader of as many
-// scopes, built once per connection (fullGraphSeedMergeMode).
+// scopes, built on every execution (fullGraphSeedMergeMode).
 const fullGraphSeedMergePlan = "SET LOCAL enable_sort = off; SET LOCAL plan_cache_mode = force_generic_plan"
 
-// fullGraphSeedMergeMode sends fullGraphSeedMergeSQL as a prepared
-// statement, whose generic plan the connection keeps; a pool without a
-// statement cache sends it unnamed (planned generic on every execution).
-// Explicit, so a pool whose default mode interpolates the parameters as
-// literals still plans the statement without the reader's values.
-func fullGraphSeedMergeMode(pool *pgxpool.Pool) pgx.QueryExecMode {
-	if pool.Config().ConnConfig.StatementCacheCapacity > 0 {
-		return pgx.QueryExecModeCacheStatement
-	}
-	return pgx.QueryExecModeDescribeExec
-}
+// fullGraphSeedMergeMode sends fullGraphSeedMergeSQL unnamed, in the
+// extended protocol and in one round trip (pgx.QueryExecModeExec), whatever
+// the pool's default mode: under force_generic_plan PostgreSQL builds the
+// generic plan of an unnamed statement on every execution — the same plan,
+// the same buffers as a prepared statement's, for 1.1 ms more per call at one
+// scope and 9.3 ms at 32 (median of 200, review of the pull request). A
+// prepared statement kept that plan on the connection instead: the text
+// differs per number of scopes and per time window, a plan of 17 to 32 arms
+// holds about 1 MB, and a connection that had served the 128 texts held
+// 91.7 MB of plans (0.4 MB before #536) — per connection of every instance.
+// It also named a statement on a pool whose mode was chosen to name none.
+// Never the simple protocol: that would interpolate the reader's values and
+// plan with them.
+const fullGraphSeedMergeMode = pgx.QueryExecModeExec
 
 // fullGraphSeedPlannedSQL is FullGraph's flat seed for a reader of more than
 // fullGraphSeedMergeScopes scopes, or with a category filter: the statement
@@ -227,14 +230,14 @@ func fullGraphSeed(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readSco
 	merge := len(scopes) <= fullGraphSeedMergeScopes && len(p.Categories) == 0
 	if merge {
 		ready, err := fullGraphSeedIndexReady(ctx, pool)
-		if err != nil {
+		if err = indexProbeFailed(ctx, err, "graph seed"); err != nil {
 			return nil, err
 		}
-		merge = ready
+		merge = ready // false after a probe that failed: the planned form
 	}
 	mode := CustomPlanMode(pool)
 	if merge {
-		mode = fullGraphSeedMergeMode(pool)
+		mode = fullGraphSeedMergeMode
 	}
 	args := []any{
 		mode,

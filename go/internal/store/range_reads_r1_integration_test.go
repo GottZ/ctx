@@ -37,6 +37,7 @@ type r1ConnState struct {
 	pid                                uint32
 	txStatus                           byte // 'T' inside a transaction block, 'I' outside
 	sort, incSort, indexScan, readOnly string
+	txStart                            string // transaction_timestamp(): one value per transaction
 }
 
 // r1ConnProbe is a tracer that reads r1ConnState before every statement
@@ -57,8 +58,8 @@ func (p *r1ConnProbe) TraceQueryStart(ctx context.Context, conn *pgx.Conn, d pgx
 		st.mode, _ = d.Args[0].(pgx.QueryExecMode)
 	}
 	if err := conn.QueryRow(ctx, `SELECT current_setting('enable_sort'), current_setting('enable_incremental_sort'),
-		current_setting('enable_indexscan'), current_setting('transaction_read_only')`, pgx.QueryExecModeSimpleProtocol).
-		Scan(&st.sort, &st.incSort, &st.indexScan, &st.readOnly); err != nil {
+		current_setting('enable_indexscan'), current_setting('transaction_read_only'), transaction_timestamp()::text`, pgx.QueryExecModeSimpleProtocol).
+		Scan(&st.sort, &st.incSort, &st.indexScan, &st.readOnly, &st.txStart); err != nil {
 		p.t.Errorf("probe before %q: %v", d.SQL, err)
 	}
 	p.mu.Lock()
@@ -178,8 +179,9 @@ func TestRangeReadsR1ListsReadInTheirReadOnlyTransaction(t *testing.T) {
 		for _, st := range seen {
 			first := strings.Fields(st.sql)
 			label := fmt.Sprintf("%s: the statement %q", c.name, strings.Join(first[:min(len(first), 6)], " "))
-			if st.pid != seen[0].pid {
-				t.Errorf("%s ran on backend %d, the call's first statement on %d: not in the call's transaction", label, st.pid, seen[0].pid)
+			if st.pid != seen[0].pid || st.txStart != seen[0].txStart {
+				t.Errorf("%s ran on backend %d in the transaction begun %s, the call's first statement on %d in the one begun %s: not in the call's transaction",
+					label, st.pid, st.txStart, seen[0].pid, seen[0].txStart)
 			}
 			if st.txStatus != 'T' {
 				t.Errorf("%s ran outside a transaction block (status %q)", label, st.txStatus)

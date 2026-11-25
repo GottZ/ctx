@@ -290,8 +290,15 @@ func r1Measure(p *rrPlanners, db *pgxpool.Pool, rpc string, local map[string]str
 func r1Sent(p *rrPlanners, db *pgxpool.Pool, rpc string, sent []rrStmt, hists int, hist func(i int, args []any) []any) []r1Plan {
 	out := make([]r1Plan, hists)
 	for _, st := range sent {
-		switch st.mode {
-		case pgx.QueryExecModeCacheDescribe, pgx.QueryExecModeDescribeExec:
+		mode := st.mode
+		if mode == pgx.QueryExecModeExec && st.local["plan_cache_mode"] == "force_generic_plan" {
+			// An unnamed statement under force_generic_plan (FullGraph's merge
+			// seed): the generic plan on every execution, which the measure
+			// reads as a prepared statement's under the same setting.
+			mode = pgx.QueryExecModeCacheStatement
+		}
+		switch mode {
+		case pgx.QueryExecModeCacheDescribe, pgx.QueryExecModeDescribeExec, pgx.QueryExecModeExec:
 			c := r1Measure(p, db, rpc, st.local, "custom", st.sql, nil, st.args)
 			for i := range out {
 				out[i] = out[i].plus(c)
@@ -421,6 +428,8 @@ func r1ModeName(sent []rrStmt) string {
 			m = "cache-describe"
 		case pgx.QueryExecModeDescribeExec:
 			m = "describe-exec"
+		case pgx.QueryExecModeExec:
+			m = "exec"
 		}
 		if len(st.local) > 0 {
 			keys := make([]string, 0, len(st.local))
