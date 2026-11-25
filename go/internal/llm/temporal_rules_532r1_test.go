@@ -155,8 +155,10 @@ func TestRules_AParticipleOfAnArrangementMakesNoPairOfReports(t *testing.T) {
 		"Am Freitag abgesperrt, am Samstag umgeleitet?":  "2026-11-27/future 2026-11-28/future",
 		"Am Donnerstag eingetaktet, am Freitag fixiert?": "2026-11-26/future 2026-11-27/future",
 		// counter-cases: two reports of acts
-		"Am Montag gemerged, am Dienstag zurückgerollt – warum?": "2026-11-16/past 2026-11-17/past",
-		"Am Freitag gekauft, am Samstag zurückgeschickt?":        "2026-11-20/past 2026-11-21/past",
+		"Am Montag gemerged, am Dienstag zurückgerollt – warum?":         "2026-11-16/past 2026-11-17/past",
+		"Am Freitag gekauft, am Samstag zurückgeschickt?":                "2026-11-20/past 2026-11-21/past",
+		"Am Freitag angefragt, am Montag beantwortet?":                   "2026-11-20/past 2026-11-16/past",
+		"Am Freitag den Traffic umgeleitet, am Montag zurückgeschaltet?": "2026-11-20/past 2026-11-16/past",
 	})
 }
 

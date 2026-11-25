@@ -2884,7 +2884,7 @@ var stateParticiples = toWordSet("geschlossen", "geöffnet", "gesperrt", "freige
 	"eingefroren", "genehmigt", "organisiert", "freigeschaltet", "gedrosselt", "angesagt", "zugesagt", "bestätigt",
 	"anberaumt", "festgelegt", "festgesetzt", "verabredet", "avisiert", "anvisiert", "eingetaktet", "fixiert",
 	"ausgemacht", "abgesprochen", "abgestimmt", "einberufen", "disponiert", "verplant", "geblockt",
-	"ausgeschrieben", "zugeteilt", "angefragt", "abgesperrt", "umgeleitet", "vermietet", "belegt", "verriegelt")
+	"ausgeschrieben", "zugeteilt", "abgesperrt", "vermietet", "belegt", "verriegelt")
 
 // reasonWords ask for a reason.
 var reasonWords = toWordSet("warum", "wieso", "weshalb", "weswegen", "why")
