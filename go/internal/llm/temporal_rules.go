@@ -539,7 +539,8 @@ func (c *clauseWords) embeddedClauses(s, e int) {
 		switch {
 		case englishRelativeOpeners[w]:
 			relative = i
-		case relative >= 0 && i >= relative+3 && englishMainAux[w] && !englishSubjects[c.words[i-1]]:
+		case relative >= 0 && i >= relative+3 && englishMainAux[w] && !englishSubjects[c.words[i-1]] &&
+			(w != "be" || c.words[i-1] != "to" && !englishFiniteWords[c.words[i-1]]):
 			// The auxiliary of the main clause behind a relative clause
 			// without a comma ends it: "Which PRs that we merged on Monday
 			// will ship on Friday?" (issue #532).
@@ -574,7 +575,8 @@ func (c clauseWords) reducedRelative(i int) bool {
 // behind one and not behind a subject, are the verb of the clause the relative
 // clause stands in (embeddedClauses) — "be" of a modal before the relative
 // clause as well ("Will the service that froze on Tuesday be restarted on
-// Thursday?", issue #532).
+// Thursday?", issue #532), not one behind "to" or an auxiliary of the
+// relative clause ("the tickets that have to be closed on Monday").
 var (
 	englishRelativeOpeners = toWordSet("that", "which", "who")
 	englishMainAux         = toWordSet("will", "would", "shall", "should", "can", "could", "may", "might", "must",

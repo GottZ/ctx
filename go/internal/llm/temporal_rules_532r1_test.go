@@ -91,6 +91,9 @@ func TestRules_AnEnglishPresentGivesItsClauseATenseOfItsOwn(t *testing.T) {
 		"Anna left on Monday; her successor starts on Friday.":                               "2026-11-16/past 2026-11-27/future",
 		"Billing goes live on Friday; the old system died on Tuesday.":                       "2026-11-27/future 2026-11-17/past",
 		"Will the service that froze on Tuesday be restarted on Thursday?":                   "2026-11-17/past 2026-11-26/future",
+		"The tickets that have to be closed on Monday were filed on Friday?":                 "2026-11-23/future 2026-11-20/past",
+		"Which PRs that need to be merged on Friday were opened on Monday?":                  "2026-11-27/future 2026-11-16/past",
+		"What broke on Friday, and the alerts on Saturday?":                                  "2026-11-20/past 2026-11-21/past",
 		"The build broke on Monday; everyone meets on Friday.":                               "2026-11-16/past 2026-11-27/future",
 		// counter-cases: a clause without a verb of its own
 		"Builds were red on Thursday, check runs on Friday as well?":               "2026-11-19/past 2026-11-20/past",
