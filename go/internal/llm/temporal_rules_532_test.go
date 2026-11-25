@@ -1,6 +1,9 @@
 package llm
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The questions below are asked on Sunday 2026-11-22 (now517) unless a test
 // names another day; the expectations are written as check517 reads them.
@@ -170,6 +173,21 @@ func TestRules_AnEnglishSimplePastBehindANoun(t *testing.T) {
 		"Is the left panel fixed on Monday?":       "2026-11-23/future",
 		"Let's cut the release on Thursday":        "2026-11-26/future",
 	})
+	// A finite verb behind the form makes it the participle of its subject:
+	// the coming Monday stays the coming one (finiteAfter).
+	r := NormalizeTemporalRules("Tickets closed on Friday will be reopened on Monday", now517)
+	monday := false
+	for _, d := range fmt517Dates(r) {
+		monday = monday || d == "2026-11-23/future"
+	}
+	if !monday {
+		t.Errorf("Tickets closed on Friday will be reopened on Monday: %s, want the coming Monday among the dates", fmt517(r))
+	}
+}
+
+// fmt517Dates is fmt517 of r split into its dates.
+func fmt517Dates(r *TemporalResult) []string {
+	return strings.Fields(fmt517(r))
 }
 
 // TestRules_TwoReportsOfParticiplesAreAPerfekt (issue #532, point 4, the
