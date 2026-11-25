@@ -67,6 +67,10 @@ type clauseWords struct {
 	// place decides (englishParticiple, englishIrregularPast); without one
 	// barePasts and englishPastIn read nothing (issue #532).
 	pastForms bool
+	// titled: every word inside a clause is written with its capital
+	// ("Who Is Playing Tonight?"), so that a capital names nothing
+	// (nameWordAt, issue #532).
+	titled bool
 	// closing caches the table of closingParticiples, filled once per
 	// question by the first clause that needs it (issue #506).
 	closing *[]int
@@ -155,6 +159,7 @@ func clauseTokens(query string) clauseWords {
 	if 2*n > m {
 		clear(c.caps)
 	}
+	c.titled = m > 0 && n == m
 	c.colloquial()
 	// The spoken forms colloquial maps are words of the language as well
 	// ("gab's" counts as "gab").
@@ -2376,10 +2381,10 @@ var (
 // forms are German, and most are an English word as well ("such", "sage",
 // "check", "hole", "leg", "lies", "sag") or, written with their capital, a
 // German noun ("Suche", "Frage", "Schau", "Stelle", "Trage", "Rufe"). So a
-// form counts in a sentence that is not English, not written with its
+// form counts in a clause that is not English, not written with its
 // capital inside a sentence ("…, Suche am Montag auch kaputt?"), not in "sage
 // und schreibe", and not where another verb of its clause is the finite one
-// ("Check am Montag ergab nichts"); in an English sentence only "bring" and
+// ("Check am Montag ergab nichts"); in an English clause only "bring" and
 // "check" do, at the start of the question or before their object ("Check
 // on Friday whether …", "…, check the logs on Monday").
 func (c clauseWords) imperativeAt(s, e int) bool {
@@ -2390,10 +2395,16 @@ func (c clauseWords) imperativeAt(s, e int) bool {
 	if w == "sage" && s+2 < e && c.words[s+1] == "und" && c.words[s+2] == "schreibe" {
 		return false
 	}
-	if ss, se := c.sentenceOf(s); c.sentenceLanguage(ss, se) == langEnglish {
+	// The language of the clause, or of the question where the clause has
+	// no word of one: read per clause, a sentence of many such clauses is
+	// read in time linear in its length.
+	lang := c.languageOf(s, e)
+	if lang == langMixed {
+		lang = c.lang
+	}
+	if lang == langEnglish {
 		return englishImperatives[w] && (s == 0 || s+1 < e && imperativeObjects[c.words[s+1]])
 	}
-	scanned(e - s)
 	for i := s + 1; i < e; i++ {
 		if x := c.words[i]; germanFiniteVerb(x) || strongPastWord(x) {
 			return false
@@ -4243,21 +4254,11 @@ var nameGenus = toWordSet("band", "show", "album", "song", "film", "movie", "ser
 
 // nameWordAt reports whether word i of c, written with its capital inside a
 // sentence, is a word of a name (dayKeywordPartAt): beside another word
-// written so inside the sentence, or behind a word of nameGenus. A sentence
-// that writes all its words with their capital ("Who Is Playing Tonight?")
-// gives no such sign.
+// written so inside the sentence, or behind a word of nameGenus. A question
+// that writes all its words with their capital ("Who Is Playing Tonight?",
+// titled) gives no such sign.
 func (c clauseWords) nameWordAt(i int) bool {
-	if !c.capInSentence(i) || !c.capInSentence(i-1) && !c.capInSentence(i+1) && !nameGenus[c.words[i-1]] {
-		return false
-	}
-	ss, se := c.sentenceOf(i)
-	scanned(se - ss)
-	for k := ss; k < se; k++ {
-		if !c.written[k] {
-			return true
-		}
-	}
-	return false
+	return !c.titled && c.capInSentence(i) && (c.capInSentence(i-1) || c.capInSentence(i+1) || nameGenus[c.words[i-1]])
 }
 
 // capInSentence reports whether word i of c is written with its capital and

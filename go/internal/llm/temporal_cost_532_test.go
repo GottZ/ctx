@@ -35,6 +35,16 @@ var shapes532 = []struct {
 	{"imperatives", func(n int) string {
 		return wholeUnits("Erinnere mich am Freitag an den Bug, den wir am Montag hatten, ", n)
 	}},
+	// The review round: imperatives and their nouns opening the clauses of
+	// one sentence, English presents and "that" beside a past, names with
+	// "Tonight", homographs of the English past.
+	{"imperative-clauses", func(n int) string {
+		return wholeUnits("am Montag brach es, schau am Freitag nach, Suche am Montag ", n)
+	}},
+	{"english-present", func(n int) string { return wholeUnits("the cluster died on Monday, the vendor comes on Tuesday, ", n) }},
+	{"that-clauses", func(n int) string { return wholeUnits("we demo the feature that we built on Monday ", n) }},
+	{"tonight-names", func(n int) string { return wholeUnits("die Band Tonight Alive spielt Tonight Tonight und ", n) }},
+	{"homographs", func(n int) string { return wholeUnits("Drew presents on Friday, the pager woke Anna on Monday, ", n) }},
 }
 
 // TestRules_CostIsLinearInTheShapesOfIssue532 counts the work of the rules
