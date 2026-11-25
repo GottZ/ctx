@@ -64,3 +64,29 @@ func TestRules_AnImperativeOpensItsClauseOnlyWhereItCanBeOne(t *testing.T) {
 		"Check on Friday whether the job that failed on Monday was rerun": "2026-11-27/future 2026-11-16/past",
 	})
 }
+
+// TestRules_AnEnglishPresentGivesItsClauseATenseOfItsOwn (issue #532,
+// review round): a clause whose verb is an English present of the third
+// person behind its subject ("the vendor comes", "her successor starts",
+// "Billing goes live") has a verb of its own and keeps its tense rather than
+// taking the past a simple past elsewhere gives the question; "that" before a
+// subject or an auxiliary opens a clause of its own ("the feature that we
+// built on Monday"); "be" behind a relative clause is the verb of the main
+// clause. A clause without a verb still takes the question's past, also
+// where a plural noun ends like a present ("check runs").
+func TestRules_AnEnglishPresentGivesItsClauseATenseOfItsOwn(t *testing.T) {
+	check517(t, now517, want517{
+		"The cluster died on Saturday; the vendor comes on Tuesday.":                         "2026-11-21/past 2026-11-24/future",
+		"The cluster died on Saturday and the vendor comes on Tuesday.":                      "2026-11-21/past 2026-11-24/future",
+		"The cluster died on Saturday. The vendor comes on Tuesday.":                         "2026-11-21/past 2026-11-24/future",
+		"The bug came in on Monday, the fix on Tuesday, and the release goes out on Friday.": "2026-11-16/past 2026-11-17/past 2026-11-27/future",
+		"On Friday we demo the feature that we built on Monday.":                             "2026-11-27/future 2026-11-16/past",
+		"On Thursday the team presents what it built on Monday.":                             "2026-11-26/future 2026-11-16/past",
+		"Anna left on Monday; her successor starts on Friday.":                               "2026-11-16/past 2026-11-27/future",
+		"Billing goes live on Friday; the old system died on Tuesday.":                       "2026-11-27/future 2026-11-17/past",
+		"Will the service that froze on Tuesday be restarted on Thursday?":                   "2026-11-17/past 2026-11-26/future",
+		// counter-cases: a clause without a verb of its own
+		"Builds were red on Thursday, check runs on Friday as well?": "2026-11-19/past 2026-11-20/past",
+		"The deploy failed on Monday, the rollback on Tuesday too?":  "2026-11-16/past 2026-11-17/past",
+	})
+}

@@ -360,7 +360,7 @@ type conjunct struct{ finite, past, aux bool }
 
 // add reads word i of c into the conjunct [s, e).
 func (k conjunct) add(c *clauseWords, s, i, e, lang int) conjunct {
-	k.finite = k.finite || finiteWord(c.words[i], lang)
+	k.finite = k.finite || finiteWord(c.words[i], lang) || lang != langGerman && c.englishPresentAt(s, i, e)
 	k.past = k.past || c.pastWord(s, i, e, lang)
 	k.aux = k.aux || lang != langEnglish && perfektAux[c.words[i]]
 	return k
@@ -525,7 +525,10 @@ func (c *clauseWords) embeddedClauses(s, e int) {
 		if englishEmbedOpeners[w] {
 			c.starts[i] = true
 		}
-		if c.reducedRelative(i) {
+		if c.reducedRelative(i) || w == "that" && i+1 < e && (reducedSubjects[c.words[i+1]] || englishMainAux[c.words[i+1]]) {
+			// "that" before a subject or an auxiliary opens a relative or
+			// a reported clause ("the feature that we built on Monday",
+			// "the PRs that are due on Friday"), issue #532.
 			c.starts[i] = true
 		}
 		switch {
@@ -564,12 +567,14 @@ func (c clauseWords) reducedRelative(i int) bool {
 // englishRelativeOpeners open an English relative clause inside a sentence,
 // and englishMainAux are the auxiliaries and modals that, two words or more
 // behind one and not behind a subject, are the verb of the clause the relative
-// clause stands in (embeddedClauses).
+// clause stands in (embeddedClauses) — "be" of a modal before the relative
+// clause as well ("Will the service that froze on Tuesday be restarted on
+// Thursday?", issue #532).
 var (
 	englishRelativeOpeners = toWordSet("that", "which", "who")
 	englishMainAux         = toWordSet("will", "would", "shall", "should", "can", "could", "may", "might", "must",
 		"won't", "wouldn't", "can't", "cannot", "couldn't", "shouldn't", "is", "are", "was", "were", "isn't", "aren't",
-		"wasn't", "weren't")
+		"wasn't", "weren't", "be")
 )
 
 // compoundWords are the words a weekday or the weekend may be joined to by a
@@ -1394,7 +1399,8 @@ func (r *tenseReader) clauseTense(s int) string {
 	case r.c.whEllipsis(s, e, r.language(r.sentenceStart[s])):
 		r.ellipses[s] = true
 		t = r.ellipsisTense(s)
-	case (s > 0 || e < len(r.c.words)) && (r.c.hasOwnVerb(s, e) || r.c.englishPastIn(s, e, r.language(r.sentenceStart[s]))):
+	case (s > 0 || e < len(r.c.words)) && (r.c.hasOwnVerb(s, e) || r.c.englishPastIn(s, e, r.language(r.sentenceStart[s])) ||
+		r.c.englishPresentIn(s, e, r.language(r.sentenceStart[s]))):
 		t = r.c.tense(s, e, r.language(r.sentenceStart[s]))
 	}
 	r.clauses[s] = t
@@ -1906,6 +1912,109 @@ func (c clauseWords) englishPastIn(s, e, lang int) bool {
 	return false
 }
 
+// englishPresentIn reports whether the clause [s, e) of c, in a sentence of
+// the language lang that is not German, has an English present of the third
+// person behind its subject (englishPresentAt): a verb of its own that the
+// rules read as no tense, so that the clause keeps its own rather than
+// taking the question's (issue #532, "The cluster died on Saturday; the
+// vendor comes on Tuesday").
+func (c clauseWords) englishPresentIn(s, e, lang int) bool {
+	if lang == langGerman {
+		return false
+	}
+	scanned(e - s)
+	for k := s; k < e; k++ {
+		if c.englishPresentAt(s, k, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// englishThirdPersons are the pronouns a present of the third person
+// follows; englishAfterPresent the words besides englishAfterFinite and a
+// date that follow one ("goes live", "comes online", "takes place");
+// englishNounsOnS the words on -s a noun phrase ends with that are no plural
+// and no verb.
+var (
+	englishThirdPersons = toWordSet("he", "she", "it", "this", "that", "everyone", "everybody", "someone", "somebody",
+		"nobody", "anyone", "anybody", "one")
+	englishAfterPresent = toWordSet("live", "online", "place", "effect", "next", "early", "late", "tomorrow", "tonight",
+		"ahead", "soon")
+	englishNounsOnS = toWordSet("news", "series", "chaos", "canvas", "atlas", "alias", "bias", "lens", "perhaps",
+		"always", "sometimes", "towards", "afterwards", "besides", "whereas", "thanks", "kubernetes", "postgres",
+		"jenkins", "devops", "ops", "sales", "means", "headquarters")
+)
+
+// englishPresentAt reports whether word k of c, in the words [s, e), is an
+// English present of the third person on -s behind its subject (issue
+// #532): a pronoun of englishThirdPersons, or a noun phrase of one to three
+// words behind a determiner ("the vendor comes", "her successor starts", "On
+// Thursday the team presents") or without one (bareSubjectVerb: "Billing
+// goes live", "marketing launches the campaign"), before the end of the
+// words, a date or a word no noun follows (englishAfterFinite,
+// englishAfterPresent). A plural noun of a noun phrase has the same shape
+// ("the release notes on Friday"); the clause it reads then keeps a tense of
+// its own, neutral, where it took the question's.
+func (c clauseWords) englishPresentAt(s, k, e int) bool {
+	words := c.words[s:e]
+	k -= s
+	if k == 0 || !presentShape(words[k]) {
+		return false
+	}
+	if next := k + 1; next < len(words) && !englishAfterFinite[words[next]] && !englishAfterPresent[words[next]] && !dateWord(words[next]) {
+		return false
+	}
+	if englishThirdPersons[words[k-1]] {
+		return true
+	}
+	n := 0
+	for j := k - 1; j >= 0 && n < 3; j-- {
+		x := words[j]
+		switch {
+		case englishDeterminers[x] || attributeOpeners[x]:
+			return n > 0
+		case dateWord(x) || dayKeywords[x]:
+			return n > 0 && c.bareSubjectVerb(s+j+1, s+k)
+		case !subjectNoun(x):
+			return false
+		}
+		n++
+		if j == 0 {
+			return c.bareSubjectVerb(s, s+k)
+		}
+	}
+	return false
+}
+
+// presentShape reports whether w has the shape of an English present of the
+// third person: four letters or more on -s, not on -ss, -us, -is or 's, and
+// no word of englishNounsOnS.
+func presentShape(w string) bool {
+	return len(w) >= 4 && strings.HasSuffix(w, "s") && !englishNounsOnS[w] && !strings.HasSuffix(w, "ss") &&
+		!strings.HasSuffix(w, "us") && !strings.HasSuffix(w, "is") && !strings.HasSuffix(w, "'s")
+}
+
+// subjectNoun reports whether x may be a word of the noun phrase of a subject
+// (englishPresentAt): no function word, auxiliary, pronoun, opener, past or
+// adverb on -ly.
+func subjectNoun(x string) bool {
+	return !englishNPJoiners[x] && !englishFiniteWords[x] && !englishSubjects[x] && !futureVerbSet[x] && !englishBeForms[x] &&
+		!englishEmbedOpeners[x] && !englishPastVerbs[x] && !hortatives[x] && x != "not" && x != "please" &&
+		!strings.HasSuffix(x, "ly")
+}
+
+// bareSubjectVerb reports whether the noun phrase without a determiner from
+// word f of c up to word k, a form on -s, is the subject of that form
+// (englishPresentAt): its first word is written with its capital, a name or
+// the start of a sentence ("Anna starts on Friday", "Billing goes live"), or
+// an object follows the form ("marketing launches the campaign"). Without
+// either the words are a noun of two words as often ("…, check runs on Friday
+// as well?").
+func (c clauseWords) bareSubjectVerb(f, k int) bool {
+	return c.written[f] || k+1 < len(c.words) && imperativeObjects[c.words[k+1]]
+}
+
 // finiteAfter reports whether a finite word of English follows words[i]: the
 // form behind a bare subject is then the participle of a noun phrase without
 // its pronoun ("Tickets closed on Friday will be reopened on Monday"), the
@@ -1913,7 +2022,7 @@ func (c clauseWords) englishPastIn(s, e, lang int) bool {
 func finiteAfter(words []string, i int) bool {
 	scanned(len(words) - i)
 	for _, w := range words[i+1:] {
-		if englishFiniteWords[w] {
+		if englishFiniteWords[w] || w == "get" || w == "gets" {
 			return true
 		}
 	}
