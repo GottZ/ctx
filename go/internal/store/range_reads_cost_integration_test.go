@@ -383,7 +383,10 @@ func rrHold(t *testing.T, label, plan string, small, large rrCost, bound, slack 
 // idx_context_created from the newest block of the corpus and read every
 // block of rr-other (8 593 buffers at 100 000 other blocks), and so did the
 // custom plan when a granted block was newer than the read scope and the
-// limit small.
+// limit small. A reader of few scopes gets the merge form (one arm per scope,
+// full sorts off, the generic plan), a category filter the planned form (the
+// planner weighs the category, a custom plan on every execution); each is
+// pinned on the plan it runs.
 func TestRangeReadsFullGraphSeed(t *testing.T) {
 	small, large := rrStores(t)
 	planners := &rrPlanners{t: t}
@@ -414,17 +417,21 @@ func TestRangeReadsFullGraphSeed(t *testing.T) {
 		return b
 	}
 	for _, c := range []struct {
-		name   string
-		scopes []string
-		grants bool
-		limit  int
-		bound  int64
+		name    string
+		scopes  []string
+		grants  bool
+		cats    []string
+		limit   int
+		bound   int64
+		planned bool
 	}{
-		{"read scope older than the other scope", []string{rrRead}, false, 200, pageBound([]int{201}, 0)},
-		{"read scope, granted blocks newer than it, limit 4", []string{rrRead}, true, 4, pageBound([]int{5}, 5)},
-		{"read scope named twice beside the flagged scope, granted blocks", []string{rrRead, rrGuard, rrRead}, true, 200,
-			pageBound([]int{201, 2 * rrGuardPairs, 201}, 5)},
-		{"the large scope read", []string{rrOther}, false, 200, pageBound([]int{201}, 0)},
+		{"read scope older than the other scope", []string{rrRead}, false, nil, 200, pageBound([]int{201}, 0), false},
+		{"read scope, granted blocks newer than it, limit 4", []string{rrRead}, true, nil, 4, pageBound([]int{5}, 5), false},
+		{"read scope named twice beside the flagged scope, granted blocks", []string{rrRead, rrGuard, rrRead}, true, nil, 200,
+			pageBound([]int{201, 2 * rrGuardPairs}, 5), false},
+		{"the large scope read", []string{rrOther}, false, nil, 200, pageBound([]int{201}, 0), false},
+		{"read scope, a category half of it carries", []string{rrRead}, false, []string{"decisions"}, 100, pageBound([]int{300}, 0), true},
+		{"read scope, a category none of its blocks carries", []string{rrRead}, false, []string{"issue"}, 100, pageBound([]int{300}, 0), true},
 	} {
 		var st [2]rrStmt
 		for i, pool := range []*pgxpool.Pool{small, large} {
@@ -434,19 +441,31 @@ func TestRangeReadsFullGraphSeed(t *testing.T) {
 				g = grants(pool)
 			}
 			tr.take()
-			res, err := store.FullGraph(ctx, traced, store.EgoParams{Limit: c.limit, EdgeLimit: 4000}, c.scopes, g, know)
+			res, err := store.FullGraph(ctx, traced, store.EgoParams{Limit: c.limit, EdgeLimit: 4000, Categories: c.cats}, c.scopes, g, know)
 			if err != nil {
 				t.Fatalf("%s: FullGraph: %v", c.name, err)
 			}
-			if len(res.Nodes) != c.limit {
-				t.Fatalf("%s: %d nodes, want a full page of %d", c.name, len(res.Nodes), c.limit)
+			if want := c.limit; c.cats != nil && c.cats[0] == "issue" {
+				if len(res.Nodes) != 0 {
+					t.Fatalf("%s: %d nodes, want none", c.name, len(res.Nodes))
+				}
+			} else if len(res.Nodes) != want {
+				t.Fatalf("%s: %d nodes, want a full page of %d", c.name, len(res.Nodes), want)
 			}
 			st[i] = rrFind(t, tr.take(), func(sql string) bool { return strings.Contains(sql, "left(") && strings.Contains(sql, "context_blocks") })
-			if st[i].local["enable_sort"] != "off" || st[i].local["enable_incremental_sort"] != "off" {
-				t.Errorf("%s: the seed ran with sorts on (settings %v)", c.name, st[i].local)
+			merge := strings.Contains(st[i].sql, "UNION ALL")
+			switch {
+			case c.planned && (merge || len(st[i].local) != 0 || st[i].mode != pgx.QueryExecModeCacheDescribe):
+				t.Errorf("%s: the seed ran the merge form, with settings %v or in mode %v, want the planned form planned on every execution", c.name, st[i].local, st[i].mode)
+			case !c.planned && (!merge || st[i].local["enable_sort"] != "off" || st[i].local["enable_incremental_sort"] == "off" ||
+				st[i].local["plan_cache_mode"] != "force_generic_plan" || st[i].mode != pgx.QueryExecModeCacheStatement):
+				t.Errorf("%s: the seed ran without the merge form, with settings %v or in mode %v, want full sorts off on the generic plan of a prepared statement", c.name, st[i].local, st[i].mode)
 			}
 		}
 		for _, p := range rrPlans {
+			if p.generic == c.planned {
+				continue // the plan the form runs: the merge form's generic, the planned form's custom
+			}
 			// The small and the large store may differ in the plan of the
 			// page (a bitmap and a sort, or a walk that counts a buffer per
 			// row), not in what it reads: the slack is the bound.
