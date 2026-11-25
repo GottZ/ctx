@@ -60,6 +60,9 @@ type clauseWords struct {
 	// written: the word starts with an upper-case letter as written, also in
 	// a question whose case caps disregards (afterCapital, issue #517).
 	written []bool
+	// asks: the clause of the word, as its punctuation ends it, ends with a
+	// question mark (barePast, issue #532).
+	asks []bool
 	// closing caches the table of closingParticiples, filled once per
 	// question by the first clause that needs it (issue #506).
 	closing *[]int
@@ -119,10 +122,16 @@ func clauseTokens(query string) clauseWords {
 		}
 		if r, _ := utf8.DecodeLastRuneInString(f); strings.ContainsRune(",;:.!?", r) && (r != '.' || !abbreviation(w)) {
 			start, sentence = true, r != ','
+			for len(c.asks) < len(c.words) {
+				c.asks = append(c.asks, r == '?')
+			}
 		} else if w == "" && strings.Trim(f, "\u2013\u2014") == "" {
 			start = true // a dash of its own ("Seit 2022 – wie viele …?")
 		}
 		i = j
+	}
+	for len(c.asks) < len(c.words) {
+		c.asks = append(c.asks, false)
 	}
 	c.markJoins(lower)
 	c.lang = c.languageOf(0, len(c.words))
@@ -182,11 +191,11 @@ var clauseConjunctions = toWordSet("und", "and", "oder", "or", "aber", "but")
 // be", and the forms of the simple past that are no participle: a clause
 // with one has a finite verb (finiteClause). The other forms on -ed are the
 // participle as often ("Will it be fixed and deployed on Monday?").
-var englishFiniteWords = toWordSet("will", "would", "shall", "should", "can", "could", "may", "might", "must",
+var englishFiniteWords = toWordSet(append([]string{"will", "would", "shall", "should", "can", "could", "may", "might", "must",
 	"is", "are", "am", "was", "were", "has", "have", "had", "do", "does", "did",
 	"won't", "wouldn't", "can't", "cannot", "couldn't", "shouldn't", "isn't", "aren't", "wasn't", "weren't",
 	"hasn't", "haven't", "hadn't", "don't", "doesn't", "didn't",
-	"broke", "ran", "went", "saw", "wrote", "came", "took", "began", "fell")
+	"broke", "ran", "went", "saw", "wrote", "came", "took", "began", "fell"}, englishStrongPast...)...)
 
 // germanSubjects are the German pronouns that are the subject wherever they
 // stand in a clause ("und am Dienstag testen wir"); "es" and "sie" are the
@@ -300,7 +309,8 @@ func (c clauseWords) pastWord(s, k, e, lang int) bool {
 		return false
 	}
 	words := c.words[s:e]
-	return (englishPastVerbs[w] || englishFinitePast(words, k-s)) && !englishPassiveAt(words, k-s)
+	return (englishPastVerbs[w] || englishFinitePast(words, k-s) || c.barePast(s, k, e)) && !englishPassiveAt(words, k-s) &&
+		!englishAttributive(words, k-s)
 }
 
 // coordinate starts a clause at each conjunction of clauseConjunctions that
@@ -337,8 +347,7 @@ func (c *clauseWords) coordinate() {
 // auxiliary of the German Perfekt.
 type conjunct struct{ finite, past, aux bool }
 
-// add reads word i of c into the conjunct that starts at s, in a clause that
-// ends at e.
+// add reads word i of c into the conjunct [s, e).
 func (k conjunct) add(c *clauseWords, s, i, e, lang int) conjunct {
 	k.finite = k.finite || finiteWord(c.words[i], lang)
 	k.past = k.past || c.pastWord(s, i, e, lang)
@@ -352,9 +361,16 @@ func (k conjunct) add(c *clauseWords, s, i, e, lang int) conjunct {
 func (c *clauseWords) coordinateClause(s, e, lang int, drop []int) []int {
 	ls := s
 	left := conjunct{finite: c.finiteOpening(s, e, lang)}
+	// The words of a conjunct are read up to its end, the first conjunction
+	// (fc) or the next one (re): a word behind the conjunction is the other
+	// conjunct's (finiteAfter, issue #532).
+	fc := s + 1
+	for fc < e && !clauseConjunctions[c.words[fc]] {
+		fc++
+	}
 	for j := s; j < e; {
 		if j == ls || !clauseConjunctions[c.words[j]] {
-			left = left.add(c, ls, j, e, lang)
+			left = left.add(c, ls, j, fc, lang)
 			j++
 			continue
 		}
@@ -365,7 +381,7 @@ func (c *clauseWords) coordinateClause(s, e, lang int, drop []int) []int {
 		scanned(re - j)
 		right := conjunct{finite: c.finiteOpening(j+1, re, lang)}
 		for k := j + 1; k < re; k++ {
-			right = right.add(c, j+1, k, e, lang)
+			right = right.add(c, j+1, k, re, lang)
 		}
 		// A conjunct whose verb is a Perfekt or a state behind one in the
 		// past reports what followed and shares that past ("Am Montag war
@@ -403,10 +419,12 @@ func (c *clauseWords) dropWords(drop []int) {
 		}
 		c.words[n], c.starts[n], c.caps[n], c.offs[n] = c.words[i], c.starts[i], c.caps[i], c.offs[i]
 		c.sentence[n], c.upper[n], c.joinedNext[n], c.written[n] = c.sentence[i], c.upper[i], c.joinedNext[i], c.written[i]
+		c.asks[n] = c.asks[i]
 		n++
 	}
 	c.words, c.starts, c.caps, c.offs = c.words[:n], c.starts[:n], c.caps[:n], c.offs[:n]
 	c.sentence, c.upper, c.joinedNext, c.written = c.sentence[:n], c.upper[:n], c.joinedNext[:n], c.written[:n]
+	c.asks = c.asks[:n]
 }
 
 // colloquialForms are spoken forms of German auxiliaries and verbs a
@@ -496,6 +514,9 @@ func (c *clauseWords) embeddedClauses(s, e int) {
 		if englishEmbedOpeners[w] {
 			c.starts[i] = true
 		}
+		if c.reducedRelative(i) {
+			c.starts[i] = true
+		}
 		switch {
 		case englishRelativeOpeners[w]:
 			relative = i
@@ -507,6 +528,26 @@ func (c *clauseWords) embeddedClauses(s, e int) {
 			relative = -1
 		}
 	}
+}
+
+// reducedSubjects are the subject pronouns that open an English relative
+// clause without its pronoun (reducedRelative).
+var reducedSubjects = toWordSet("we", "you", "they", "i", "he", "she")
+
+// reducedRelative reports whether word i of c, a subject pronoun, opens an
+// English relative clause without its pronoun: it stands right behind a noun
+// that a determiner opens one or two words before it ("the bug we had on
+// Monday", "the issue you raised"), issue #532.
+func (c clauseWords) reducedRelative(i int) bool {
+	if i < 2 || !reducedSubjects[c.words[i]] || c.starts[i-1] {
+		return false
+	}
+	noun := c.words[i-1]
+	if englishNPJoiners[noun] || englishFiniteWords[noun] || englishSubjects[noun] || englishParticiple(noun) ||
+		englishIrregularPast[noun] || strings.HasSuffix(noun, "ly") || dateWord(noun) || dayKeywords[noun] {
+		return false
+	}
+	return englishDeterminers[c.words[i-2]] || i >= 3 && !c.starts[i-2] && englishDeterminers[c.words[i-3]]
 }
 
 // englishRelativeOpeners open an English relative clause inside a sentence,
@@ -908,12 +949,35 @@ var germanPastVerbs = toWordSet(
 // takes the English participles as its own ("Was wurde am Montag
 // deployed?", "Wird am Montag deployed?"), so in a German question they count
 // as nothing; "was" counts only as englishWasAt reads it (issue #487).
-var englishPastVerbs = toWordSet(
+var englishPastVerbs = toWordSet(append([]string{
 	"was", "were", "had", "went", "did",
 	"fixed", "deployed", "cancelled", "canceled", "happened",
 	"broke", "crashed", "failed", "finished", "started", "created",
 	"moved", "changed", "removed", "deleted", "updated",
 	"merged", "pushed", "reviewed", "shipped", "ran", "wrote", "found", "saw", "made", "got",
+}, englishStrongPast...)...)
+
+// englishStrongPast are English forms of the simple past that are neither a
+// participle nor another word (issue #532): wherever they stand they name a
+// past, as "went" and "broke" do. Forms that are a noun as well ("rose",
+// "bore", "bit") and those whose present is the same form ("read", "set",
+// "put", "cut", "hit", "let") are not among them.
+var englishStrongPast = []string{
+	"knew", "grew", "threw", "flew", "drew", "blew", "chose", "froze", "spoke", "stole", "woke", "wore", "tore",
+	"swore", "gave", "ate", "became", "sang", "sank", "drank", "swam", "rang", "shook", "drove", "rode", "forgot",
+	"forgave", "arose", "overtook", "undertook", "mistook", "withdrew", "overran", "overthrew", "rewrote",
+	"underwent", "outgrew", "took", "came", "began", "fell",
+}
+
+// englishIrregularPast are English forms of the simple past that are the
+// participle as well, and the short forms on -ed englishParticiple does not
+// read: like a form on -ed they are a past only where a simple past stands
+// (englishFinitePast) — "We met on Tuesday", not "the lost node" (issue
+// #532).
+var englishIrregularPast = toWordSet(
+	"met", "sent", "built", "lost", "paid", "held", "kept", "left", "told", "sold", "bought", "brought", "caught",
+	"taught", "thought", "meant", "spent", "won", "heard", "said", "slept", "stood", "understood", "stuck", "struck",
+	"hung", "dug", "fought", "sought", "dealt", "lent", "fled", "used", "died", "tied", "owed",
 )
 
 // pastVerbSet is every verb form the tense detection reads as past, of both
@@ -1274,7 +1338,7 @@ func (r *tenseReader) clauseTense(s int) string {
 	case r.c.whEllipsis(s, e, r.language(r.sentenceStart[s])):
 		r.ellipses[s] = true
 		t = r.ellipsisTense(s)
-	case (s > 0 || e < len(r.c.words)) && r.c.hasOwnVerb(s, e):
+	case (s > 0 || e < len(r.c.words)) && (r.c.hasOwnVerb(s, e) || r.c.englishPastIn(s, e, r.language(r.sentenceStart[s]))):
 		t = r.c.tense(s, e, r.language(r.sentenceStart[s]))
 	}
 	r.clauses[s] = t
@@ -1354,6 +1418,9 @@ func (c clauseWords) scores(s, e, lang int) (pastScore, futureScore int) {
 		pastScore++
 	}
 	pastScore += pastVerbs(words, lang)
+	if lang != langGerman {
+		pastScore += c.barePasts(s, e)
+	}
 
 	// Future verbs
 	for _, tok := range words {
@@ -1398,7 +1465,8 @@ func pastVerbs(words []string, lang int) int {
 			if englishWasAt(words, lang, i) {
 				n++
 			}
-		case lang != langGerman && (englishPastVerbs[tok] || englishFinitePast(words, i)) && !englishPassiveAt(words, i):
+		case lang != langGerman && (englishPastVerbs[tok] || englishFinitePast(words, i)) && !englishPassiveAt(words, i) &&
+			!englishAttributive(words, i):
 			n++
 		}
 	}
@@ -1647,7 +1715,7 @@ func englishPassiveAt(words []string, i int) bool {
 // between, before the end of the words or a word a noun cannot be ("which
 // commits landed on Monday", "what caused it").
 func englishFinitePast(words []string, i int) bool {
-	if i == 0 || !englishParticiple(words[i]) {
+	if i == 0 || !englishParticiple(words[i]) && !englishIrregularPast[words[i]] {
 		return false
 	}
 	if englishSubjects[words[i-1]] {
@@ -1656,8 +1724,170 @@ func englishFinitePast(words []string, i int) bool {
 	if !englishWhSubjects[words[i-1]] && (i < 2 || !englishWhSubjects[words[i-2]]) {
 		return false
 	}
-	return i+1 == len(words) || englishAfterFinite[words[i+1]] || strings.HasSuffix(words[i+1], "ly")
+	return beforeNoNoun(words, i)
 }
+
+// barePast reports whether word k of c, in the clause [s, e), is an English
+// simple past behind a bare subject (issue #532): a form on -ed or of
+// englishIrregularPast behind a noun phrase without a pronoun that opens the
+// clause (englishBareSubject: "The release slipped on Thursday", "Latency
+// spiked on Tuesday", "Mrs. Friday called", "tuesday merged") before a word no
+// noun can be — not a participle of an arrangement, not before a word that
+// names where it moves a thing, and not with a finite verb behind it in the
+// clause, which makes it the participle of its subject ("Tickets closed on
+// Friday will be reopened on Monday"). A clause that asks with nothing but a
+// date behind the form ("Office closed on Monday?") asks for a state as
+// often, and stays unread.
+func (c clauseWords) barePast(s, k, e int) bool {
+	words := c.words[s:e]
+	i := k - s
+	if i <= 0 || !englishParticiple(words[i]) && !englishIrregularPast[words[i]] || !englishBareSubject(words, i) ||
+		!beforeNoNoun(words, i) || englishPlanForms[words[i]] || i+1 < len(words) && englishTargetWords[words[i+1]] ||
+		finiteAfter(words, i) {
+		return false
+	}
+	return !c.asks[k] || !datePhraseAfter(words, i)
+}
+
+// datePhraseAfter reports whether the words behind words[i] are a phrase of
+// a date and nothing else: a date word or a day keyword with prepositions,
+// determiners, parts of the day and words that place a day ("on Monday",
+// "last Friday night"). Without words behind it the date, if any, is the
+// subject's ("wednesday reverted?").
+func datePhraseAfter(words []string, i int) bool {
+	date := false
+	for _, w := range words[i+1:] {
+		_, part := dayPartHours[w]
+		d := dateWord(w) || dayKeywords[w]
+		if !datePhraseWords[w] && !d && !part {
+			return false
+		}
+		date = date || d
+	}
+	return date
+}
+
+// datePhraseWords are the words of a phrase of a date besides the date word
+// (datePhraseAfter).
+var datePhraseWords = toWordSet("on", "at", "in", "by", "during", "the", "this", "last", "next", "early", "late")
+
+// barePasts counts the words of [s, e) of c that are a simple past behind a
+// bare subject (barePast) and that pastVerbs does not count, each read in its
+// clause.
+func (c clauseWords) barePasts(s, e int) int {
+	n := 0
+	for k := s; k < e; k++ {
+		if englishPastVerbs[c.words[k]] {
+			continue
+		}
+		cs, ce := c.clauseOf(k)
+		cs, ce = max(cs, s), min(ce, e)
+		if c.barePast(cs, k, ce) && !englishFinitePast(c.words[cs:ce], k-cs) && !englishPassiveAt(c.words[cs:ce], k-cs) {
+			n++
+		}
+	}
+	return n
+}
+
+// englishPastIn reports whether the clause [s, e) of c, in a sentence of the
+// language lang that is not German, has an English simple past the rules read
+// by its place (englishFinitePast): a verb of its own (issue #532), "Usage
+// dropped on Saturday, is that normal?".
+func (c clauseWords) englishPastIn(s, e, lang int) bool {
+	if lang == langGerman {
+		return false
+	}
+	scanned(e - s)
+	words := c.words[s:e]
+	for k := range words {
+		if englishFinitePast(words, k) || c.barePast(s, s+k, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// finiteAfter reports whether a finite word of English follows words[i]: the
+// form behind a bare subject is then the participle of a noun phrase without
+// its pronoun ("Tickets closed on Friday will be reopened on Monday"), the
+// finite verb the later word (issue #532).
+func finiteAfter(words []string, i int) bool {
+	for _, w := range words[i+1:] {
+		if englishFiniteWords[w] {
+			return true
+		}
+	}
+	return false
+}
+
+// englishPlanForms are the participles of an arrangement, which name the
+// date of what is arranged rather than a past ("Deploy scheduled for
+// Friday?", "Release postponed to Monday"), and englishTargetWords the words
+// behind a verb that name where it moves a thing ("slipped to Friday"):
+// behind a bare subject neither makes a simple past (issue #532).
+var (
+	englishPlanForms = toWordSet("scheduled", "planned", "booked", "expected", "slated", "postponed", "rescheduled",
+		"delayed", "moved", "pushed", "shifted", "deferred", "reserved", "arranged", "proposed", "set")
+	englishTargetWords = toWordSet("to", "for", "until", "till", "into")
+)
+
+// englishBareSubject reports whether the words before words[i] are a noun
+// phrase without a pronoun that opens the clause, the subject of a simple
+// past at words[i] (issue #532): one to three words that are no function
+// word, auxiliary, pronoun, opener or verb form, behind an optional
+// determiner — "The release slipped", "Our CI timed out", "Latency spiked",
+// "Mrs. Friday called", "tuesday merged". A determiner right before the form
+// makes it an attribute ("the failed jobs"), which no word between leaves.
+func englishBareSubject(words []string, i int) bool {
+	j := 0
+	if englishDeterminers[words[0]] {
+		j = 1
+	}
+	if n := i - j; n < 1 || n > 3 {
+		return false
+	}
+	for k := j; k < i; k++ {
+		w := words[k]
+		if englishNPJoiners[w] || englishFiniteWords[w] || englishSubjects[w] || englishParticiple(w) ||
+			englishIrregularPast[w] || futureVerbSet[w] || englishBeForms[w] || englishEmbedOpeners[w] || hortatives[w] ||
+			w == "not" || w == "please" {
+			return false
+		}
+	}
+	return true
+}
+
+// attributeOpeners are the words before an attribute of a noun phrase
+// besides the determiners and interrogatives (englishAttributive).
+var attributeOpeners = toWordSet("all", "some", "any", "no", "both", "each", "every")
+
+// englishAttributive reports whether words[i], an English form on -ed, is an
+// attribute between the word that opens a noun phrase and its noun ("the
+// failed jobs", "Which updated docs are due on Thursday?"), no past of its
+// own (issue #532).
+func englishAttributive(words []string, i int) bool {
+	if i == 0 || !englishParticiple(words[i]) {
+		return false
+	}
+	prev := words[i-1]
+	return (englishDeterminers[prev] || englishWhSubjects[prev] || attributeOpeners[prev]) && !beforeNoNoun(words, i)
+}
+
+// beforeNoNoun reports whether the word behind words[i] is none a noun can
+// be, so that words[i] is a verb and no attribute of it: the end of the
+// words, a word of englishAfterFinite, an adverb on -ly, or a date word
+// ("Which alerts fired Thursday night?", issue #532).
+func beforeNoNoun(words []string, i int) bool {
+	if i+1 == len(words) {
+		return true
+	}
+	next := words[i+1]
+	return englishAfterFinite[next] || englishAfterVerb[next] || strings.HasSuffix(next, "ly") || dateWord(next)
+}
+
+// englishAfterVerb are adverbs that follow a verb and no noun ("fired twice
+// on Monday", "left early on Friday"), issue #532.
+var englishAfterVerb = toWordSet("twice", "once", "early", "late", "overnight")
 
 // strongPastForms are the simple past of the strong and mixed German verbs a
 // question asks with; a verb behind "was" ending in one is in the past

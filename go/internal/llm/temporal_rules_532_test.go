@@ -133,3 +133,39 @@ func TestRules_ADayKeywordWithAPartOfTheDay(t *testing.T) {
 		t.Errorf("a day keyword with a part of the day: weights %v, want linear 1", r)
 	}
 }
+
+// TestRules_AnEnglishSimplePastBehindANoun (issue #532, point 3): a form on
+// -ed behind a noun phrase without a pronoun that opens its clause ("The
+// rollout stalled", "Mrs. Monday phoned", "Tuesday merged") or right before a
+// date ("Which nodes rebooted Thursday?") is a simple past; the irregular
+// past ("met", "sent", "froze") reads as one where a simple past stands; a
+// subject pronoun behind a noun opens a relative clause without its pronoun
+// ("the bug we had on Monday"). A form on -ed between the word that opens a
+// noun phrase and its noun is an attribute ("the failed jobs"), a participle
+// of an arrangement names the date arranged ("Deploy scheduled for Friday?"),
+// and a question of a noun, the form and a date asks for a state as often
+// ("Office closed on Monday?").
+func TestRules_AnEnglishSimplePastBehindANoun(t *testing.T) {
+	check517(t, now517, want517{
+		"The rollout stalled on Thursday":                             "2026-11-19/past",
+		"Disk usage spiked on Tuesday night":                          "2026-11-17/past@23",
+		"Mrs. Monday phoned on Wednesday":                             "2026-11-18/past",
+		"Which nodes rebooted Thursday?":                              "2026-11-19/past",
+		"We met the auditors on Tuesday":                              "2026-11-17/past",
+		"Who sent the report on Monday?":                              "2026-11-16/past",
+		"The server froze on Saturday":                                "2026-11-21/past",
+		"Let's talk on Friday about the bug we had on Monday":         "2026-11-27/future 2026-11-16/past",
+		"Tuesday merged, Wednesday reverted – why?":                   "2026-11-17/past 2026-11-18/past",
+		"The release slipped on Thursday and the new date is Tuesday": "2026-11-19/past 2026-11-24/future",
+		// counter-cases
+		"Can you rerun the failed jobs on Monday?": "2026-11-23/future",
+		"Which updated docs are due on Thursday?":  "2026-11-26/future",
+		"The deploy is scheduled for Friday":       "2026-11-27/future",
+		"Deploy scheduled for Friday?":             "2026-11-27/future",
+		"Office closed on Monday?":                 "2026-11-23/future",
+		"Do we need a hotfix on Friday?":           "2026-11-27/future",
+		"Who will read the report on Friday?":      "2026-11-27/future",
+		"Is the left panel fixed on Monday?":       "2026-11-23/future",
+		"Let's cut the release on Thursday":        "2026-11-26/future",
+	})
+}
