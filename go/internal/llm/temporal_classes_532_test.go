@@ -101,7 +101,7 @@ var holdout532Floor = map[string]int{
 	"a-tageszeit":            90,
 	"b-zwei-wochentage":      148,
 	"c-englisch-praeteritum": 153,
-	"d1-ellipse":             53,
+	"d1-ellipse":             56,
 	"d2-ten-praesens":        59,
 	"d3-imperativ":           57,
 	"e-restformen":           61,

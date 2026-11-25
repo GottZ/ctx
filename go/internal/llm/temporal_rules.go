@@ -267,6 +267,12 @@ var englishPerfectAux = toWordSet("has", "have", "had", "hasn't", "haven't", "ha
 // its own (issue #517).
 func (c clauseWords) perfectBracket(s, e, lang int) bool {
 	last := c.words[e-1]
+	// The participle of a plan names the date of what is planned, which lies
+	// ahead: no state that shares a past ("…, und was ist für Weihnachten
+	// geplant?"), issue #532.
+	if planParticiples[last] {
+		return false
+	}
 	closes := c.participleAt(s, e-1) || seinParticiple(last) || strings.Contains(last, "ge") && (strings.HasSuffix(last, "t") || strings.HasSuffix(last, "en"))
 	for i := s; i < e; i++ {
 		w := c.words[i]
@@ -315,7 +321,7 @@ func (c clauseWords) pastWord(s, k, e, lang int) bool {
 	}
 	words := c.words[s:e]
 	return (englishPastVerbs[w] || englishFinitePast(words, k-s) || c.barePast(s, k, e)) && !englishPassiveAt(words, k-s) &&
-		!englishAttributive(words, k-s)
+		!englishAttributive(words, k-s) && !englishReports(words, k-s, false)
 }
 
 // coordinate starts a clause at each conjunction of clauseConjunctions that
@@ -974,6 +980,39 @@ var englishStrongPast = []string{
 	"underwent", "outgrew", "took", "came", "began", "fell",
 }
 
+// englishReportVerbs are the simple pasts of the English verbs of saying,
+// hearing, thinking and knowing a clause can follow without "that", and
+// englishReportRegular those on -ed among them, which only the reading of
+// a bare subject (barePast) leaves unread: a clause behind one is reported
+// and has a tense of its own ("I heard the release is on Friday", "They said
+// the fix lands on Monday"), so the verb names no past of a date in it
+// (englishReports, issue #532). reportObjects are the pronouns "told" and
+// "promised" take before the clause, reportOpeners the words that open one.
+var (
+	englishReportVerbs   = toWordSet("said", "told", "heard", "thought", "knew", "understood", "meant", "felt")
+	englishReportRegular = toWordSet("believed", "assumed", "guessed", "figured", "hoped", "claimed", "expected",
+		"promised", "learned", "realized", "realised", "noticed", "confirmed", "announced", "mentioned")
+	reportObjects = toWordSet("me", "us", "him", "her", "them", "you")
+	reportOpeners = toWordSet("that", "the", "this", "these", "those", "my", "our", "your", "their", "his", "its",
+		"we", "you", "they", "i", "he", "she", "it", "i'd", "we'd", "you'd", "they'd", "he'd", "she'd", "i'll",
+		"we'll", "you'll", "they'll", "he'll", "she'll", "it'll", "we're", "you're", "they're", "it's", "he's",
+		"she's", "i'm")
+)
+
+// englishReports reports whether words[i], a verb of englishReportVerbs (and
+// with regular of englishReportRegular), has a reported clause behind it:
+// the word behind it, or behind its pronoun object, opens one.
+func englishReports(words []string, i int, regular bool) bool {
+	if !englishReportVerbs[words[i]] && (!regular || !englishReportRegular[words[i]]) {
+		return false
+	}
+	j := i + 1
+	if j+1 < len(words) && reportObjects[words[j]] && (words[i] == "told" || words[i] == "promised") && reportOpeners[words[j+1]] {
+		j++
+	}
+	return j < len(words) && reportOpeners[words[j]]
+}
+
 // englishIrregularPast are English forms of the simple past that are the
 // participle as well, and the short forms on -ed englishParticiple does not
 // read: like a form on -ed they are a past only where a simple past stands
@@ -1471,7 +1510,7 @@ func pastVerbs(words []string, lang int) int {
 				n++
 			}
 		case lang != langGerman && (englishPastVerbs[tok] || englishFinitePast(words, i)) && !englishPassiveAt(words, i) &&
-			!englishAttributive(words, i):
+			!englishAttributive(words, i) && !englishReports(words, i, false):
 			n++
 		}
 	}
@@ -1546,19 +1585,42 @@ func (c clauseWords) clauseFinitePast(s, e int) bool {
 		for v < e && wasParticles[c.words[v]] {
 			v++
 		}
-		return c.finitePastAt(v, e) || (indirect || c.sentence[s] && c.verbLast(v, e)) && c.finitePastAt(e-1, e)
+		return c.finitePastAt(v, e) || indirect && c.finitePastAt(e-1, e) || c.sentence[s] && c.verbLast(v, e) && c.verbLastPastAt(e-1, e)
 	case germanWhich[w]:
 		return c.finitePastAt(s+2, e) || indirect && c.finitePastAt(e-1, e)
 	case germanSubordinators[w]:
 		return c.finitePastAt(e-1, e)
 	case c.relativeClause(s, e):
-		return c.finitePastAt(e-1, e)
+		return c.verbLastPastAt(e-1, e)
 	}
 	if v := c.afterFirstConstituent(s, e); v > s {
 		return c.finitePastAt(v, e)
 	}
 	return false
 }
+
+// verbLastPastAt is finitePastAt for the last word of a clause the readings
+// of issue #532 find to put its verb last (relativeClause, an interrogative
+// at the start of a sentence): a strong form at its end counts only as the
+// whole word or behind a prefix ("hing", "auftraten", "kaputtging"), since a
+// present ends like one as often ("schließen" like "ließen", "vorschlagen"
+// like "lagen"); the weak shape decides the rest.
+func (c clauseWords) verbLastPastAt(i, e int) bool {
+	if !c.finitePastAt(i, e) {
+		return false
+	}
+	w := c.words[i]
+	for _, f := range strongPastForms {
+		if rest, ok := strings.CutSuffix(w, f); ok && (rest == "" || pastPrefixPat.MatchString(rest)) {
+			return true
+		}
+	}
+	return weakPastShape(w)
+}
+
+// pastPrefixPat are the prefixes a strong simple past takes in a verb-last
+// clause (verbLastPastAt).
+var pastPrefixPat = regexp.MustCompile(`^(?:` + separablePrefixes + `|be|emp|ent|er|miss|ver|zer|über|unter|hinter|wider|dazu|hinzu)+$`)
 
 // verbLast reports whether word v of a clause [_, e) that an interrogative
 // or a relative pronoun opens is no finite verb, so that the clause puts its
@@ -1748,7 +1810,7 @@ func (c clauseWords) barePast(s, k, e int) bool {
 	i := k - s
 	if i <= 0 || !englishParticiple(words[i]) && !englishIrregularPast[words[i]] || !englishBareSubject(words, i) ||
 		!beforeNoNoun(words, i) || englishPlanForms[words[i]] || i+1 < len(words) && englishTargetWords[words[i+1]] ||
-		finiteAfter(words, i) {
+		englishReports(words, i, true) || finiteAfter(words, i) {
 		return false
 	}
 	return !c.asks[k] || !datePhraseAfter(words, i)
@@ -1810,7 +1872,7 @@ func (c clauseWords) englishPastIn(s, e, lang int) bool {
 	scanned(e - s)
 	words := c.words[s:e]
 	for k := range words {
-		if englishFinitePast(words, k) || c.barePast(s, s+k, e) {
+		if englishFinitePast(words, k) && !englishReports(words, k, false) || c.barePast(s, s+k, e) {
 			return true
 		}
 	}
@@ -1948,6 +2010,13 @@ func germanPastShape(w string) bool {
 			return true
 		}
 	}
+	return weakPastShape(w)
+}
+
+// weakPastShape is germanPastShape without the strong forms: the weak
+// ending -te/-ten (-ete/-eten behind a stem on -t or -d) of a verb that is
+// not the present of a stem on -t.
+func weakPastShape(w string) bool {
 	for _, f := range presentTForms {
 		if strings.HasSuffix(w, f) {
 			return false
@@ -2063,7 +2132,7 @@ func (c clauseWords) hasOwnVerb(s, e int) bool {
 			return true
 		}
 	}
-	return c.participleAt(s, e-1) || c.relativeClause(s, e) && c.finitePastAt(e-1, e)
+	return c.participleAt(s, e-1) || c.relativeClause(s, e) && c.verbLastPastAt(e-1, e)
 }
 
 // The words of an interrogative without a verb (whEllipsis): the
@@ -2573,11 +2642,41 @@ func (c clauseWords) pairedEllipsis(s, e int) bool {
 		}
 	}
 	if e < len(c.words) && !c.sentence[e] {
-		if ns, ne := c.clauseOf(e); c.participleClause(ns, ne) && c.pairAsks(s, ne) {
+		if ns, ne := c.clauseOf(e); (c.participleClause(ns, ne) || c.againClause(ns, ne)) && c.pairAsks(s, ne) {
 			return true
 		}
 	}
 	return false
+}
+
+// againStates are the states a thing is in "wieder" or "erneut" after an
+// act ("am Dienstag wieder kaputt"), and againWords those words.
+var (
+	againStates = toWordSet("kaputt", "offen", "rot", "down", "offline", "defekt", "tot", "weg")
+	againWords  = toWordSet("wieder", "erneut")
+)
+
+// againClause reports whether the clause [s, e) is a date and a state of
+// againStates behind "wieder" or "erneut" at its end and no finite verb: the
+// report of what followed a participle clause before it ("Am Montag
+// repariert, am Dienstag wieder kaputt?"), which pairs with it as a second
+// participle clause does (pairedEllipsis, issue #532). The participle clause
+// carries the past; the state clause, without a verb of its own, takes the
+// question's.
+func (c clauseWords) againClause(s, e int) bool {
+	last := e - 1
+	if last < s+2 || !againStates[c.words[last]] || !againWords[c.words[last-1]] {
+		return false
+	}
+	date := false
+	for i := s; i < last-1; i++ {
+		w := c.words[i]
+		if germanPastVerbs[w] || perfektAux[w] || germanFiniteWords[w] || subjectWords[w] {
+			return false
+		}
+		date = date || dateWord(w)
+	}
+	return date
 }
 
 // pairAsks reports whether the pair of clauses [s, e) asks (pairedEllipsis):
@@ -3736,6 +3835,9 @@ var (
 	reWeihnachten = regexp.MustCompile(`(?i)\b(weihnachten|heiligabend|christmas|xmas)\b`)
 	reSilvester   = regexp.MustCompile(`(?i)\b(silvester|new\s*year'?s?\s*eve|nye)\b`)
 	reNeujahr     = regexp.MustCompile(`(?i)\b(neujahr|new\s*year(?:'?s(?:\s*day)?)?)\b`)
+	// reHoliday finds where a holiday of matchAnnualHoliday stands
+	// (matchDayKeywordPart, issue #532).
+	reHoliday = regexp.MustCompile(reWeihnachten.String() + "|" + reSilvester.String() + "|" + reNeujahr.String())
 )
 
 // matchRelativeOrPartDays is Priority 8 of NormalizeTemporalRules: the
@@ -3797,37 +3899,19 @@ func matchDayKeywordPart(query string, now time.Time) *TemporalResult {
 		return nil
 	}
 	c := clauseTokens(query)
-	type hit struct {
-		idx  int
-		date TemporalDate
-	}
-	var hits, plain []hit
-	scanned(len(c.words))
-	for i := 0; i < len(c.words); i++ {
-		if d, ok := c.dayKeywordPartAt(i, now); ok {
-			hits = append(hits, hit{i, d})
-		} else if kw, ok := dayKeywordDays[c.words[i]]; ok && c.dayKeywordWord(i) {
-			kw = dayBeforeOrAfter(c.words, i, kw)
-			plain = append(plain, hit{i, TemporalDate{Ref: kw.word, Date: fmtDate(truncDate(kw.resolve(now))), Dir: kw.dir}})
-		}
-	}
+	hits, plain := c.dayKeywordHits(now)
 	weekdays := c.dayWeekdays()
 	// A day keyword without a part of the day answers here beside a weekday
-	// only, which would drop it ("Was ist gestern und am Montag passiert?"),
-	// issue #532; alone it is matchSimpleKeywords'.
-	if len(weekdays) > 0 {
+	// or a day keyword with one, which would drop it ("Was ist gestern und am
+	// Montag passiert?", "Was lief gestern Abend schief und was steht morgen
+	// an?"), issue #532; alone it is matchSimpleKeywords'.
+	if len(weekdays) > 0 || len(hits) > 0 {
 		hits = append(hits, plain...)
 	}
 	if len(hits) == 0 {
 		return nil
 	}
-	var tr *tenseReader
-	for _, w := range weekdays {
-		if tr == nil {
-			tr = newTenseReader(query)
-		}
-		hits = append(hits, hit{w.idx, c.weekdayDate(tr, w.wd, w.idx, w.ref, now)})
-	}
+	hits = c.withWeekdays(query, hits, weekdays, now)
 	sort.SliceStable(hits, func(a, b int) bool { return hits[a].idx < hits[b].idx })
 	var dates []TemporalDate
 	seen := map[string]bool{}
@@ -3837,7 +3921,7 @@ func matchDayKeywordPart(query string, now time.Time) *TemporalResult {
 			dates = append(dates, h.date)
 		}
 	}
-	r := multiResult(dates)
+	r := multiResult(c.withHolidays(query, lower, hits, dates, seen, now))
 	// The weights of the first date's matcher: a weekday's where a weekday
 	// comes first.
 	if _, ok := weekdayWord(c.words[hits[0].idx]); ok {
@@ -3846,11 +3930,100 @@ func matchDayKeywordPart(query string, now time.Time) *TemporalResult {
 	return r
 }
 
+// keywordHit is a date matchDayKeywordPart reads at the word idx.
+type keywordHit struct {
+	idx  int
+	date TemporalDate
+}
+
+// dayKeywordHits returns the day keywords of c with a part of the day
+// (dayKeywordPartAt) and those without one (dayKeywordWord), each with its
+// date.
+func (c clauseWords) dayKeywordHits(now time.Time) (hits, plain []keywordHit) {
+	scanned(len(c.words))
+	for i := 0; i < len(c.words); i++ {
+		if d, ok := c.dayKeywordPartAt(i, now); ok {
+			hits = append(hits, keywordHit{i, d})
+			if c.words[i] != "tonight" && c.words[i] != "tonight's" {
+				i++ // the part of the day is no keyword of its own ("heute Morgen")
+			}
+		} else if kw, ok := dayKeywordDays[c.words[i]]; ok && c.dayKeywordWord(i) {
+			kw = dayBeforeOrAfter(c.words, i, kw)
+			plain = append(plain, keywordHit{i, TemporalDate{Ref: kw.word, Date: fmtDate(truncDate(kw.resolve(now))), Dir: kw.dir}})
+		}
+	}
+	return hits, plain
+}
+
+// withWeekdays appends to hits the dates of the weekdays of the question,
+// each by its clause (weekdayDate); a weekday in the clause of a day keyword
+// that names the keyword's day is that day ("Heute ist Montag", "Ist morgen
+// Freitag?").
+func (c clauseWords) withWeekdays(query string, hits []keywordHit, weekdays []struct {
+	wd  time.Weekday
+	idx int
+	ref string
+}, now time.Time) []keywordHit {
+	named := map[[2]int]bool{}
+	for _, h := range hits {
+		if d, err := time.Parse("2006-01-02", h.date.Date); err == nil {
+			cs, _ := c.clauseOf(h.idx)
+			named[[2]int{cs, int(d.Weekday())}] = true
+		}
+	}
+	var tr *tenseReader
+	for _, w := range weekdays {
+		if cs, _ := c.clauseOf(w.idx); named[[2]int{cs, int(w.wd)}] {
+			continue
+		}
+		if tr == nil {
+			tr = newTenseReader(query)
+		}
+		hits = append(hits, keywordHit{w.idx, c.weekdayDate(tr, w.wd, w.idx, w.ref, now)})
+	}
+	return hits
+}
+
+// withHolidays appends to dates the date of a holiday and of the weekend of
+// the question as their rules read it where it stands in a clause of its own
+// ("…, und was ist für Weihnachten geplant?"); in the clause of a day keyword
+// it says when within that day ("last night during the new year rollover"),
+// issue #532.
+func (c clauseWords) withHolidays(query, lower string, hits []keywordHit, dates []TemporalDate, seen map[string]bool, now time.Time) []TemporalDate {
+	inHit := map[int]bool{}
+	for _, h := range hits {
+		cs, _ := c.clauseOf(h.idx)
+		inHit[cs] = true
+	}
+	for _, x := range []struct {
+		re    *regexp.Regexp
+		match func(string, time.Time) *TemporalResult
+	}{{reHoliday, matchAnnualHoliday}, {reWochenende, matchWeekend}} {
+		loc := x.re.FindStringIndex(lower)
+		if loc == nil {
+			continue
+		}
+		if i := c.wordAt(loc[0]); i >= 0 {
+			if cs, _ := c.clauseOf(i); inHit[cs] {
+				continue
+			}
+		}
+		if extra := x.match(query, now); extra != nil && !seen[extra.Dates[0].Date] {
+			seen[extra.Dates[0].Date] = true
+			dates = append(dates, extra.Dates[0])
+		}
+	}
+	return dates
+}
+
 // dayKeywordPartAt returns the date matchDayKeywordPart reads at word i of c.
 func (c clauseWords) dayKeywordPartAt(i int, now time.Time) (TemporalDate, bool) {
 	w := c.words[i]
-	hour := func(h int) *int { return &h }
 	if w == "tonight" || w == "tonight's" {
+		// Behind a determiner it is a word of a name ("The Tonight Show").
+		if i > 0 && !c.starts[i] && englishDeterminers[c.words[i-1]] {
+			return TemporalDate{}, false
+		}
 		return TemporalDate{Ref: w, Date: fmtDate(now), Dir: "today"}, true
 	}
 	if i+1 >= len(c.words) || c.starts[i+1] || c.joinedNext[i] || i+1 < len(c.words)-1 && c.joinedNext[i+1] {
@@ -3858,10 +4031,7 @@ func (c clauseWords) dayKeywordPartAt(i int, now time.Time) (TemporalDate, bool)
 	}
 	next := c.words[i+1]
 	if (w == "last" && next != "nacht" || w == "letzte" && next == "nacht") && nightNouns[next] {
-		if i > 0 && !c.starts[i] && lastNightArticles[c.words[i-1]] || i+2 < len(c.words) && !c.starts[i+2] && lastNightOf[c.words[i+2]] {
-			return TemporalDate{}, false
-		}
-		return TemporalDate{Ref: w + " " + next, Date: fmtDate(now.AddDate(0, 0, -1)), Dir: "past", Hour: hour(dayPartHours["night"])}, true
+		return c.lastNightAt(i, now)
 	}
 	kw, ok := dayKeywordDays[w]
 	h, part := dayPartHours[next]
@@ -3870,9 +4040,20 @@ func (c clauseWords) dayKeywordPartAt(i int, now time.Time) (TemporalDate, bool)
 	}
 	d := TemporalDate{Ref: w + " " + next, Date: fmtDate(truncDate(kw.resolve(now))), Dir: kw.dir}
 	if kw.dir == "past" {
-		d.Hour = hour(h)
+		d.Hour = &h
 	}
 	return d, true
+}
+
+// lastNightAt is dayKeywordPartAt for "last night" or "letzte Nacht" at word
+// i of c: yesterday at the hour of the night, unless an article before it or
+// "of" behind it makes it the last night of something.
+func (c clauseWords) lastNightAt(i int, now time.Time) (TemporalDate, bool) {
+	if i > 0 && !c.starts[i] && lastNightArticles[c.words[i-1]] || i+2 < len(c.words) && !c.starts[i+2] && lastNightOf[c.words[i+2]] {
+		return TemporalDate{}, false
+	}
+	h := dayPartHours["night"]
+	return TemporalDate{Ref: c.words[i] + " " + c.words[i+1], Date: fmtDate(now.AddDate(0, 0, -1)), Dir: "past", Hour: &h}, true
 }
 
 func matchAnnualHoliday(query string, now time.Time) *TemporalResult {

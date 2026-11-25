@@ -278,3 +278,31 @@ func TestRules_TheRestFormsOfIssue532(t *testing.T) {
 		"Was steht morgen an?":                                                "2026-11-23/future",
 	})
 }
+
+// TestRules_TheReviewOfIssue532: the forms a fresh review of the wave found
+// read wrong by its first version — a clause reported behind an English verb
+// of saying or knowing keeps its own tense; a present at the end of a
+// verb-last clause that ends like a strong simple past ("schließen",
+// "abschließen") stays a present; a day keyword without a part, a holiday in
+// a clause of its own and a weekday that names the keyword's day stay with a
+// day keyword with a part of the day; "The Tonight Show" names no day; a
+// state "wieder kaputt" pairs with a participle clause; "slipped to Friday"
+// names the new day.
+func TestRules_TheReviewOfIssue532(t *testing.T) {
+	check517(t, now517, want517{
+		"I heard the release is on Friday":                                   "2026-11-27/future",
+		"They said the fix lands on Monday":                                  "2026-11-23/future",
+		"You said you would deploy on Monday":                                "2026-11-23/future",
+		"She told us the review happens on Friday":                           "2026-11-27/future",
+		"Everyone knew the launch is on Thursday":                            "2026-11-26/future",
+		"She said on Monday that the API is stable":                          "2026-11-16/past",
+		"Die Tickets, die wir am Montag schließen, sind wichtig":             "2026-11-23/future",
+		"Was wir am Freitag abschließen, kommt ins Release":                  "2026-11-27/future",
+		"Was lief gestern Abend schief und was steht morgen an?":             "2026-11-21/past@19 2026-11-23/future",
+		"Was lief gestern Abend schief und was ist für Weihnachten geplant?": "2026-11-21/past@19 2026-12-25/range",
+		"Who hosts The Tonight Show?":                                        "nil",
+		"Heute ist Sonntag, was steht an?":                                   "2026-11-22/today",
+		"Am Montag repariert, am Dienstag wieder kaputt?":                    "2026-11-16/past 2026-11-17/past",
+		"The release slipped to Friday":                                      "2026-11-27/future",
+	})
+}
