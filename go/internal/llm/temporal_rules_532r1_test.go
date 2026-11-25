@@ -96,6 +96,8 @@ func TestRules_AnEnglishPresentGivesItsClauseATenseOfItsOwn(t *testing.T) {
 		"The cluster died on Saturday. The vendor comes on Tuesday.":                         "2026-11-21/past 2026-11-24/future",
 		"The bug came in on Monday, the fix on Tuesday, and the release goes out on Friday.": "2026-11-16/past 2026-11-17/past 2026-11-27/future",
 		"On Friday we demo the feature that we built on Monday.":                             "2026-11-27/future 2026-11-16/past",
+		"Tom opened a PR on Monday that Sarah reviews on Friday?":                            "2026-11-16/past 2026-11-27/future",
+		"Sarah reviews the PR on Friday that Tom opened on Monday?":                          "2026-11-27/future 2026-11-16/past",
 		"On Thursday the team presents what it built on Monday.":                             "2026-11-26/future 2026-11-16/past",
 		"Anna left on Monday; her successor starts on Friday.":                               "2026-11-16/past 2026-11-27/future",
 		"Billing goes live on Friday; the old system died on Tuesday.":                       "2026-11-27/future 2026-11-17/past",

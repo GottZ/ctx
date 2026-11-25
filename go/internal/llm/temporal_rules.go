@@ -530,10 +530,12 @@ func (c *clauseWords) embeddedClauses(s, e int) {
 		if englishEmbedOpeners[w] {
 			c.starts[i] = true
 		}
-		if c.reducedRelative(i) || w == "that" && i+1 < e && (reducedSubjects[c.words[i+1]] || englishMainAux[c.words[i+1]]) {
-			// "that" before a subject or an auxiliary opens a relative or
-			// a reported clause ("the feature that we built on Monday",
-			// "the PRs that are due on Friday"), issue #532.
+		if c.reducedRelative(i) || w == "that" && i+1 < e && (reducedSubjects[c.words[i+1]] || englishMainAux[c.words[i+1]] || c.nameAt(i+1)) {
+			// "that" before a subject — a pronoun or a name — or an
+			// auxiliary opens a relative or a reported clause ("the
+			// feature that we built on Monday", "a PR on Monday that Sarah
+			// reviews on Friday", "the PRs that are due on Friday"), issue
+			// #532.
 			c.starts[i] = true
 		}
 		switch {
