@@ -169,3 +169,57 @@ func TestRules_AnEnglishSimplePastBehindANoun(t *testing.T) {
 		"Let's cut the release on Thursday":        "2026-11-26/future",
 	})
 }
+
+// TestRules_TwoReportsOfParticiplesAreAPerfekt (issue #532, point 4, the
+// ellipsis of participles): two clauses side by side, each a date with a
+// participle at its end and no finite verb, are a Perfekt without its
+// auxiliary where the pair asks for a reason or one of the two ends the
+// question with a question mark; a participle of an arrangement or a state,
+// and a question mark behind a clause of its own, leave the pair unread.
+func TestRules_TwoReportsOfParticiplesAreAPerfekt(t *testing.T) {
+	check517(t, now517, want517{
+		"Am Montag gepatcht, am Dienstag wieder gecrasht – wieso?": "2026-11-16/past 2026-11-17/past",
+		"Am Dienstag ausgerollt, am Mittwoch zurückgerollt?":       "2026-11-17/past 2026-11-18/past",
+		"Montag migriert, Dienstag gelöscht – warum?":              "2026-11-16/past 2026-11-17/past",
+		// counter-cases
+		"Montag Büro geschlossen, Dienstag Homeoffice angeordnet":                    "2026-11-23/future 2026-11-24/future",
+		"Am Freitag Server abgeschaltet, am Montag wieder hochgefahren – passt das?": "2026-11-27/future 2026-11-23/future",
+		"Montag Deployment geplant, Dienstag Rollout vorgesehen":                     "2026-11-23/future 2026-11-24/future",
+	})
+}
+
+// TestRules_ThePresentOfAStemOnT (issue #532, point 4): the present of the
+// verbs whose stem ends in -t after a consonant and that no weak verb without
+// that -t shares ("punkten", "belasten", "sichten") is no simple past; their
+// simple past on -eten, and "rasten", the past of "rasen", stay pasts.
+func TestRules_ThePresentOfAStemOnT(t *testing.T) {
+	check517(t, now517, want517{
+		"Welche Teams punkten am Freitag?":                  "2026-11-27/future",
+		"Welche Jobs belasten am Montag die Datenbank?":     "2026-11-23/future",
+		"Welche Kollegen sichten am Dienstag die Logs?":     "2026-11-24/future",
+		"Welche Server crashten am Freitag?":                "2026-11-20/past",
+		"Welche Jobs belasteten am Dienstag die Datenbank?": "2026-11-17/past",
+		"Welche Autos rasten am Montag über den Hof?":       "2026-11-16/past",
+	})
+}
+
+// TestRules_TheImperativeOfARequest (issue #532, point 4): a clause opened by
+// the imperative of a verb of a request (imperatives) has a verb of its own
+// that names no past, as "Lass uns" has, so that the question's past is the
+// clause's that has it; "vom" before one of several weekdays names the day
+// that has been, as before a single one; "hing" is a simple past. Adverbs
+// before "mal" and a simple past at the start of a question are no
+// imperatives.
+func TestRules_TheImperativeOfARequest(t *testing.T) {
+	check517(t, now517, want517{
+		"Erinnere mich am Freitag an den Bug, den wir am Montag hatten": "2026-11-27/future 2026-11-16/past",
+		"Schau dir am Montag an, was am Freitag kaputtging":             "2026-11-23/future 2026-11-20/past",
+		"Frag ihn am Dienstag, was am Samstag los war":                  "2026-11-24/future 2026-11-21/past",
+		"Teste am Donnerstag, ob der Fix vom Dienstag hält":             "2026-11-26/future 2026-11-17/past",
+		"Starte am Dienstag den Job neu, der am Montag hing":            "2026-11-24/future 2026-11-16/past",
+		// counter-cases
+		"Wieder mal am Freitag, als alles kaputt war?":             "2026-11-20/past",
+		"Lief am Montag mal was schief?":                           "2026-11-16/past",
+		"Schon mal am Montag, wo der Build rot war, nachgeschaut?": "2026-11-16/past",
+	})
+}

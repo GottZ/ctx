@@ -1900,7 +1900,7 @@ var strongPastForms = []string{
 	"trug", "trugen", "bot", "boten", "bat", "baten", "galt", "galten", "schlug", "schlugen", "traf", "trafen",
 	"begann", "begannen", "gewann", "gewannen", "verlor", "wuchs", "wuchsen", "sank", "sanken", "lag", "lagen",
 	"tat", "taten", "las", "lasen", "aß", "saß", "saßen", "flog", "flogen", "floss", "flossen", "schien", "schienen",
-	"stieß", "stießen",
+	"stieß", "stießen", "hing", "hingen",
 }
 
 // presentTForms are present forms of German verbs whose stem ends in -t,
@@ -1916,6 +1916,13 @@ var presentTForms = []string{
 	// read where a finite verb stands (finitePast, issue #506).
 	"werten", "werte", "beachten", "beachte", "betrachten", "betrachte", "beobachten", "beobachte",
 	"lauten", "laute", "antworten", "antworte",
+	// The present of verbs whose stem ends in -t after a consonant, which
+	// no weak verb without that -t has for its simple past (issue #532):
+	// "punkten" is no "punk-ten", while "rasten" is the past of "rasen" and
+	// stays out. Their simple past ends in -eten ("punkteten").
+	"punkten", "punkte", "lasten", "laste", "sichten", "schichten", "dichten", "lüften", "rüsten", "fasten", "husten",
+	"heften", "haften", "spalten", "falten", "texten", "casten", "boosten", "shiften", "liften", "driften", "tasten",
+	"stiften", "schuften", "fristen", "rosten", "pachten", "fechten", "flechten", "leuchten",
 }
 
 // germanPastShape reports whether w has the shape of the German simple
@@ -2035,7 +2042,7 @@ var (
 // Montag zu deployen"). A clause with none of them ("Am Montag,", "On
 // Monday,") takes the tense of the question.
 func (c clauseWords) hasOwnVerb(s, e int) bool {
-	if clauseOpeners[c.words[s]] || hortatives[c.words[s]] {
+	if clauseOpeners[c.words[s]] || hortatives[c.words[s]] || imperatives[c.words[s]] {
 		return true
 	}
 	for i := s; i < e; i++ {
@@ -2120,6 +2127,19 @@ func (c clauseWords) verbIn(s, e, lang int) bool {
 // in "Lass uns am Freitag über den Bug reden, den wir am Montag hatten" the
 // past of the relative clause.
 var hortatives = toWordSet("lass", "lasst", "lassen", "let's", "let\u2019s")
+
+// imperatives are the imperatives of the verbs a request to note, check or
+// send something opens its clause with ("Erinnere mich am Freitag an den Bug,
+// den wir am Montag hatten", "Schau dir am Montag an, was am Freitag
+// kaputtging"): like the imperative of "lassen" (hortatives) the clause has a
+// verb of its own that names no past (issue #532). A list, not the shape: any
+// word before "mal", "bitte" or a pronoun reads adverbs and simple pasts as
+// imperatives ("Wieder mal am Freitag, …", "Lief am Montag mal was schief?").
+var imperatives = toWordSet("schau", "schaue", "guck", "sieh", "schick", "schicke", "sende", "sag", "sage", "ruf", "rufe",
+	"gib", "prüf", "prüfe", "überprüf", "überprüfe", "frag", "frage", "check", "checke", "schreib", "schreibe",
+	"erinnere", "erinner", "melde", "meld", "kümmere", "kümmer", "bring", "bringe", "leg", "lege", "lies", "nimm",
+	"denk", "denke", "merk", "merke", "teste", "hilf", "zeig", "zeige", "hol", "hole", "such", "suche", "notier",
+	"notiere", "informier", "informiere", "kontrollier", "kontrolliere", "stell", "stelle", "setz", "setze", "trag", "trage")
 
 // perfektAux are the finite forms of "haben" and "sein", and the past
 // subjunctive of both ("hätte gemacht", "wäre gegangen"), that make the
@@ -2491,7 +2511,7 @@ func (c clauseWords) clauseEllipsis(s, e int) bool {
 			return false
 		}
 	}
-	proof := seinParticiple(c.words[last])
+	proof := seinParticiple(c.words[last]) || c.pairedEllipsis(s, e)
 	for i := s; i < last; i++ {
 		w := c.words[i]
 		if germanPastVerbs[w] || perfektAux[w] || germanFiniteWords[w] {
@@ -2507,6 +2527,87 @@ func (c clauseWords) clauseEllipsis(s, e int) bool {
 		}
 	}
 	return proof
+}
+
+// stateParticiples are participles that name an arrangement or a state as
+// often as an act (pairedEllipsis): "Montag Büro geschlossen, Dienstag
+// Homeoffice angeordnet".
+var stateParticiples = toWordSet("geschlossen", "geöffnet", "gesperrt", "freigegeben", "angeordnet", "vereinbart",
+	"eingeschränkt", "ausgebucht", "besetzt", "ausgelastet", "ausverkauft", "abgesagt", "verschoben", "aufgehoben",
+	"eingefroren", "genehmigt", "organisiert", "freigeschaltet", "gedrosselt", "angesagt", "zugesagt", "bestätigt")
+
+// reasonWords ask for a reason.
+var reasonWords = toWordSet("warum", "wieso", "weshalb", "weswegen", "why")
+
+// pairedEllipsis reports whether the clause [s, e) and a clause beside it in
+// its sentence are each a date with a participle at its end and no finite
+// verb (participleClause), and the pair asks (pairAsks): a reason ("Am Montag
+// gelauncht, am Mittwoch gerollbackt – warum?") or that one of the two ends
+// with a question mark ("Am Dienstag deployed, am Donnerstag wieder
+// zurückgerollt?"): two reports of what was done, a Perfekt without its
+// auxiliary (issue #532). A question mark behind a clause of its own ("…, am
+// Montag wieder hochgefahren – passt das?") asks about an arrangement as
+// often, and an arrangement or a state at the end (stateParticiples,
+// planParticiples) reads as one.
+func (c clauseWords) pairedEllipsis(s, e int) bool {
+	if !c.participleClause(s, e) {
+		return false
+	}
+	if s > 0 && !c.sentence[s] {
+		if ps, pe := c.clauseOf(s - 1); c.participleClause(ps, pe) && c.pairAsks(ps, e) {
+			return true
+		}
+	}
+	if e < len(c.words) && !c.sentence[e] {
+		if ns, ne := c.clauseOf(e); c.participleClause(ns, ne) && c.pairAsks(s, ne) {
+			return true
+		}
+	}
+	return false
+}
+
+// pairAsks reports whether the pair of clauses [s, e) asks (pairedEllipsis):
+// it ends its sentence with a question mark, or a word of reasonWords stands
+// in it, in the clause before it or in the clause behind it in its sentence.
+// It reads those three clauses, so that a question of many such clauses is
+// read in time linear in its length.
+func (c clauseWords) pairAsks(s, e int) bool {
+	if c.asks[e-1] && (e == len(c.words) || c.sentence[e]) {
+		return true
+	}
+	lo, hi := s, e
+	if s > 0 && !c.sentence[s] {
+		lo, _ = c.clauseOf(s - 1)
+	}
+	if e < len(c.words) && !c.sentence[e] {
+		_, hi = c.clauseOf(e)
+	}
+	scanned(hi - lo)
+	for i := lo; i < hi; i++ {
+		if reasonWords[c.words[i]] {
+			return true
+		}
+	}
+	return false
+}
+
+// participleClause reports whether the clause [s, e) has a date word, ends
+// with a participle that names no plan and no state, and has no finite verb
+// and no subject pronoun.
+func (c clauseWords) participleClause(s, e int) bool {
+	last := e - 1
+	if last <= s || !c.participleAt(s, last) || planParticiples[c.words[last]] || stateParticiples[c.words[last]] {
+		return false
+	}
+	date := false
+	for i := s; i < last; i++ {
+		w := c.words[i]
+		if germanPastVerbs[w] || perfektAux[w] || germanFiniteWords[w] || subjectWords[w] || englishFiniteWords[w] && w != "am" {
+			return false
+		}
+		date = date || dateWord(w)
+	}
+	return date
 }
 
 // ierenParticiple reports whether tok is the participle of a German verb on
@@ -3692,16 +3793,7 @@ func matchDayKeywordPart(query string, now time.Time) *TemporalResult {
 		if tr == nil {
 			tr = newTenseReader(query)
 		}
-		backward := tr.at(c.offs[w.idx]) == "past"
-		dir := "future"
-		if backward {
-			dir = "past"
-		}
-		td := TemporalDate{Ref: w.ref, Date: fmtDate(resolveWeekdayDate(w.wd, backward, now)), Dir: dir}
-		if h, ok := c.dayPartAt(w.idx); ok {
-			td.Hour = &h
-		}
-		hits = append(hits, hit{w.idx, td})
+		hits = append(hits, hit{w.idx, c.weekdayDate(tr, w.wd, w.idx, w.ref, now)})
 	}
 	sort.SliceStable(hits, func(a, b int) bool { return hits[a].idx < hits[b].idx })
 	var dates []TemporalDate
@@ -3981,6 +4073,25 @@ func findAllWeekdays(tokens []string) []struct {
 	return results
 }
 
+// weekdayDate is the date of the weekday wd at word i of c, named ref, among
+// several dates of a question: by the tense of its clause (tr), the hour of a
+// part of the day that belongs to it (dayPartAt), and — as for a single
+// weekday (matchWeekday) — "vom Freitag" names the Friday that has been
+// unless its clause points forward (issue #532).
+func (c clauseWords) weekdayDate(tr *tenseReader, wd time.Weekday, i int, ref string, now time.Time) TemporalDate {
+	t := tr.at(c.offs[i])
+	backward := t == "past" || i > 0 && c.words[i-1] == "vom" && t != "future"
+	dir := "future"
+	if backward {
+		dir = "past"
+	}
+	td := TemporalDate{Ref: ref, Date: fmtDate(resolveWeekdayDate(wd, backward, now)), Dir: dir}
+	if h, ok := c.dayPartAt(i); ok {
+		td.Hour = &h
+	}
+	return td
+}
+
 func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
 
@@ -4020,19 +4131,8 @@ func matchMultiKeyword(query string, now time.Time) *TemporalResult {
 		var dates []TemporalDate
 		seen := make(map[string]bool)
 		for _, w := range weekdays {
-			backward := tr.at(c.offs[w.idx]) == "past"
-			dir := "future"
-			if backward {
-				dir = "past"
-			}
-			d := resolveWeekdayDate(w.wd, backward, now)
-			key := fmtDate(d)
-			if !seen[key] {
-				seen[key] = true
-				td := TemporalDate{Ref: w.ref, Date: key, Dir: dir}
-				if h, ok := c.dayPartAt(w.idx); ok {
-					td.Hour = &h
-				}
+			if td := c.weekdayDate(tr, w.wd, w.idx, w.ref, now); !seen[td.Date] {
+				seen[td.Date] = true
 				dates = append(dates, td)
 			}
 		}
