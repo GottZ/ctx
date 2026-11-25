@@ -170,9 +170,10 @@ type BatchResult struct {
 // Lock order, the same for every batch, so two batches never wait for each
 // other in opposite orders:
 //
-//  0. a request's key row FOR KEY SHARE (holdRequestKey, issue #555) — a
-//     batch whose key a tenant-delete removed writes nothing; it waits for
-//     nothing but that delete, so it comes before every lock below;
+//  0. the request key's gate, a shared advisory lock (holdRequestKey, issue
+//     #555) — a batch whose key a tenant-delete removed, or took a scope
+//     from, writes nothing; it waits for nothing but that delete's key step,
+//     so it comes before every lock below;
 //  1. the supersedes lock of every scope the batch names — written or not,
 //     an update item's current scope (read without a lock first,
 //     readBatchUpdateTargets) and the scope it moves to — EXCLUSIVE, in sorted

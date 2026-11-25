@@ -61,9 +61,30 @@ func TestRequestKeyGateThroughput(t *testing.T) {
 	if err != nil || !ar.IsValid {
 		t.Fatal(err)
 	}
-	wctx := probeCtx(ctx, ar)
-	pool := zzGatePool(t, f.dsn, 72)
+	gated := probeCtx(ctx, ar)
+	// The test server takes 25 connections: the writers share a pool of 20,
+	// as the requests of an instance share its pool.
+	pool := zzGatePool(t, f.dsn, 20)
+	// With CTX_P555_TPUT_AB=1 every writer count runs three times in turns
+	// without and with the request's key in the writers' context — the gate
+	// the only difference, the same binary, pool and moment's host load.
+	type window struct {
+		writers int
+		label   string
+		wctx    context.Context
+	}
+	var windows []window
 	for _, writers := range writerSets {
+		if os.Getenv("CTX_P555_TPUT_AB") == "1" {
+			for range 3 {
+				windows = append(windows, window{writers, "no-gate", ctx}, window{writers, "gate", gated})
+			}
+		} else {
+			windows = append(windows, window{writers, "this-tree", gated})
+		}
+	}
+	for _, win := range windows {
+		writers, wctx := win.writers, win.wctx
 		before := nextMultiXact(t, f.pool)
 		deadline := time.Now().Add(time.Duration(secs) * time.Second)
 		var n, failed atomic.Int64
@@ -103,7 +124,7 @@ func TestRequestKeyGateThroughput(t *testing.T) {
 		if failed.Load() > 0 {
 			t.Errorf("%d writers: %d failed writes, first: %v", writers, failed.Load(), first.Load())
 		}
-		t.Logf("TPUT writers=%d budget=%v secs=%d writes=%d writes_per_s=%.0f multixacts=%d",
-			writers, budgeted, secs, n.Load(), float64(n.Load())/el.Seconds(), mx)
+		t.Logf("TPUT writers=%d budget=%v %s secs=%d writes=%d writes_per_s=%.0f multixacts=%d",
+			writers, budgeted, win.label, secs, n.Load(), float64(n.Load())/el.Seconds(), mx)
 	}
 }

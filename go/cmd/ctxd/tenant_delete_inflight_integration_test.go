@@ -529,38 +529,57 @@ func TestStoreThroughputProbe555(t *testing.T) {
 	if os.Getenv("CTX_P555_COST") == "" {
 		t.Skip("measurement: set CTX_P555_COST=1")
 	}
-	f := newInflightFixture(t, "CTX_RATE_LIMIT_WRITE", "0") // no write budget: the store's own cost
+	// CTX_P555_COST_WRITERS (default "8"): the writer counts, one after the
+	// other; CTX_P555_COST_BUDGET=1 books every write on the write budget (a
+	// limit no run reaches), otherwise none.
+	limit := "0"
+	if os.Getenv("CTX_P555_COST_BUDGET") == "1" {
+		limit = "100000000"
+	}
+	f := newInflightFixture(t, "CTX_RATE_LIMIT_WRITE", limit)
 	_, _, key := f.tenant(t, "probe555")
-	const writers = 8
-	var rates []string
-	for round := range 4 {
-		var n atomic.Int64
-		stop := time.Now().Add(5 * time.Second)
-		var wg sync.WaitGroup
-		for w := range writers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for i := 0; time.Now().Before(stop); i++ {
-					body := nulSweepJSON(map[string]any{"category": "learnings", "title": fmt.Sprintf("probe %d %d %d", round, w, i), "content": "a single store's block"})
-					req := httptest.NewRequest(http.MethodPost, "/api/store", strings.NewReader(body))
-					req.RemoteAddr = "192.0.2.56:4000"
-					req.Header.Set("Authorization", "Bearer "+key)
-					req.Header.Set("Content-Type", "application/json")
-					rec := httptest.NewRecorder()
-					f.router.ServeHTTP(rec, req)
-					if rec.Code != http.StatusOK {
-						t.Errorf("store: %d %s", rec.Code, rec.Body.String())
-						return
-					}
-					n.Add(1)
-				}
-			}()
-		}
-		wg.Wait()
-		if round > 0 { // the first run warms the pool and the caches
-			rates = append(rates, fmt.Sprintf("%.0f", float64(n.Load())/5))
+	counts := []int{8}
+	if v := os.Getenv("CTX_P555_COST_WRITERS"); v != "" {
+		counts = nil
+		for _, s := range strings.Split(v, ",") {
+			var n int
+			if _, err := fmt.Sscan(strings.TrimSpace(s), &n); err != nil || n < 1 {
+				t.Fatalf("CTX_P555_COST_WRITERS %q", v)
+			}
+			counts = append(counts, n)
 		}
 	}
-	t.Logf("POST /api/store, 8 writers of one key, writes per second (5 s runs): %s", strings.Join(rates, ", "))
+	for _, writers := range counts {
+		var rates []string
+		for round := range 3 {
+			var n atomic.Int64
+			stop := time.Now().Add(5 * time.Second)
+			var wg sync.WaitGroup
+			for w := range writers {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for i := 0; time.Now().Before(stop); i++ {
+						body := nulSweepJSON(map[string]any{"category": "learnings", "title": fmt.Sprintf("probe %d %d %d %d", writers, round, w, i), "content": "a single store's block"})
+						req := httptest.NewRequest(http.MethodPost, "/api/store", strings.NewReader(body))
+						req.RemoteAddr = "192.0.2.56:4000"
+						req.Header.Set("Authorization", "Bearer "+key)
+						req.Header.Set("Content-Type", "application/json")
+						rec := httptest.NewRecorder()
+						f.router.ServeHTTP(rec, req)
+						if rec.Code != http.StatusOK {
+							t.Errorf("store: %d %s", rec.Code, rec.Body.String())
+							return
+						}
+						n.Add(1)
+					}
+				}()
+			}
+			wg.Wait()
+			if round > 0 { // the first run warms the pool and the caches
+				rates = append(rates, fmt.Sprintf("%.0f", float64(n.Load())/5))
+			}
+		}
+		t.Logf("ROUTER writers=%d budget=%s POST /api/store of one key, writes per second (5 s runs): %s", writers, limit, strings.Join(rates, ", "))
+	}
 }

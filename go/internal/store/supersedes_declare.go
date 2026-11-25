@@ -131,10 +131,10 @@ func (e *SupersedesConflictError) Error() string {
 // these orders ever interleaves with another (issues #197, #284).
 //
 // The lock is the FIRST its transaction takes — after the guess lock where a
-// dream batch takes one (LockSupersedesGuesses), and after the key share of
-// a request's write (holdRequestKey, issue #555), which waits for nothing
-// but a delete of the key — so every holder waits for either one holding no
-// row lock. Transaction-scoped; released at commit or rollback.
+// dream batch takes one (LockSupersedesGuesses), and after the gate of a
+// request's write (holdRequestKey, issue #555), which waits for nothing but
+// a tenant-delete's key step — so every holder waits for either one holding
+// no row lock. Transaction-scoped; released at commit or rollback.
 func LockSupersedesScope(ctx context.Context, tx pgx.Tx, scope string) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('ctx:supersedes:' || $1::text))`, scope); err != nil {
 		return fmt.Errorf("store: supersedes scope lock: %w", err)

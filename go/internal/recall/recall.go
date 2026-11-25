@@ -10,6 +10,7 @@ package recall
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -19,9 +20,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/pgxdb"
+	"github.com/GottZ/ctx/internal/store"
 )
 
 // Config carries the recall_check core policy values (design/01 §3.2). It is
@@ -210,10 +214,13 @@ func RunOnceWithHooks(ctx context.Context, pool *pgxpool.Pool, cfg Config, regis
 				stopReason = run.Meta["invalid_reason"].(string)
 			}
 
-			if err := Insert(ctx, pool, run); err != nil {
+			wrote, err := insertRun(ctx, pool, plan.Tenant, run)
+			if err != nil {
 				return result, err
 			}
-			result.Rows = append(result.Rows, run)
+			if wrote {
+				result.Rows = append(result.Rows, run)
+			}
 		}
 	}
 	return result, nil
@@ -585,4 +592,24 @@ func uniqueInts(sorted []int) []int {
 		}
 	}
 	return out
+}
+
+// insertRun writes run in a transaction that holds, first, the gate of the
+// tenant that owned the run's scope when the run planned (issue #555,
+// store.HoldRunTenant): a run that planned the scope before its tenant's
+// delete began writes no row after the delete's first step — the delete
+// drains the scope's runs, and a row written after it would stand for the
+// next owner of the name. wrote is false for such a row (not an error of the
+// run).
+func insertRun(ctx context.Context, pool *pgxpool.Pool, tenant string, run Run) (wrote bool, err error) {
+	err = pgxdb.Write(ctx, pool, pgxdb.At("recall: insert run"), func(tx pgx.Tx) error {
+		if err := store.HoldRunTenant(ctx, tx, tenant); err != nil {
+			return err
+		}
+		return Insert(ctx, tx, run)
+	})
+	if errors.Is(err, store.ErrRunTenantGone) {
+		return false, nil
+	}
+	return err == nil, err
 }

@@ -45,6 +45,11 @@ type StratumPlan struct {
 	VisibleTypes   []string // per-scope allowlist (SnapshotForTenant) / base set for "all"
 	CorpusEmbedded int      // visible embedded blocks in the measurement window
 	ScopeChanged   bool     // the class's largest scope differs from the previous run (§4.2.1 object stability)
+	// Tenant owns Scope when the run plans (issue #555): the run's row for
+	// the scope holds that tenant's gate, so a row measured before the
+	// tenant's delete is not written after it (insertRun). "" for a scope
+	// no tenant owns and for "all".
+	Tenant string
 }
 
 // PlanStrata builds the run's stratum list (§4.2.1). Two steps, because the
@@ -91,6 +96,10 @@ func PlanStrata(ctx context.Context, pool *pgxpool.Pool, registry *blocktype.Reg
 		return nil, fmt.Errorf("recall: scope rows: %w", err)
 	}
 	sort.Strings(scopes)
+	owners, err := scopeOwners(ctx, pool, scopes)
+	if err != nil {
+		return nil, err
+	}
 
 	type scoped struct {
 		scope   string
@@ -142,6 +151,7 @@ func PlanStrata(ctx context.Context, pool *pgxpool.Pool, registry *blocktype.Reg
 			VisibleTypes:   w.visible,
 			CorpusEmbedded: w.count,
 			ScopeChanged:   prevScopes != nil && prevScopes[classNames[cls]] != "" && prevScopes[classNames[cls]] != scope,
+			Tenant:         owners[scope],
 		})
 	}
 
@@ -166,6 +176,28 @@ func PlanStrata(ctx context.Context, pool *pgxpool.Pool, registry *blocktype.Reg
 		}
 	}
 	return plans, nil
+}
+
+// scopeOwners maps each of scopes a tenant owns to that tenant (issue #555,
+// StratumPlan.Tenant).
+func scopeOwners(ctx context.Context, pool *pgxpool.Pool, scopes []string) (map[string]string, error) {
+	rows, err := pool.Query(ctx, `SELECT scope, tenant_id::text FROM context_tenant_scopes WHERE scope = ANY($1)`, scopes)
+	if err != nil {
+		return nil, fmt.Errorf("recall: scope owners: %w", err)
+	}
+	defer rows.Close()
+	owners := map[string]string{}
+	for rows.Next() {
+		var sc, tn string
+		if err := rows.Scan(&sc, &tn); err != nil {
+			return nil, fmt.Errorf("recall: scan scope owner: %w", err)
+		}
+		owners[sc] = tn
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("recall: scope owner rows: %w", err)
+	}
+	return owners, nil
 }
 
 // SampleLogQueries collects up to limit REAL query vectors: a bounded

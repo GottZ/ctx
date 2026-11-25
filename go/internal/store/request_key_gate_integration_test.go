@@ -711,3 +711,54 @@ func TestTenantPruneOrderAndPassEnds(t *testing.T) {
 		t.Fatalf("%d blocks, %d links, %d other rows, tenant %d left", blocks, links, other, tenant)
 	}
 }
+
+// TestKeyStepHoldsNoGateOfAKeyItKeeps (review of the round): the key step
+// takes the tenant's scopes from a key of another tenant in a short
+// transaction of its own, and deletes the keys that go in a second one —
+// whose key delete sets the access log rows of those keys to NULL, millions
+// at the target scale. While that second transaction is held at its COMMIT,
+// the other tenant's key writes into its own home at once: its gate is not
+// held. Before, both ran in one transaction holding every gate, and the other
+// tenant's writes waited for the whole cascade.
+func TestKeyStepHoldsNoGateOfAKeyItKeeps(t *testing.T) {
+	f := newP547Fixture(t)
+	ctx := context.Background()
+	tenantID, scopes, _ := pruneWritersTenant(t, f, "gkk", 1)
+	_, raw, err := store.MintKeyWithQuota(ctx, f.pool, "keeps", "private", []string{"private", scopes[0]}, []string{scopes[0]}, store.DefaultTenantID, "member", nil, store.AuditStamp{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, hold := testdb.HoldCommitPool(t, f.dsn, func(sql string) bool { return strings.HasPrefix(sql, "DELETE FROM context_api_keys WHERE tenant_id") })
+	pruned := make(chan error, 1)
+	go func() { pruned <- store.PruneTenant(ctx, held, tenantID, store.AuditStamp{}) }()
+	hold.Wait(t)
+	// A request of the kept key that authenticates now, while the key delete
+	// stands at its COMMIT.
+	kctx, _ := gateAuth(t, f.pool, raw)
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.UpsertBlock(kctx, f.pool, "learnings", "gkk own", "its own home", nil, nil, "private", true, store.SensitivityWrite{}, "")
+		done <- err
+	}()
+	waited := false
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("the kept key's write into its home beside the key delete: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		waited = true
+		t.Errorf("the kept key's write into its home waited 5 s for the key delete — its gate is held by it")
+	}
+	hold.Release()
+	if err := <-pruned; err != nil {
+		t.Fatalf("tenant-delete: %v", err)
+	}
+	if waited {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the kept key's write did not end after the delete")
+		}
+	}
+}

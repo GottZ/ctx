@@ -10,14 +10,20 @@ import (
 	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
-// pruneKeyGatesSQL lists the gates (requestKeyLockSQL) of every key the key
-// step deletes or takes a scope from: the tenant's keys, and every other key
-// that names one of the tenant's scopes $2 — as its home scope, or in its
-// allowed or write scopes (issue #555). Sorted, so two key steps that meet
-// take their shared gates in one order.
-const pruneKeyGatesSQL = `SELECT DISTINCT hashtext(id::text) AS h FROM context_api_keys
+// pruneKeyDeleteGatesSQL lists the gates (requestKeyLockSQL) of the keys the
+// key step deletes (pruneKeysDeleteSQL): the tenant's keys and every key whose
+// home is one of its scopes $2. Sorted, so two key steps that meet take their
+// gates in one order.
+const pruneKeyDeleteGatesSQL = `SELECT DISTINCT hashtext(id::text) AS h FROM context_api_keys
  WHERE tenant_id = $1::uuid OR home_scope = ANY($2::text[])
-    OR allowed_scopes && $2::text[] OR write_scopes && $2::text[]
+ ORDER BY h`
+
+// pruneKeyStripGatesSQL lists the gates of the keys the key step takes one of
+// the scopes $1 from and leaves standing (pruneKeysStripSQL): keys of other
+// tenants that name one in their allowed or write scopes. $2 = the tenant.
+const pruneKeyStripGatesSQL = `SELECT DISTINCT hashtext(id::text) AS h FROM context_api_keys
+ WHERE (allowed_scopes && $1::text[] OR write_scopes && $1::text[])
+   AND tenant_id <> $2::uuid AND home_scope <> ALL($1::text[])
  ORDER BY h`
 
 // pruneKeyGateSQL is the key step's side of a request key's gate.
@@ -36,19 +42,20 @@ const pruneKeysStripSQL = `UPDATE context_api_keys
    SET allowed_scopes = ARRAY(SELECT s FROM unnest(allowed_scopes) WITH ORDINALITY AS u(s, o) WHERE s <> ALL($1::text[]) ORDER BY o),
        write_scopes   = ARRAY(SELECT s FROM unnest(write_scopes) WITH ORDINALITY AS u(s, o) WHERE s <> ALL($1::text[]) ORDER BY o),
        updated_at     = now()
- WHERE allowed_scopes && $1::text[] OR write_scopes && $1::text[]`
+ WHERE (allowed_scopes && $1::text[] OR write_scopes && $1::text[])
+   AND tenant_id <> $2::uuid AND home_scope <> ALL($1::text[])`
 
-// lockRequestKeysExclusive takes, in tx, the gate of every key the key step
-// changes (pruneKeyGatesSQL), exclusively and in sorted order. Each gate
-// waits for the request writes of its key that hold it, and a request write
-// that comes after waits for this transaction and then finds its key gone
-// or its scope taken (holdRequestKey). A key that begins to name the tenant
-// while the gates are taken (a key minted meanwhile) is locked in a further
-// round, until a round finds none.
-func lockRequestKeysExclusive(ctx context.Context, tx pgx.Tx, tenantID string, scopes []string) error {
+// lockRequestKeysExclusive takes, in tx, the gate of every key gatesSQL
+// lists (with args), exclusively and in sorted order. Each gate waits for the
+// request writes of its key that hold it, and a request write that comes
+// after waits for this transaction and then finds its key gone or its scope
+// taken (holdRequestKey). A key that joins the list while the gates are taken
+// (a key minted meanwhile) is locked in a further round, until a round finds
+// none.
+func lockRequestKeysExclusive(ctx context.Context, tx pgx.Tx, gatesSQL string, args ...any) error {
 	held := map[int32]bool{}
 	for {
-		hs, err := collectRows(ctx, tx, pgx.RowTo[int32], pruneKeyGatesSQL, tenantID, scopes)
+		hs, err := collectRows(ctx, tx, pgx.RowTo[int32], gatesSQL, args...)
 		if err != nil {
 			return fmt.Errorf("key gates: %w", err)
 		}
@@ -79,18 +86,39 @@ func collectRows[T any](ctx context.Context, tx pgx.Tx, fn pgx.RowToFunc[T], sql
 }
 
 // pruneTenantKeys is the tenant-delete's key step (steps 7b and 7, see
-// PruneTenant): the gates of the keys it changes, then the tenant's model
-// consumers with their grants, limits and keys, then the knowledge keys —
-// the tenant's and every key whose home is one of its scopes — with their
-// staged writes, and the tenant's scopes out of every other key's lists. It
-// runs in one transaction stamped with the caller's actor and request id and
-// ALWAYS via='offboarding'.
+// PruneTenant), in two transactions, each stamped with the caller's actor
+// and request id and ALWAYS via='offboarding'. First the tenant's scopes go
+// out of the lists of every key of another tenant that names one (it lives
+// on), under the gates of those keys only: a short transaction, so their
+// writes into their own scopes wait for no more than it. Then, under the
+// gates of the keys that go, the tenant's model consumers with their grants,
+// limits and keys, and the knowledge keys — the tenant's and every key whose
+// home is one of its scopes — with their staged writes. The key delete sets
+// their access log rows' api_key_id to NULL (its foreign key), at the target
+// scale millions of rows: only writers of keys that go wait for that.
 func pruneTenantKeys(ctx context.Context, pool *pgxpool.Pool, tenantID string, scopes []string, stamp AuditStamp) error {
 	stamp.Via = ViaOffboarding
+	if len(scopes) > 0 {
+		if err := pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+			// The gates first, as of every request write (holdRequestKey).
+			if err := lockRequestKeysExclusive(ctx, tx, pruneKeyStripGatesSQL, scopes, tenantID); err != nil {
+				return err
+			}
+			if err := stampAudit(ctx, tx, stamp); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, pruneKeysStripSQL, scopes, tenantID); err != nil {
+				return fmt.Errorf("key scopes: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
 	return pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
 		// The gates first: the first lock of this transaction, as of every
 		// request write (holdRequestKey).
-		if err := lockRequestKeysExclusive(ctx, tx, tenantID, scopes); err != nil {
+		if err := lockRequestKeysExclusive(ctx, tx, pruneKeyDeleteGatesSQL, tenantID, scopes); err != nil {
 			return err
 		}
 		if err := stampAudit(ctx, tx, stamp); err != nil {
@@ -120,11 +148,6 @@ func pruneTenantKeys(ctx context.Context, pool *pgxpool.Pool, tenantID string, s
 		keyIDs, err := collectRows(ctx, tx, pgx.RowTo[string], pruneKeysDeleteSQL, tenantID, scopes)
 		if err != nil {
 			return err
-		}
-		if len(scopes) > 0 {
-			if _, err := tx.Exec(ctx, pruneKeysStripSQL, scopes); err != nil {
-				return fmt.Errorf("key scopes: %w", err)
-			}
 		}
 		if len(keyIDs) == 0 {
 			// No key, no stage (issue #547): an empty id list deletes
