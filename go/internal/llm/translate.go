@@ -208,8 +208,9 @@ const maxDetectWordBytes = 32
 //
 // Read over the words outside code — a `backtick span`, and any token with a
 // path, identifier or URL character (/ \ _ = < > { } [ ] $ @ # | or a dot or
-// colon between two letters or digits) carries no language; a word in
-// capitals (IT, US, ER) is an abbreviation and no English or Nordic word:
+// colon between two letters or digits; a single slash between two
+// capitalised words, Größe/Gewicht, is no code) carries no language; a word
+// in capitals (IT, US, ER) is an abbreviation and no English or Nordic word:
 //   - a question with English function words is translated only when its
 //     non-English evidence outnumbers them, a weak word counting half
 //     (2·strong + weak > 2·english; see translateEvidence): "what was the die
@@ -379,11 +380,15 @@ func isPossessiveEnd(r rune) bool {
 // isCodeToken reports whether a white-space token is a path, an identifier,
 // a URL, an option or an expression rather than a word of a sentence: it
 // carries one of / \ _ = < > { } [ ] $ @ # |, or a dot or colon between two
-// letters or digits (error.log, v2.14, API:n).
+// letters or digits (error.log, v2.14, API:n). A single slash between two
+// capitalised words (Größe/Gewicht, Prüfung/Abnahme) is how German writes two
+// nouns as alternatives and no code (#551); a path has lower-case segments,
+// a leading slash, a second slash or a dot.
 func isCodeToken(tok string) bool {
 	prev := rune(-1)
 	for i, r := range tok {
 		switch {
+		case r == '/' && isWordSlash(tok, i):
 		case isCodeRune(r):
 			return true
 		case r == '.' || r == ':':
@@ -405,11 +410,34 @@ func isCodeRune(r rune) bool {
 	return false
 }
 
+// isWordSlash reports whether the slash at tok[i] is the only one of the token
+// and stands between two capitalised words: the run of letters before it and
+// the one after it each begin with an upper-case letter.
+func isWordSlash(tok string, i int) bool {
+	next, _ := utf8.DecodeRuneInString(tok[i+1:])
+	if !unicode.IsUpper(next) || strings.IndexByte(tok[i+1:], '/') >= 0 {
+		return false
+	}
+	first := rune(-1) // the first letter of the run before the slash
+	for j := i; j > 0; {
+		r, size := utf8.DecodeLastRuneInString(tok[:j])
+		if !unicode.IsLetter(r) && !unicode.Is(unicode.Mn, r) {
+			break
+		}
+		if unicode.IsLetter(r) {
+			first = r
+		}
+		j -= size
+	}
+	return unicode.IsUpper(first)
+}
+
 // codePrefix reads the text of a token in front of a quote mark for code
 // (the characters of isCodeToken), so a mark inside a path, an index or an
 // assignment — config["größe"], key="Größe" — opens no quote and the token
 // stays code as a whole (#551). It reads each byte of a token at most once
-// however many marks the token holds.
+// however many marks the token holds; a slash counts as code here, whatever
+// follows it.
 type codePrefix struct {
 	start, end int  // the token being read and how far
 	prev       rune // the rune before end

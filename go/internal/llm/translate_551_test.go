@@ -205,3 +205,49 @@ func TestNeedsTranslation551MoreQuoteMarks(t *testing.T) {
 	)
 }
 
+// TestNeedsTranslation551WordSlash (point 6): a single slash between two
+// capitalised words is how German writes two nouns as alternatives
+// (Größe/Gewicht) — words, not a path. On 89d9e70c the token was code and
+// the question was sent as written. Paths stay code: lower-case segments, a
+// leading slash, more than one slash, a dot or another code character.
+func TestNeedsTranslation551WordSlash(t *testing.T) {
+	checkNeedsTranslation(t, true,
+		"Größe/Gewicht Paket",
+		"Prüfung/Abnahme Termin",
+		"Datenbank/Konfiguration",
+	)
+	checkNeedsTranslation(t, false,
+		"docs/übersicht",
+		"/Größe/Gewicht",
+		"Größe/Gewicht/Höhe",
+		"Größe/gewicht",
+		"Übersicht/Datei.md",
+		"Größe/Gewicht_neu",
+		"Ä/",
+		"/Ä",
+		strings.Repeat("Größe/", 1<<17)+"Gewicht",
+	)
+	checkNeedsTranslation(t, true, strings.Repeat("Größe/Gewicht ", 1<<16))
+}
+
+// TestTranslateQuery551WordSlashAnswers (point 6): what the step returns for
+// a word-slash question, by the answer's form. An answer that keeps the
+// slash fails validateTranslation and the question goes on as written (as
+// before #210); an answer that rewords it replaces the question.
+func TestTranslateQuery551WordSlashAnswers(t *testing.T) {
+	const q = "Größe/Gewicht Paket"
+	for _, c := range []struct {
+		answer, want string
+	}{
+		{"Size/weight package", q},
+		{"Size / weight package", q},
+		{"Size/Weight Package", q},
+		{"Size and weight package", "Size and weight package"},
+		{"Size or weight package", "Size or weight package"},
+		{"package size and weight", "package size and weight"},
+	} {
+		if got := translateAnswer(t, q, c.answer); got != c.want {
+			t.Errorf("answer %q: TranslateQuery = %q, want %q", c.answer, got, c.want)
+		}
+	}
+}
