@@ -93,6 +93,7 @@ func TestRules_AnEnglishPresentGivesItsClauseATenseOfItsOwn(t *testing.T) {
 		// counter-cases: a clause without a verb of its own
 		"Builds were red on Thursday, check runs on Friday as well?":               "2026-11-19/past 2026-11-20/past",
 		"Builds were red on Thursday, on Friday check runs as well?":               "2026-11-19/past 2026-11-20/past",
+		"Builds were red on Thursday, on Friday check runs on staging too?":        "2026-11-19/past 2026-11-20/past",
 		"The deploy failed on Monday, the rollback on Tuesday too?":                "2026-11-16/past 2026-11-17/past",
 		"The deploy failed on Monday, the web analytics dashboard on Tuesday too?": "2026-11-16/past 2026-11-17/past",
 	})
@@ -119,10 +120,11 @@ func TestRules_TonightInANameNamesNoDay(t *testing.T) {
 		"Was lief am Montag in der Show Tonight Live?": "2026-11-16/past",
 		"Who sings in the band Tonight?":               "nil",
 		// counter-cases: tonight
-		"What's on Tonight?":                "2026-11-22/today",
-		"Is Tonight Alive playing tonight?": "2026-11-22/today",
-		"Who Is Playing Tonight?":           "2026-11-22/today",
-		"Tonight, who is on call?":          "2026-11-22/today",
+		"What's on Tonight?":                   "2026-11-22/today",
+		"Is Tonight Alive playing tonight?":    "2026-11-22/today",
+		"Who Is Playing Tonight?":              "2026-11-22/today",
+		"Tonight, who is on call?":             "2026-11-22/today",
+		"Ready? Tonight Anna deploys the fix.": "2026-11-22/today",
 	})
 }
 
