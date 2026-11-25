@@ -94,3 +94,42 @@ func TestRules_LetsOpensAClauseOfAProposal(t *testing.T) {
 		"Let’s review on Tuesday what broke on Saturday":     "2026-11-24/future 2026-11-21/past",
 	})
 }
+
+// TestRules_ADayKeywordWithAPartOfTheDay (issue #532, point 2): a word of a
+// part of the day right behind a day keyword in its clause gives the
+// keyword's day at the part's hour ("gestern Abend", "morgen früh",
+// "yesterday evening"); "heute morgen" is this morning; "last night" and
+// "letzte Nacht" without an article before them are yesterday's night,
+// "tonight" today's; every weekday of the question stays a date, in the
+// order of the question, and the weights are those of a day keyword.
+func TestRules_ADayKeywordWithAPartOfTheDay(t *testing.T) {
+	check517(t, now517, want517{
+		"Was ist gestern Abend schiefgegangen?":                             "2026-11-21/past@19",
+		"Wer hatte gestern Nacht Rufbereitschaft?":                          "2026-11-21/past@23",
+		"Was ist heute Morgen passiert?":                                    "2026-11-22/today@8",
+		"was haben wir heute morgen deployed?":                              "2026-11-22/today@8",
+		"Was steht morgen früh an?":                                         "2026-11-23/future@8",
+		"Wer übernimmt morgen Abend?":                                       "2026-11-23/future@19",
+		"Was war vorgestern Nachmittag?":                                    "2026-11-20/past@15",
+		"What broke yesterday evening?":                                     "2026-11-21/past@19",
+		"What is planned for tomorrow morning?":                             "2026-11-23/future@8",
+		"What happened last night?":                                         "2026-11-21/past@23",
+		"Gab es letzte Nacht Alarme?":                                       "2026-11-21/past@23",
+		"Anything on tonight?":                                              "2026-11-22/today@23",
+		"Was ist heute Abend?":                                              "2026-11-22/today@19",
+		"Was lief gestern Abend schief, nachdem am Freitag deployed wurde?": "2026-11-21/past@19 2026-11-20/past",
+		"Was ist am Freitag passiert und was steht morgen früh an?":         "2026-11-20/past 2026-11-23/future@8",
+		// counter-cases: no day keyword with a part of the day
+		"Montag morgen ist Release, ist alles bereit?":    "2026-11-23/future@8",
+		"Wir müssen morgen früher anfangen, oder?":        "2026-11-23/future",
+		"Ist heute Abendessen im Büro?":                   "2026-11-22/today",
+		"Die Last Nacht für Nacht steigt – warum?":        "nil",
+		"Was planen wir für die letzte Nacht des Jahres?": "nil",
+		"War der Build heute früh grün?":                  "2026-11-22/today@8",
+		"Was steht heute an? Morgen ist Feiertag.":        "2026-11-22/today 2026-11-23/future",
+		"Wer schreibt morgen den Abend-Bericht?":          "2026-11-23/future",
+	})
+	if r := NormalizeTemporalRules("Was ist gestern Abend schiefgegangen?", now517); r == nil || len(r.DimensionWeights) != 1 || r.DimensionWeights["linear"] != 1 {
+		t.Errorf("a day keyword with a part of the day: weights %v, want linear 1", r)
+	}
+}

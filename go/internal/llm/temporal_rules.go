@@ -3393,6 +3393,123 @@ var (
 	reNeujahr     = regexp.MustCompile(`(?i)\b(neujahr|new\s*year(?:'?s(?:\s*day)?)?)\b`)
 )
 
+// matchRelativeOrPartDays is Priority 8 of NormalizeTemporalRules: the
+// relative days, then a day keyword with a part of the day.
+func matchRelativeOrPartDays(query string, now time.Time) *TemporalResult {
+	if r := matchRelativeDays(query, now); r != nil {
+		return r
+	}
+	return matchDayKeywordPart(query, now)
+}
+
+// dayKeywordDays are the day keywords of simpleKeywords by word, and
+// timeOfDayWords the words matchTimeOfDay's expressions read: a part of the
+// day of that kind right behind "heute" or "today" is matchTimeOfDay's
+// ("heute früh", "today morning"), issue #532.
+var (
+	dayKeywordDays = func() map[string]simpleKW {
+		m := make(map[string]simpleKW, len(simpleKeywords))
+		for _, kw := range simpleKeywords {
+			m[kw.word] = kw
+		}
+		return m
+	}()
+	timeOfDayWords = toWordSet("morgens", "früh", "fruh", "morning", "early", "vormittags", "mittags", "noon", "midday",
+		"lunchtime", "nachmittags", "afternoon", "abends", "evening", "nachts", "night", "spät", "spat", "late")
+	// lastNightArticles before "last night" or "letzte Nacht" make it the
+	// last night of something ("the last night of the summit", "die letzte
+	// Nacht im Hotel"); lastNightOf behind it says of what.
+	lastNightArticles = toWordSet("the", "a", "that", "this", "on", "der", "die", "das", "in", "am", "eine", "einer")
+	lastNightOf       = toWordSet("of", "des", "der", "vor", "before")
+	nightNouns        = toWordSet("night", "night's", "nacht")
+)
+
+// matchDayKeywordPart reads a day keyword with a part of the day (issue
+// #532): a word of a part of the day right behind a day keyword in its clause
+// ("gestern Abend", "heute Morgen", "morgen früh", "yesterday evening",
+// "tomorrow morning" — "heute morgen" is this morning: "heute" and "morgen"
+// side by side in one clause name one day), "last night" and "letzte Nacht"
+// without an article before them or "of" behind them (yesterday at the hour
+// of the night), and "tonight" (today at that hour). The answer is the day at
+// the part's hour, and every weekday of the question that names a day as the
+// weekday rules read it, in the order of the question: the day keyword
+// answers before the weekday rules and does not drop their dates. A part of
+// the day joined by a hyphen ("Abend-Bericht") is a word of its own, and one
+// matchTimeOfDay reads right behind "heute" or "today" stays its.
+func matchDayKeywordPart(query string, now time.Time) *TemporalResult {
+	lower := strings.ToLower(query)
+	if !strings.Contains(lower, "night") && !strings.Contains(lower, "nacht") && !strings.Contains(lower, "heute") &&
+		!strings.Contains(lower, "today") && !strings.Contains(lower, "gestern") && !strings.Contains(lower, "yesterday") &&
+		!strings.Contains(lower, "morgen") && !strings.Contains(lower, "tomorrow") {
+		return nil
+	}
+	c := clauseTokens(query)
+	type hit struct {
+		idx  int
+		date TemporalDate
+	}
+	var hits []hit
+	for i := 0; i < len(c.words); i++ {
+		if d, ok := c.dayKeywordPartAt(i, now); ok {
+			hits = append(hits, hit{i, d})
+		}
+	}
+	if len(hits) == 0 {
+		return nil
+	}
+	var tr *tenseReader
+	for _, w := range c.dayWeekdays() {
+		if tr == nil {
+			tr = newTenseReader(query)
+		}
+		backward := tr.at(c.offs[w.idx]) == "past"
+		dir := "future"
+		if backward {
+			dir = "past"
+		}
+		td := TemporalDate{Ref: w.ref, Date: fmtDate(resolveWeekdayDate(w.wd, backward, now)), Dir: dir}
+		if h, ok := c.dayPartAt(w.idx); ok {
+			td.Hour = &h
+		}
+		hits = append(hits, hit{w.idx, td})
+	}
+	sort.SliceStable(hits, func(a, b int) bool { return hits[a].idx < hits[b].idx })
+	var dates []TemporalDate
+	seen := map[string]bool{}
+	for _, h := range hits {
+		if !seen[h.date.Date] {
+			seen[h.date.Date] = true
+			dates = append(dates, h.date)
+		}
+	}
+	return multiResult(dates)
+}
+
+// dayKeywordPartAt returns the date matchDayKeywordPart reads at word i of c.
+func (c clauseWords) dayKeywordPartAt(i int, now time.Time) (TemporalDate, bool) {
+	w := c.words[i]
+	hour := func(h int) *int { return &h }
+	if w == "tonight" || w == "tonight's" {
+		return TemporalDate{Ref: w, Date: fmtDate(now), Dir: "today", Hour: hour(dayPartHours["night"])}, true
+	}
+	if i+1 >= len(c.words) || c.starts[i+1] || c.joinedNext[i] || i+1 < len(c.words)-1 && c.joinedNext[i+1] {
+		return TemporalDate{}, false
+	}
+	next := c.words[i+1]
+	if (w == "last" && next != "nacht" || w == "letzte" && next == "nacht") && nightNouns[next] {
+		if i > 0 && !c.starts[i] && lastNightArticles[c.words[i-1]] || i+2 < len(c.words) && !c.starts[i+2] && lastNightOf[c.words[i+2]] {
+			return TemporalDate{}, false
+		}
+		return TemporalDate{Ref: w + " " + next, Date: fmtDate(now.AddDate(0, 0, -1)), Dir: "past", Hour: hour(dayPartHours["night"])}, true
+	}
+	kw, ok := dayKeywordDays[w]
+	h, part := dayPartHours[next]
+	if !ok || !part || (w == "heute" || w == "today") && timeOfDayWords[next] {
+		return TemporalDate{}, false
+	}
+	return TemporalDate{Ref: w + " " + next, Date: fmtDate(truncDate(kw.resolve(now))), Dir: kw.dir, Hour: hour(h)}, true
+}
+
 func matchAnnualHoliday(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
 	year := now.Year()
@@ -4461,8 +4578,11 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 		return r
 	}
 
-	// Priority 8: Relative days (vor N Tagen, in N Tagen) — pure linear
-	if r := matchRelativeDays(query, now); r != nil {
+	// Priority 8: Relative days (vor N Tagen, in N Tagen), then a day
+	// keyword with a part of the day ("gestern Abend", "tomorrow morning",
+	// "last night": the keyword's day at the part's hour, with every weekday
+	// of the question, issue #532) — pure linear
+	if r := matchRelativeOrPartDays(query, now); r != nil {
 		r.DimensionWeights = dwLinear()
 		return r
 	}
