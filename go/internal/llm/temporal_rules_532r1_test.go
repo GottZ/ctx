@@ -1,6 +1,9 @@
 package llm
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // The tests below pin the review round of issue #532: forms a fresh review
 // of the wave found read wrong where 5a28c475 read them right. Asked on
@@ -125,5 +128,23 @@ func TestRules_AParticipleOfAnArrangementMakesNoPairOfReports(t *testing.T) {
 		// counter-cases: two reports of acts
 		"Am Montag gemerged, am Dienstag zurückgerollt – warum?": "2026-11-16/past 2026-11-17/past",
 		"Am Freitag gekauft, am Samstag zurückgeschickt?":        "2026-11-20/past 2026-11-21/past",
+	})
+}
+
+// TestRules_TheEndOfARelativeClauseAndTheHolidayOfToday (issue #532, review
+// round) pins two readings the tests left open: an English relative clause
+// ends at the auxiliary of its main clause two words or more behind its
+// pronoun, not at its own auxiliary right behind it ("Which PRs that are due
+// on Friday were merged on Monday?"); and a holiday asked on its own day in
+// the past is that day, not the one a year before.
+func TestRules_TheEndOfARelativeClauseAndTheHolidayOfToday(t *testing.T) {
+	check517(t, now517, want517{
+		"Which PRs that are due on Friday were merged on Monday?":  "2026-11-27/future 2026-11-16/past",
+		"The tickets that are open on Friday were filed on Monday": "2026-11-27/future 2026-11-16/past",
+	})
+	newYear := time.Date(2027, 1, 1, 12, 0, 0, 0, time.UTC)
+	check517(t, newYear, want517{
+		"Was ist an Neujahr passiert?":     "2027-01-01/range",
+		"What happened on New Year's Day?": "2027-01-01/range",
 	})
 }
