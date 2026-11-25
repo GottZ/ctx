@@ -176,7 +176,7 @@ func (c *clauseWords) indexClauses() {
 // Donnerstag deployed?" asks for a Tuesday that has been and a Thursday to
 // come; between words and phrases it joins them ("am Montag und Dienstag",
 // "Wer hat am Montag gemerged und am Dienstag deployed?").
-var clauseConjunctions = toWordSet("und", "and", "oder", "or")
+var clauseConjunctions = toWordSet("und", "and", "oder", "or", "aber", "but")
 
 // englishFiniteWords are the English auxiliaries, modals and forms of "to
 // be", and the forms of the simple past that are no participle: a clause
@@ -372,7 +372,12 @@ func (c *clauseWords) coordinateClause(s, e, lang int, drop []int) []int {
 		// alles grün und am Dienstag ist der Build gebrochen"); behind one in
 		// the present it has a tense of its own.
 		shared := j+1 < re && c.perfectBracket(j+1, re, lang) && (left.past || left.aux && c.participleAt(ls, j-1))
-		if left.finite && right.finite && j+1 < re && !shared {
+		// An interrogative without a verb behind a clause with one is a
+		// clause of its own that shares the verb of the clause before it
+		// ("Was haben wir am Dienstag gemerged und was am Donnerstag?"),
+		// issue #532.
+		ellipsis := (left.finite || left.past) && j+1 < re && c.whEllipsis(j+1, re, lang)
+		if (left.finite || left.past) && right.finite && j+1 < re && !shared || ellipsis {
 			drop = append(drop, j)
 			c.starts[j+1] = true
 			ls, left = j+1, right
@@ -485,12 +490,35 @@ var englishEmbedOpeners = toWordSet("which", "what", "who", "whom", "whose", "wh
 // subordinate clauses by the word that opens them, not by a comma, and the
 // tense of the clause a date stands in decides (tenseAt).
 func (c *clauseWords) embeddedClauses(s, e int) {
+	relative := -1
 	for i := s + 1; i < e; i++ {
-		if englishEmbedOpeners[c.words[i]] {
+		w := c.words[i]
+		if englishEmbedOpeners[w] {
 			c.starts[i] = true
+		}
+		switch {
+		case englishRelativeOpeners[w]:
+			relative = i
+		case relative >= 0 && i >= relative+3 && englishMainAux[w] && !englishSubjects[c.words[i-1]]:
+			// The auxiliary of the main clause behind a relative clause
+			// without a comma ends it: "Which PRs that we merged on Monday
+			// will ship on Friday?" (issue #532).
+			c.starts[i] = true
+			relative = -1
 		}
 	}
 }
+
+// englishRelativeOpeners open an English relative clause inside a sentence,
+// and englishMainAux are the auxiliaries and modals that, two words or more
+// behind one and not behind a subject, are the verb of the clause the relative
+// clause stands in (embeddedClauses).
+var (
+	englishRelativeOpeners = toWordSet("that", "which", "who")
+	englishMainAux         = toWordSet("will", "would", "shall", "should", "can", "could", "may", "might", "must",
+		"won't", "wouldn't", "can't", "cannot", "couldn't", "shouldn't", "is", "are", "was", "were", "isn't", "aren't",
+		"wasn't", "weren't")
+)
 
 // compoundWords are the words a weekday or the weekend may be joined to by a
 // hyphen and still name a day: another weekday ("Montag-Freitag") or a time
@@ -1190,13 +1218,14 @@ type tenseReader struct {
 	// and of its sentence.
 	clauseStart, sentenceStart []int
 	clauses                    map[int]string // per clause start: its tense, "" without a verb of its own
+	ellipses                   map[int]bool   // the clause starts of whEllipsis clauses read so far
 	langs                      map[int]int    // per sentence start: its language
 	whole                      string
 }
 
 func newTenseReader(query string) *tenseReader {
 	r := &tenseReader{c: clauseTokens(query), offsets: len(strings.ToLower(query)) == len(query),
-		clauses: map[int]string{}, langs: map[int]int{}}
+		clauses: map[int]string{}, ellipses: map[int]bool{}, langs: map[int]int{}}
 	r.clauseStart = make([]int, len(r.c.words))
 	r.sentenceStart = make([]int, len(r.c.words))
 	for i := range r.c.words {
@@ -1217,20 +1246,7 @@ func newTenseReader(query string) *tenseReader {
 // at is tenseAt for the date at the byte offset off.
 func (r *tenseReader) at(off int) string {
 	if i := r.c.wordAt(off); i >= 0 && r.offsets {
-		s := r.clauseStart[i]
-		t, ok := r.clauses[s]
-		if !ok {
-			e := s + 1
-			for e < len(r.c.words) && !r.c.starts[e] {
-				e++
-			}
-			scanned(e - s)
-			if (s > 0 || e < len(r.c.words)) && r.c.hasOwnVerb(s, e) {
-				t = r.c.tense(s, e, r.language(r.sentenceStart[s]))
-			}
-			r.clauses[s] = t
-		}
-		if t != "" {
+		if t := r.clauseTense(r.clauseStart[i]); t != "" {
 			return t
 		}
 	}
@@ -1238,6 +1254,45 @@ func (r *tenseReader) at(off int) string {
 		r.whole = r.c.wholeTense()
 	}
 	return r.whole
+}
+
+// clauseTense is the tense of the clause that starts at s, read once: ""
+// for a clause without a verb of its own, which counts by the whole
+// question; an interrogative without a verb (whEllipsis) counts by the
+// clause before it.
+func (r *tenseReader) clauseTense(s int) string {
+	if t, ok := r.clauses[s]; ok {
+		return t
+	}
+	e := s + 1
+	for e < len(r.c.words) && !r.c.starts[e] {
+		e++
+	}
+	scanned(e - s)
+	t := ""
+	switch {
+	case r.c.whEllipsis(s, e, r.language(r.sentenceStart[s])):
+		r.ellipses[s] = true
+		t = r.ellipsisTense(s)
+	case (s > 0 || e < len(r.c.words)) && r.c.hasOwnVerb(s, e):
+		t = r.c.tense(s, e, r.language(r.sentenceStart[s]))
+	}
+	r.clauses[s] = t
+	return t
+}
+
+// ellipsisTense is the tense of the clause that starts at s, an
+// interrogative without a verb (whEllipsis): the tense of the nearest clause
+// before it in its sentence that has a verb of its own, or that is such an
+// ellipsis itself; "" without one.
+func (r *tenseReader) ellipsisTense(s int) string {
+	for p := s; p > r.sentenceStart[s]; {
+		p = r.clauseStart[p-1]
+		if t := r.clauseTense(p); t != "" || r.ellipses[p] {
+			return t
+		}
+	}
+	return ""
 }
 
 // language is sentenceLanguage for the sentence that starts at ss, read
@@ -1418,16 +1473,42 @@ func (c clauseWords) clauseFinitePast(s, e int) bool {
 		for v < e && wasParticles[c.words[v]] {
 			v++
 		}
-		return c.finitePastAt(v, e) || indirect && c.finitePastAt(e-1, e)
+		return c.finitePastAt(v, e) || (indirect || c.sentence[s] && c.verbLast(v, e)) && c.finitePastAt(e-1, e)
 	case germanWhich[w]:
 		return c.finitePastAt(s+2, e) || indirect && c.finitePastAt(e-1, e)
 	case germanSubordinators[w]:
+		return c.finitePastAt(e-1, e)
+	case c.relativeClause(s, e):
 		return c.finitePastAt(e-1, e)
 	}
 	if v := c.afterFirstConstituent(s, e); v > s {
 		return c.finitePastAt(v, e)
 	}
 	return false
+}
+
+// verbLast reports whether word v of a clause [_, e) that an interrogative
+// or a relative pronoun opens is no finite verb, so that the clause puts its
+// verb last (issue #532): a preposition, an article, a subject pronoun, a day
+// keyword or a date word ("Schreib Anna, was am Freitag schiefging", "Was am
+// Freitag kaputtging, reparieren wir am Montag").
+func (c clauseWords) verbLast(v, e int) bool {
+	if v >= e-1 {
+		return false
+	}
+	w := c.words[v]
+	return firstPrepositions[w] || firstArticles[w] || firstSubjects[w] || firstDayKeywords[w] || dateWord(w)
+}
+
+// relativePronouns open a German relative clause behind a comma.
+var relativePronouns = toWordSet("der", "die", "das", "den", "dem", "denen", "deren", "dessen")
+
+// relativeClause reports whether the clause [s, e) of c is a German relative
+// clause that puts its verb last: a relative pronoun opens it inside a
+// sentence, before a word that is no noun (verbLast) — "Die Fehler, die am
+// Montag auftraten, …", not "…, die Tickets am Montag" (issue #532).
+func (c clauseWords) relativeClause(s, e int) bool {
+	return relativePronouns[c.words[s]] && !c.sentence[s] && c.verbLast(s+1, e)
 }
 
 // The first constituents of a German main clause whose end
@@ -1532,15 +1613,22 @@ var (
 // pronoun ("What is the reason the job crashed on Saturday?"; "Is the build
 // of the service deployed?" joins its noun phrase by "of").
 func englishPassiveAt(words []string, i int) bool {
+	joined, shared := false, false
 	for j := i - 1; j >= 0; j-- {
 		w := words[j]
 		switch {
 		case englishBeForms[w]:
 			scanned(i - j)
 			return true
-		case (pastVerbSet[w] || englishParticiple(w)) && j+2 == i && (words[j+1] == "and" || words[j+1] == "or"):
-			// A participle coordinated with this one shares its auxiliary:
-			// "Will it be fixed and deployed on Monday?" (issue #517).
+		case w == "and" || w == "or":
+			joined = true
+		case (pastVerbSet[w] || englishParticiple(w)) && joined && !shared:
+			// A participle coordinated with this one shares its auxiliary,
+			// with or without words between: "Will it be fixed and deployed
+			// on Monday?" (issue #517), "Will it be fixed on Monday and
+			// deployed on Tuesday?" (issue #532). One is passed, so that a
+			// chain of them is read in time linear in its length.
+			shared = true
 		case englishNotPassive[w] || pastVerbSet[w] || englishParticiple(w) || englishClauseOpeners[w],
 			englishSubjects[w] && w != "who" && (j == 0 || !englishBeForms[words[j-1]]),
 			englishDeterminers[w] && j > 0 && !englishBeForms[words[j-1]] && !englishNPJoiners[words[j-1]]:
@@ -1727,7 +1815,72 @@ func (c clauseWords) hasOwnVerb(s, e int) bool {
 			return true
 		}
 	}
-	return c.participleAt(s, e-1)
+	return c.participleAt(s, e-1) || c.relativeClause(s, e) && c.finitePastAt(e-1, e)
+}
+
+// The words of an interrogative without a verb (whEllipsis): the
+// conjunctions that may open it, the English interrogatives, the English
+// prepositions that may follow the interrogative.
+var (
+	ellipsisConjunctions  = toWordSet("und", "oder", "aber", "and", "or", "but")
+	englishInterrogatives = toWordSet("what", "which", "who", "whom", "whose", "when", "where", "why", "how")
+	ellipsisPrepositions  = toWordSet("on", "at", "in", "for", "from", "by", "during", "until", "since", "before", "after",
+		"about", "für")
+)
+
+// whEllipsis reports whether the clause [s, e) of c, in a sentence of the
+// language lang, is an interrogative without a verb of its own (issue #532): "Was war am Montag, was am
+// Dienstag?", "What failed on Friday and what on Monday?". A conjunction may
+// open it; behind the interrogative (and its particles) stands a preposition,
+// a date word or a day keyword, the place a German main clause puts its verb
+// and an English one its subject; and no word of it is one the rules read as
+// a verb — a finite verb, a subject pronoun, an English form on -ed, "zu" —
+// and its last word names a day, a part of the day or, written with its
+// capital, a thing, not the verb a clause opened by an interrogative may put
+// last ("was am Freitag schiefging", "was am Montag passiert") or the
+// separable particle a verb leaves there ("und was am Freitag vor?").
+func (c clauseWords) whEllipsis(s, e, lang int) bool {
+	if s < e && ellipsisConjunctions[c.words[s]] {
+		s++
+	}
+	if s+1 >= e || !germanInterrogatives[c.words[s]] && !englishInterrogatives[c.words[s]] {
+		return false
+	}
+	v := s + 1
+	for v < e && wasParticles[c.words[v]] {
+		v++
+	}
+	if v >= e {
+		return false
+	}
+	if w := c.words[v]; !firstPrepositions[w] && !ellipsisPrepositions[w] && !dateWord(w) && !dayKeywords[w] {
+		return false
+	}
+	if c.verbIn(v+1, e, lang) {
+		return false
+	}
+	// The last word names the day, its part, or a thing (a noun, written
+	// with its capital): any other word may be the verb a clause opened by
+	// an interrogative puts last ("Ich habe vergessen, was am Montag
+	// ansteht").
+	last := c.words[e-1]
+	_, part := dayPartHours[last]
+	return dateWord(last) || dayKeywords[last] || part || c.caps[e-1]
+}
+
+// verbIn reports whether a word of [s, e) of c, in a sentence of the
+// language lang, is one the rules read as a verb (whEllipsis): a finite verb,
+// a subject pronoun, "zu", an English past or form on -ed.
+func (c clauseWords) verbIn(s, e, lang int) bool {
+	scanned(e - s)
+	for i := s; i < e; i++ {
+		w := c.words[i]
+		if finiteWord(w, lang) || subjectWords[w] && (lang == langMixed || !bothLanguageWords[w]) ||
+			lang != langEnglish && w == "zu" || lang != langGerman && (englishPastVerbs[w] || englishParticiple(w)) {
+			return true
+		}
+	}
+	return false
 }
 
 // hortatives are the imperative of "lassen" that opens a German clause of a
@@ -1736,7 +1889,7 @@ func (c clauseWords) hasOwnVerb(s, e int) bool {
 // (issue #517). Without it the clause took the tense of the whole question —
 // in "Lass uns am Freitag über den Bug reden, den wir am Montag hatten" the
 // past of the relative clause.
-var hortatives = toWordSet("lass", "lasst", "lassen")
+var hortatives = toWordSet("lass", "lasst", "lassen", "let's", "let\u2019s")
 
 // perfektAux are the finite forms of "haben" and "sein", and the past
 // subjunctive of both ("hätte gemacht", "wäre gegangen"), that make the
