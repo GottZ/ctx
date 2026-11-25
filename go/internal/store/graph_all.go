@@ -36,10 +36,10 @@ var fullGraphSeedFilters = visibility.TypeVisible("b", "$3") + `
 // fullGraphSeedMergeScopes is the most distinct read scopes FullGraph reads
 // one arm each for (fullGraphSeedMergeSQL); a reader of more scopes, and a
 // seed filtered by category, is read by fullGraphSeedPlannedSQL (issue #536).
-// Fixed by measurement, not policy. The merge form reads at most the page,
-// a descent per arm and the ties at the page's end, wherever the read
-// scopes' blocks sit in the corpus — its cost is bounded by the limit and the
-// scope count, not by the corpus. What grows with the scope count: its plan
+// Fixed by measurement, not policy. The merge form reads the read scopes'
+// blocks down to the page's last row and a descent per arm, wherever those
+// blocks sit in the corpus — not the other scopes' blocks newer than them.
+// What grows with the scope count: its plan
 // (built in 0.7 ms for one scope, 8-10 ms for 20-32 at 1 000 000 rows; 46-52
 // ms for 200, 230-240 ms for 500 at 200 000) and the descents, and where the
 // read scopes hold most of the corpus's newest blocks, interleaved with each
@@ -56,76 +56,84 @@ const fullGraphSeedMergeScopes = 32
 // most $4, read as one arm per read scope and one for the granted blocks ($2)
 // outside them, merged in their order (issue #536). Each scope's arm walks
 // idx_context_scope_active (scope, created_at DESC) WHERE NOT is_archived
-// newest first; a MergeAppend pulls from the arm whose head is newest and
-// stops when the page is full, so a page reads its own rows plus a descent per
-// arm (and an incremental sort on id), wherever the read scopes' blocks sit
-// among the corpus — the statement before 536 walked idx_context_created from
-// the newest block of the corpus (340 633 buffers on the generic plan at
-// random_page_cost 4 for a read scope of 300 behind 1 000 000 newer blocks),
-// and the per-scope LATERAL of the first form of 536 read a page per read
-// scope whether the merge kept its rows or not (302 998 buffers for 200
-// scopes at 1 000 000 rows). The arm states its scope as an equality, so the
-// arm's order reduces to created_at and the arms merge, and again as a range
-// of a parameter, which the generic plan (fullGraphSeedMergePlan) estimates at
-// 0.5 % of the scope's share: a walk of idx_context_created that filters the
-// scope then costs the planner more than the table, and the arm walks its
-// scope's range. It takes the rows that tie with its last one (FETCH FIRST …
-// WITH TIES), so the merge orders a created_at that several blocks share by
-// id. The created window is stated only when it is set (after, before), as a
-// bound of the walk: the generic plan cannot read a bound out of "$6 IS NULL
-// OR …" and would filter the scope's newer blocks row by row instead. The
-// granted arm's created_at is an expression of the column, which no index
-// orders: its rows are found by primary key and sorted (the one sort every
-// plan of the statement has), where a walk of idx_context_created would
-// deliver their order without a sort and read the corpus to find them. A
-// block of a read scope that is also granted is read by its scope's arm only
-// (the granted arm excludes the read scopes). What stays linear: an arm reads
-// on through its range while its newest blocks are not of a visible type, and
-// reads the blocks of one created_at at the end of its page whole.
+// newest first; a MergeAppend pulls from the arm whose head is newest, the
+// type allowlist ($3) is checked on what it pulls, and the merge stops when
+// the page is full (an incremental sort on id on top) — a page reads the
+// read scopes' blocks down to its last row and a descent per arm, wherever
+// those blocks sit among the corpus. The statement before 536 walked
+// idx_context_created from the newest block of the corpus (340 633 buffers on
+// the generic plan at random_page_cost 4 for a read scope of 300 behind
+// 1 000 000 newer blocks); the per-scope LATERAL of the first form of 536
+// read a page per read scope whether the merge kept its rows or not (302 998
+// buffers for 200 scopes at 1 000 000 rows). The arm states its scope as an
+// equality, so its order reduces to created_at and the arms merge, and again
+// as a range of a parameter, which the generic plan (fullGraphSeedMergePlan)
+// estimates at 0.5 % of the scope's share: a walk of idx_context_created that
+// filters the scope then costs the planner more than the table, and the arm
+// walks its scope's range. Every arm and the merge carry ORDER BY … LIMIT
+// ALL: the arm keeps its order as a subquery of its own, and no condition of
+// the levels above enters the arms — the MergeAppend reads the head of every
+// arm before its first row, and an arm that filtered the type itself read
+// every block of a hidden type (checkpoints, transcript parts) its scope
+// held before its first visible one, on every call, whether or not the merge
+// needed that scope (8 690 buffers against 77 for 40 000 checkpoints; 84 with
+// the filter above the merge). The created window is stated only when it is
+// set (after, before), as a bound of the walk: the generic plan cannot read a
+// bound out of "$6 IS NULL OR …" and would filter the scope's newer blocks
+// row by row instead. The granted arm's created_at is an expression of the
+// column, which no index orders: its rows are found by primary key and
+// sorted (the one sort every plan of the statement has), where a walk of
+// idx_context_created would deliver their order without a sort and read the
+// corpus to find them. A block of a read scope that is also granted is read
+// by its scope's arm only (the granted arm excludes the read scopes). What
+// stays linear: a page reads its read scopes' blocks of hidden types that are
+// newer than its last row, and the blocks of one created_at at its end.
 func fullGraphSeedMergeSQL(scopes int, after, before bool) string {
-	filters := visibility.TypeVisible("b", "$3") + `
-		            AND $5::text[] IS NULL`
+	window := ""
+	unset := ""
 	if after {
-		filters += `
+		window += `
 		            AND b.created_at >= $6`
 	} else {
-		filters += `
-		            AND $6::timestamptz IS NULL`
+		unset += ` AND $6::timestamptz IS NULL`
 	}
 	if before {
-		filters += `
+		window += `
 		            AND b.created_at < $7`
 	} else {
-		filters += `
-		            AND $7::timestamptz IS NULL`
+		unset += ` AND $7::timestamptz IS NULL`
 	}
 	var b strings.Builder
 	b.WriteString(`SELECT u.id::text, left(u.title, 120), u.category, u.scope::text, u.created_at
 		 FROM (
 		   (SELECT s.id, s.title, s.category, s.scope, s.created_at
-		      FROM (`)
+		      FROM (SELECT a.* FROM (`)
 	for i := 1; i <= scopes; i++ {
 		if i > 1 {
 			b.WriteString(`
 		        UNION ALL`)
 		}
 		fmt.Fprintf(&b, `
-		        (SELECT b.id, b.title, b.category, b.scope, b.created_at
+		        (SELECT b.id, b.title, b.category, b.scope, b.created_at, b.type_name
 		           FROM context_blocks b
 		          WHERE b.scope = ($1::text[])[%[1]d]
 		            AND b.scope >= ($1::text[])[%[1]d] AND b.scope <= ($1::text[])[%[1]d]
-		            AND %[2]s
+		            AND NOT b.is_archived%[2]s
 		          ORDER BY b.created_at DESC
-		          FETCH FIRST $4 ROWS WITH TIES)`, i, filters)
+		          LIMIT ALL)`, i, window)
 	}
-	b.WriteString(`) s
+	b.WriteString(`) a
+		            ORDER BY a.created_at DESC
+		            LIMIT ALL) s
+		     WHERE s.type_name = ANY($3::text[]) AND $5::text[] IS NULL` + unset + `
 		     ORDER BY s.created_at DESC, s.id
 		     LIMIT $4)
 		   UNION ALL
 		   (SELECT b.id, b.title, b.category, b.scope, b.created_at + interval '0' AS created_at
 		      FROM context_blocks b
 		     WHERE b.id = ANY($2::uuid[]) AND NOT (b.scope = ANY($1::text[]))
-		       AND ` + filters + `
+		       AND ` + visibility.TypeVisible("b", "$3") + `
+		       AND $5::text[] IS NULL` + window + unset + `
 		     ORDER BY 5 DESC, 1
 		     LIMIT $4)
 		 ) u

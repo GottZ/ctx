@@ -195,6 +195,74 @@ func TestRangeReadsFullGraphSeedWalksTheScopeItReads(t *testing.T) {
 	}
 }
 
+// seedHidden fills a store of a scope of 20 000 blocks of a type the reader
+// does not see (checkpoints), interleaved with other scopes' blocks, a few
+// visible blocks of it older than them, and a scope of 2 000 visible blocks
+// newer than all of it.
+func seedHidden(ctx context.Context, pool *pgxpool.Pool) error {
+	for _, st := range []string{
+		`INSERT INTO context_blocks (category, title, content, scope, type_name, created_at, updated_at)
+		 SELECT 'learnings', 'hid old ' || i, 'body ' || i, 'hid', 'knowledge', timestamptz '2025-06-01' + make_interval(secs => i), timestamptz '2025-06-01'
+		   FROM generate_series(1, 200) i`,
+		`INSERT INTO context_blocks (category, title, content, scope, type_name, created_at, updated_at)
+		 SELECT 'learnings', 'hid ' || i, 'body ' || i, CASE WHEN i % 5 = 0 THEN 'hid' ELSE 'hid-other' END,
+		        CASE WHEN i % 5 = 0 THEN 'checkpoint' ELSE 'knowledge' END,
+		        timestamptz '2026-01-01' + make_interval(secs => i), timestamptz '2026-01-01'
+		   FROM generate_series(1, 100000) i`,
+		`INSERT INTO context_blocks (category, title, content, scope, type_name, created_at, updated_at)
+		 SELECT 'learnings', 'vis ' || i, 'body ' || i, 'vis', 'knowledge', timestamptz '2027-01-01' + make_interval(secs => i), timestamptz '2027-01-01'
+		   FROM generate_series(1, 2000) i`,
+		`VACUUM (ANALYZE) context_blocks`,
+	} {
+		if _, err := pool.Exec(ctx, st); err != nil {
+			return fmt.Errorf("%w\n%s", err, st)
+		}
+	}
+	return nil
+}
+
+// TestRangeReadsFullGraphSeedSkipsHiddenTypes (review of #536, finding F1 of
+// round 1): the merge form checks the type allowlist on what the merge pulls,
+// not inside an arm. The MergeAppend reads every arm's head before its first
+// row; an arm that filtered the type itself read every hidden block its scope
+// held before its first visible one (20 000 checkpoints here, newer than that
+// scope's visible blocks), on every call, though another read scope filled
+// the page (8 690 buffers against 77 for 40 000 at 200 000 rows).
+func TestRangeReadsFullGraphSeedSkipsHiddenTypes(t *testing.T) {
+	db := testdb.SetupSeededTestDB(t, "i536-seed-hidden-100000", seedHidden)
+	planners := &rrPlanners{t: t}
+	ctx := context.Background()
+	for _, c := range []struct {
+		scopes []string
+		limit  int
+	}{{[]string{"hid", "vis"}, 1500}, {[]string{"hid", "vis"}, 5}, {[]string{"vis", "hid", "hid-other"}, 201}} {
+		name := fmt.Sprintf("readers %v, limit %d", c.scopes, c.limit)
+		traced, tr := rrTraced(t, db)
+		tr.take()
+		res, err := store.FullGraph(ctx, traced, store.EgoParams{Limit: c.limit, EdgeLimit: 1}, c.scopes, nil, []string{"knowledge"})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(res.Nodes) != c.limit || !strings.HasPrefix(res.Nodes[0].Title, "vis ") {
+			t.Fatalf("%s: %d nodes, first %q", name, len(res.Nodes), res.Nodes[0].Title)
+		}
+		st := rrFind(t, tr.take(), func(sql string) bool { return strings.Contains(sql, "left(") && strings.Contains(sql, "context_blocks") })
+		if !strings.Contains(st.sql, "UNION ALL") {
+			t.Fatalf("%s: sent the planned form", name)
+		}
+		// The page's rows of vis (a few per heap page), a descent of four
+		// buffers per arm, and the plan's top.
+		bound := int64(c.limit/8) + 4*int64(len(c.scopes)) + 32
+		for _, rpc := range testdb.RandomPageCosts {
+			got := planners.explain(db, rpc, true, st)
+			t.Logf("%s (generic plan at random_page_cost %s): %d buffers; %s", name, rpc, got.buffers, got.indexes())
+			if got.buffers > bound {
+				t.Errorf("%s (generic plan at random_page_cost %s): %d buffers, more than %d: an arm read the hidden blocks of its scope", name, rpc, got.buffers, bound)
+			}
+		}
+	}
+}
+
 // TestRangeReadsFullGraphSeedWithoutItsIndex (review of #536): without
 // idx_context_scope_active — a database the schema-contract check reports —
 // the seed of a reader of few scopes is read on the planned form. The merge
@@ -326,7 +394,8 @@ func seedOld(ctx context.Context, pool *pgxpool.Pool, p store.EgoParams, scopes,
 // scope named twice, scopes without blocks, up to 20 granted blocks (in and
 // outside the read scopes, archived, of no block), limits 1-3000, a category
 // in a third of the sets, created windows on the instant of a block and a
-// microsecond beside it.
+// microsecond beside it; 20 more sets grant a group of blocks of one
+// created_at and cut it with a smaller page.
 func TestRangeReadsFullGraphSeedSameRows(t *testing.T) {
 	admin, dsn := testdb.SetupTestDBWithDSN(t)
 	ctx := context.Background()
@@ -445,6 +514,29 @@ func TestRangeReadsFullGraphSeedSameRows(t *testing.T) {
 			s.p.CreatedBefore = instant()
 		}
 		sets = append(sets, s)
+	}
+	// Granted blocks of one created_at, more of them than the page: the
+	// granted arm's order among them is its id tiebreak (the merge and the
+	// statement before cut the tie by id).
+	ties := map[time.Time][]string{}
+	for _, b := range blocks {
+		ties[b.created] = append(ties[b.created], b.id)
+	}
+	tieSets := 0
+	for _, ids := range ties {
+		if len(ids) < 6 || tieSets == 20 {
+			continue
+		}
+		tieSets++
+		sets = append(sets, set{
+			p:      store.EgoParams{Limit: 1 + tieSets%4, EdgeLimit: 4000},
+			scopes: []string{"g-none"},
+			grants: ids,
+			types:  types,
+		})
+	}
+	if tieSets == 0 {
+		t.Fatal("the corpus holds no group of six blocks of one created_at")
 	}
 	diffs, checked, longest, truncated, planned := 0, 0, 0, 0, 0
 	for _, rpc := range testdb.RandomPageCosts {
