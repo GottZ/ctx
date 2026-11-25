@@ -13,6 +13,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -64,6 +65,17 @@ func TestSecondTenantDeleteLeavesTheNextOwnersRows(t *testing.T) {
 	if _, err := store.UpsertBlob(ctx, f.pool, "files", "next blob", "n.txt", "text/plain", scopes[0], []byte("y"), nil, nil, ""); err != nil {
 		t.Fatal(err)
 	}
+	// And a setting of its own (the sweeps of the prune, issue #555 review).
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSetting(ctx, tx, "search.leave_out_never_ranked", scopes[0], json.RawMessage(`true`), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	close(h.release)
 	var serr error
@@ -76,6 +88,10 @@ func TestSecondTenantDeleteLeavesTheNextOwnersRows(t *testing.T) {
 	t.Logf("second delete: %v; the next owner's rows in %s after it: %d blocks, %d other rows", serr, scopes[0], blocks, other)
 	if blocks != 1 || other != 1 {
 		t.Errorf("the second delete of a deleted tenant took the next owner's rows: %d blocks and %d other rows left of 1 and 1", blocks, other)
+	}
+	var settings int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*)::int FROM context_settings WHERE scope = $1`, scopes[0]).Scan(&settings); err != nil || settings != 1 {
+		t.Errorf("the second delete took the next owner's setting: %d of 1 left (%v)", settings, err)
 	}
 	if !errors.Is(serr, store.ErrTenantNotFound) {
 		t.Errorf("the second delete, after the first had deleted the tenant: %v, want ErrTenantNotFound", serr)
