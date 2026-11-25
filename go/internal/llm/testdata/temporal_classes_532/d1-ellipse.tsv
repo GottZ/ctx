@@ -1,0 +1,63 @@
+# Holdout of issue #532, class d1-ellipse: written with its expectations and hashed before any rule changed (2026-11-25T17:37:24Z, sha256 of the source list b1b531d990ce5002).
+# Asked at noon UTC of the day. Expected: alternatives split by " | ", the dates of one by ";": D:day, W:start..end, F:from, U:until, NONE for no rule; @H the hour of that date, @- no hour, no mark not judged.
+# id, day, kind (F: the reading of the class is right, G: a counter-case, K: a control), question, expected, the answer of the rules at 5a28c475.
+d1-001	2026-11-22	F	Am Montag repariert, am Dienstag wieder kaputt?	D:2026-11-16;D:2026-11-17	D:2026-11-23;D:2026-11-24
+d1-002	2026-11-22	F	Am Montag gelauncht, am Mittwoch gerollbackt – warum?	D:2026-11-16;D:2026-11-18	D:2026-11-23;D:2026-11-25
+d1-003	2026-11-22	F	Am Dienstag deployed, am Donnerstag wieder zurückgerollt?	D:2026-11-17;D:2026-11-19	D:2026-11-24;D:2026-11-26
+d1-004	2026-11-22	F	Montag gefixt, Mittwoch wieder aufgetreten – wieso?	D:2026-11-16;D:2026-11-18	D:2026-11-23;D:2026-11-18
+d1-005	2026-11-22	F	Am Montag eingespielt, am Dienstag abgestürzt?	D:2026-11-16;D:2026-11-17	D:2026-11-23;D:2026-11-17
+d1-006	2026-11-22	F	Montag migriert, Dienstag Daten verloren?	D:2026-11-16;D:2026-11-17	D:2026-11-23;D:2026-11-24
+d1-007	2026-11-22	F	Am Freitag gepatcht, am Samstag gehackt?	D:2026-11-20;D:2026-11-21	D:2026-11-27;D:2026-11-28
+d1-008	2026-11-22	F	Am Montag installiert, am Dienstag deinstalliert – warum?	D:2026-11-16;D:2026-11-17	D:2026-11-23;D:2026-11-24
+d1-009	2026-11-22	F	Am Dienstag gemerged, am Mittwoch revertiert?	D:2026-11-17;D:2026-11-18	D:2026-11-24;D:2026-11-25
+d1-010	2026-11-22	F	Montag aktualisiert, Donnerstag schon wieder veraltet?	D:2026-11-16;D:2026-11-19	D:2026-11-23;D:2026-11-26
+d1-011	2026-11-22	F	Am Montag getestet, am Freitag trotzdem gecrasht?	D:2026-11-16;D:2026-11-20	D:2026-11-23;D:2026-11-20
+d1-012	2026-11-22	F	Am Mittwoch gebaut, am Donnerstag ausgerollt, warum erst dann?	D:2026-11-18;D:2026-11-19	D:2026-11-25;D:2026-11-26
+d1-013	2026-11-22	F	Am Montag gemeldet, am Freitag behoben?	D:2026-11-16;D:2026-11-20	D:2026-11-23;D:2026-11-27
+d1-014	2026-11-22	F	Am Dienstag eskaliert, am Mittwoch gelöst – wer war dran?	D:2026-11-17;D:2026-11-18	D:2026-11-17;D:2026-11-25
+d1-015	2026-11-22	F	Montag hochgefahren, Dienstag wieder runtergefahren?	D:2026-11-16;D:2026-11-17	D:2026-11-23;D:2026-11-24
+d1-016	2026-11-22	F	Am Montag eingecheckt, am Dienstag gebrochen?	D:2026-11-16;D:2026-11-17	D:2026-11-23;D:2026-11-24
+d1-017	2026-11-22	F	Am Donnerstag umgezogen, am Freitag wieder zurückgezogen?	D:2026-11-19;D:2026-11-20	D:2026-11-19;D:2026-11-27
+d1-018	2026-11-22	F	Am Montag erstellt, am Dienstag gelöscht – wieso?	D:2026-11-16;D:2026-11-17	D:2026-11-23;D:2026-11-24
+d1-019	2026-11-22	F	Am Freitag gestartet, am Samstag abgebrochen?	D:2026-11-20;D:2026-11-21	D:2026-11-20;D:2026-11-21
+d1-020	2026-11-22	F	Am Dienstag reviewt, am Mittwoch gemerged, am Donnerstag kaputt?	D:2026-11-17;D:2026-11-18;D:2026-11-19	D:2026-11-24;D:2026-11-25;D:2026-11-26
+d1-021	2026-11-22	F	Montag vergessen, Dienstag nachgeholt?	D:2026-11-16;D:2026-11-17	D:2026-11-23;D:2026-11-24
+d1-022	2026-11-22	F	Am Montag konfiguriert, am Dienstag überschrieben – von wem?	D:2026-11-16;D:2026-11-17	D:2026-11-23;D:2026-11-17
+d1-023	2026-11-22	F	Am Mittwoch skaliert, am Donnerstag trotzdem überlastet?	D:2026-11-18;D:2026-11-19	D:2026-11-25;D:2026-11-26
+d1-024	2026-11-22	F	Am Montag rebootet, am Dienstag wieder hängengeblieben?	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+d1-025	2026-11-22	F	Am Montag Kunde informiert, am Dienstag Vertrag unterschrieben?	D:2026-11-16;D:2026-11-17	D:2026-11-23;D:2026-11-24
+d1-026	2026-11-25	F	Am Montag deployed, am Dienstag wieder kaputt?	D:2026-11-23;D:2026-11-24	D:2026-11-30;D:2026-12-01
+d1-027	2026-11-25	F	Montag gefixt, Dienstag wieder offen – warum?	D:2026-11-23;D:2026-11-24	D:2026-11-30;D:2026-12-01
+d1-028	2026-03-18	F	Am Montag ausgerollt, am Dienstag zurückgerollt?	D:2026-03-16;D:2026-03-17	D:2026-03-23;D:2026-03-24
+d1-029	2026-11-22	F	Freitag abgestürzt, Samstag neu gestartet?	D:2026-11-20;D:2026-11-21	D:2026-11-20;D:2026-11-21
+d1-030	2026-11-22	F	Montag angefangen, Mittwoch abgeschlossen?	D:2026-11-16;D:2026-11-18	D:2026-11-23;D:2026-11-25
+d1-031	2026-11-22	G	Montag Büro geschlossen, Dienstag Homeoffice angeordnet	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-032	2026-11-22	G	Dienstag Termin vereinbart, Donnerstag Abnahme vorgesehen	D:2026-11-24;D:2026-11-26	D:2026-11-24;D:2026-11-26
+d1-033	2026-11-22	G	Montag eingeplant, Dienstag fest zugesagt	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-034	2026-11-22	G	Montag ausgebucht, Dienstag schon reserviert?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-035	2026-11-22	G	Am Montag geschlossen, am Dienstag geöffnet?	D:2026-11-23;D:2026-11-24	D:2026-11-16;D:2026-11-17
+d1-036	2026-11-22	G	Montag gesperrt, Dienstag freigegeben?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-037	2026-11-22	G	Am Montag Wartung angesetzt, am Dienstag Release terminiert?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-038	2026-11-22	G	Montag Kantine geschlossen, Dienstag regulär geöffnet	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-039	2026-11-22	G	Am Montag Server gesperrt, am Dienstag wieder erreichbar?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-040	2026-11-22	G	Montag Meeting abgesagt, Dienstag verschoben?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-041	2026-11-22	G	Am Mittwoch Parkplatz gesperrt, am Donnerstag Zufahrt eingeschränkt	D:2026-11-25;D:2026-11-26	D:2026-11-25;D:2026-11-26
+d1-042	2026-11-22	G	Montag Release eingefroren, Dienstag Code-Freeze aufgehoben?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-043	2026-11-22	G	Am Donnerstag Raum gebucht, am Freitag Catering bestellt?	D:2026-11-26;D:2026-11-27	D:2026-11-26;D:2026-11-27
+d1-044	2026-11-22	G	Montag Team komplett, Dienstag halb besetzt	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-045	2026-11-22	G	Am Montag Netzwerk gedrosselt, am Dienstag normal?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-046	2026-11-22	G	Montag Support eingeschränkt, Dienstag voll verfügbar	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-047	2026-11-22	G	Am Freitag Büro geschlossen, am Montag wieder geöffnet	D:2026-11-27;D:2026-11-23	D:2026-11-27;D:2026-11-23
+d1-048	2026-11-22	G	Am Dienstag Zugang gesperrt, am Mittwoch freigeschaltet?	D:2026-11-24;D:2026-11-25	D:2026-11-24;D:2026-11-25
+d1-049	2026-11-22	G	Montag Deployment geplant, Dienstag Rollout vorgesehen	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-050	2026-11-22	G	Montag Wartungsfenster reserviert, Mittwoch Puffer eingeplant	D:2026-11-23;D:2026-11-25	D:2026-11-23;D:2026-11-25
+d1-051	2026-11-22	G	Montag Urlaub genehmigt, Dienstag Vertretung organisiert?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-052	2026-11-22	G	Am Freitag Kantine geschlossen, am Samstag Fest angesagt	D:2026-11-27;D:2026-11-28	D:2026-11-27;D:2026-11-28
+d1-053	2026-11-22	G	Montag ausgelastet, Dienstag noch frei?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-054	2026-11-22	G	Am Montag komplett ausverkauft, am Dienstag noch Plätze?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-055	2026-11-22	G	Montag Testumgebung reserviert, Dienstag Prod gesperrt	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-056	2026-11-22	G	Am Montag Wartung, am Dienstag Release?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+d1-057	2026-11-22	G	Dienstag Abnahme angesetzt, Donnerstag Go-Live terminiert?	D:2026-11-24;D:2026-11-26	D:2026-11-24;D:2026-11-26
+d1-058	2026-11-25	G	Freitag Büro geschlossen, Montag Homeoffice angeordnet	D:2026-11-27;D:2026-11-30	D:2026-11-27;D:2026-11-30
+d1-059	2026-11-25	G	Am Freitag Release eingeplant, am Montag Puffer reserviert	D:2026-11-27;D:2026-11-30	D:2026-11-27;D:2026-11-30
+d1-060	2026-11-25	G	Am Freitag Server abgeschaltet, am Montag wieder hochgefahren – passt das?	D:2026-11-27;D:2026-11-30	D:2026-11-27;D:2026-11-30

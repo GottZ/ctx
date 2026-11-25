@@ -1,0 +1,160 @@
+# Holdout of issue #532, class c-englisch-praeteritum: written with its expectations and hashed before any rule changed (2026-11-25T17:37:24Z, sha256 of the source list 786139cea857ef17).
+# Asked at noon UTC of the day. Expected: alternatives split by " | ", the dates of one by ";": D:day, W:start..end, F:from, U:until, NONE for no rule; @H the hour of that date, @- no hour, no mark not judged.
+# id, day, kind (F: the reading of the class is right, G: a counter-case, K: a control), question, expected, the answer of the rules at 5a28c475.
+c-001	2026-11-22	F	The release slipped on Thursday and the new date is Tuesday	D:2026-11-19;D:2026-11-24	D:2026-11-26;D:2026-11-24
+c-002	2026-11-22	F	Which alerts fired Thursday night?	D:2026-11-19@23	D:2026-11-26@23
+c-003	2026-11-22	F	What fired Thursday night?	D:2026-11-19@23	D:2026-11-26@23
+c-004	2026-11-22	F	We met on Tuesday and talked about the release	D:2026-11-17	D:2026-11-24
+c-005	2026-11-22	F	Mrs. Friday called on Wednesday	D:2026-11-18	D:2026-11-25
+c-006	2026-11-22	F	Latency spiked on Tuesday, what caused it?	D:2026-11-17	D:2026-11-17
+c-007	2026-11-22	F	The database stalled on Friday, who looked into it?	D:2026-11-20	D:2026-11-20
+c-008	2026-11-22	F	The deploy stalled on Monday	D:2026-11-16	D:2026-11-23
+c-009	2026-11-22	F	Our CI timed out on Wednesday, why?	D:2026-11-18	D:2026-11-25
+c-010	2026-11-22	F	The queue overflowed on Saturday	D:2026-11-21	D:2026-11-28
+c-011	2026-11-22	F	The certificate expired on Thursday, who renewed it?	D:2026-11-19	D:2026-11-19
+c-012	2026-11-22	F	Grafana alerted on Monday about disk usage	D:2026-11-16	D:2026-11-23
+c-013	2026-11-22	F	Traffic doubled on Friday, was that the campaign?	D:2026-11-20	D:2026-11-20
+c-014	2026-11-22	F	Memory usage jumped on Tuesday night	D:2026-11-17@23	D:2026-11-24@23
+c-015	2026-11-22	F	The cron job fired twice on Monday	D:2026-11-16	D:2026-11-23
+c-016	2026-11-22	F	Errors jumped Thursday night, why?	D:2026-11-19@23	D:2026-11-26@23
+c-017	2026-11-22	F	Which pods restarted Friday morning?	D:2026-11-20@8	D:2026-11-27@8
+c-018	2026-11-22	F	Which nodes rebooted on Wednesday?	D:2026-11-18	D:2026-11-18
+c-019	2026-11-22	F	Which services degraded Tuesday?	D:2026-11-17	D:2026-11-24
+c-020	2026-11-22	F	What changed Tuesday?	D:2026-11-17	D:2026-11-17
+c-021	2026-11-22	F	What happened Thursday evening?	D:2026-11-19@19	D:2026-11-19@19
+c-022	2026-11-22	F	Which tests flaked Monday?	D:2026-11-16	D:2026-11-23
+c-023	2026-11-22	F	Alice merged the PR on Friday, can you check it?	D:2026-11-20	D:2026-11-20
+c-024	2026-11-22	F	Bob rolled back the deploy on Wednesday	D:2026-11-18	D:2026-11-25
+c-025	2026-11-22	F	Carol rotated the keys on Monday, right?	D:2026-11-16	D:2026-11-23
+c-026	2026-11-22	F	Dave approved the budget on Thursday	D:2026-11-19	D:2026-11-26
+c-027	2026-11-22	F	Kubernetes evicted the pods on Saturday	D:2026-11-21	D:2026-11-28
+c-028	2026-11-22	F	Sentry reported a spike on Tuesday	D:2026-11-17	D:2026-11-24
+c-029	2026-11-22	F	PagerDuty escalated on Friday night	D:2026-11-20@23	D:2026-11-27@23
+c-030	2026-11-22	F	Mr. Monday called on Thursday	D:2026-11-19	D:2026-11-26
+c-031	2026-11-22	F	Ms Friday emailed on Tuesday about the contract	D:2026-11-17	D:2026-11-24
+c-032	2026-11-22	F	We met the vendor on Thursday, what did they promise?	D:2026-11-19	D:2026-11-26
+c-033	2026-11-22	F	Who sent the invoice on Monday?	D:2026-11-16	D:2026-11-23
+c-034	2026-11-22	F	The server froze on Friday	D:2026-11-20	D:2026-11-27
+c-035	2026-11-22	F	We spoke with support on Wednesday	D:2026-11-18	D:2026-11-25
+c-036	2026-11-22	F	The pager rang on Saturday night, who answered?	D:2026-11-21@23	D:2026-11-21@23
+c-037	2026-11-22	F	Who drove the release on Friday?	D:2026-11-20	D:2026-11-27
+c-038	2026-11-22	F	Who chose the new region on Wednesday?	D:2026-11-18	D:2026-11-25
+c-039	2026-11-22	F	Who knew about the bug on Monday?	D:2026-11-16	D:2026-11-23
+c-040	2026-11-22	F	The disk grew by 40 GB on Tuesday	D:2026-11-17	D:2026-11-24
+c-041	2026-11-22	F	The job threw an exception on Thursday	D:2026-11-19	D:2026-11-26
+c-042	2026-11-22	F	We lost two nodes on Monday	D:2026-11-16	D:2026-11-23
+c-043	2026-11-22	F	The team held a retro on Thursday	D:2026-11-19	D:2026-11-26
+c-044	2026-11-22	F	We built the new image on Monday, is it tagged?	D:2026-11-16	D:2026-11-23
+c-045	2026-11-22	F	Who paid the cloud bill on Friday?	D:2026-11-20	D:2026-11-27
+c-046	2026-11-22	F	We spent hours on Monday debugging DNS	D:2026-11-16	D:2026-11-23
+c-047	2026-11-22	F	They left early on Friday	D:2026-11-20	D:2026-11-27
+c-048	2026-11-22	F	She said on Monday that the API is stable	D:2026-11-16	D:2026-11-23
+c-049	2026-11-22	F	We heard about the outage on Wednesday	D:2026-11-18	D:2026-11-25
+c-050	2026-11-22	F	Who taught the onboarding workshop on Thursday?	D:2026-11-19	D:2026-11-26
+c-051	2026-11-22	F	The service hung on Tuesday afternoon	D:2026-11-17@15	D:2026-11-24@15
+c-052	2026-11-22	F	We kept the old cluster on Saturday as a fallback	D:2026-11-21	D:2026-11-28
+c-053	2026-11-22	F	Somebody forgot the migration on Monday	D:2026-11-16	D:2026-11-23
+c-054	2026-11-22	F	Who brought the cake on Friday?	D:2026-11-20	D:2026-11-27
+c-055	2026-11-22	F	We bought new licenses on Tuesday	D:2026-11-17	D:2026-11-24
+c-056	2026-11-22	F	The alarm woke everyone on Saturday night	D:2026-11-21@23	D:2026-11-28@23
+c-057	2026-11-22	F	The intern wrote the script on Wednesday	D:2026-11-18	D:2026-11-18
+c-058	2026-11-22	F	The build took two hours on Thursday	D:2026-11-19	D:2026-11-26
+c-059	2026-11-22	F	Costs rose sharply on Monday	D:2026-11-16	D:2026-11-23
+c-060	2026-11-22	F	Who gave the demo on Friday?	D:2026-11-20	D:2026-11-27
+c-061	2026-11-22	F	The deploy began on Tuesday and ended on Wednesday	D:2026-11-17;D:2026-11-18	D:2026-11-24;D:2026-11-25
+c-062	2026-11-22	F	The API went down on Friday, what was the root cause?	D:2026-11-20	D:2026-11-20
+c-063	2026-11-22	F	Let's talk on Friday about the bug we had on Monday	D:2026-11-27;D:2026-11-16	D:2026-11-20;D:2026-11-16
+c-064	2026-11-22	F	Can we revisit on Tuesday the issue you raised on Monday?	D:2026-11-24;D:2026-11-16	D:2026-11-17;D:2026-11-16
+c-065	2026-11-22	F	Remind me on Friday about the ticket I filed on Wednesday	D:2026-11-27;D:2026-11-18	D:2026-11-20;D:2026-11-18
+c-066	2026-11-22	F	On Monday we discussed the outage we had on Friday	D:2026-11-16;D:2026-11-20	D:2026-11-16;D:2026-11-20
+c-067	2026-11-22	F	The patch landed on Wednesday	D:2026-11-18	D:2026-11-25
+c-068	2026-11-22	F	Usage dropped on Saturday, is that normal?	D:2026-11-21	D:2026-11-28
+c-069	2026-11-22	F	The migration finished Friday night	D:2026-11-20@23	D:2026-11-20@23
+c-070	2026-11-22	F	Which builds broke Thursday?	D:2026-11-19	D:2026-11-19
+c-071	2026-11-22	F	The consumer lagged on Tuesday	D:2026-11-17	D:2026-11-24
+c-072	2026-11-22	F	Our nightly job crashed on Wednesday	D:2026-11-18	D:2026-11-18
+c-073	2026-11-22	F	The vendor shipped the hardware on Monday	D:2026-11-16	D:2026-11-16
+c-074	2026-11-22	F	Which customers churned on Friday?	D:2026-11-20	D:2026-11-20
+c-075	2026-11-22	F	What exploded Saturday night?	D:2026-11-21@23	D:2026-11-28@23
+c-076	2026-11-25	F	The release slipped on Monday, what is the new date?	D:2026-11-23	D:2026-11-30
+c-077	2026-11-25	F	Which alerts fired Friday night?	D:2026-11-20@23	D:2026-11-27@23
+c-078	2026-11-25	F	The import stopped on Tuesday	D:2026-11-24	D:2026-12-01
+c-079	2026-11-25	F	John fixed the login bug on Monday	D:2026-11-23	D:2026-11-23
+c-080	2026-11-25	F	We met on Monday to plan the migration	D:2026-11-23	D:2026-11-30
+c-081	2026-11-25	F	The disk filled up on Sunday	D:2026-11-22	D:2026-11-29
+c-082	2026-11-25	F	Who woke up the on-call on Saturday?	D:2026-11-21	D:2026-11-28
+c-083	2026-11-25	F	The batch overran on Tuesday night	D:2026-11-24@23	D:2026-12-01@23
+c-084	2026-03-18	F	The release slipped on Monday and the new date is Friday	D:2026-03-16;D:2026-03-20	D:2026-03-23;D:2026-03-20
+c-085	2026-03-18	F	Which jobs stalled Tuesday night?	D:2026-03-17@23	D:2026-03-24@23
+c-086	2026-03-18	F	Our build server died on Monday	D:2026-03-16	D:2026-03-23
+c-087	2026-03-18	F	Who wrote the runbook we used on Monday?	D:2026-03-16	D:2026-03-16
+c-088	2026-03-18	F	The network flapped on Tuesday morning	D:2026-03-17@8	D:2026-03-24@8
+c-089	2026-11-22	F	Uptime suffered on Friday after the deploy	D:2026-11-20	D:2026-11-27
+c-090	2026-11-22	F	The load balancer misrouted traffic on Thursday	D:2026-11-19	D:2026-11-26
+c-091	2026-11-22	F	Which hosts swapped heavily on Monday?	D:2026-11-16	D:2026-11-16
+c-092	2026-11-22	F	Revenue dipped on Tuesday, why?	D:2026-11-17	D:2026-11-24
+c-093	2026-11-22	F	The tests passed on Wednesday but failed on Thursday	D:2026-11-18;D:2026-11-19	D:2026-11-18;D:2026-11-19
+c-094	2026-11-22	F	The customer complained on Monday about slow pages	D:2026-11-16	D:2026-11-23
+c-095	2026-11-22	F	Everything worked on Friday	D:2026-11-20	D:2026-11-27
+c-096	2026-11-22	G	Can you rerun the failed jobs on Monday?	D:2026-11-23	D:2026-11-16
+c-097	2026-11-22	G	What about the scheduled run on Friday?	D:2026-11-27	D:2026-11-27
+c-098	2026-11-22	G	Which updated docs are due on Thursday?	D:2026-11-26	D:2026-11-19
+c-099	2026-11-22	G	Show me the archived tickets for Friday	D:2026-11-27	D:2026-11-27
+c-100	2026-11-22	G	Is the delayed release still on for Tuesday?	D:2026-11-24	D:2026-11-24
+c-101	2026-11-22	G	Will the patched build ship on Wednesday?	D:2026-11-25	D:2026-11-25
+c-102	2026-11-22	G	Are the merged PRs going out on Friday?	D:2026-11-27	D:2026-11-27
+c-103	2026-11-22	G	Do the cached results expire on Monday?	D:2026-11-23	D:2026-11-23
+c-104	2026-11-22	G	Is the planned outage on Saturday confirmed?	D:2026-11-28	D:2026-11-28
+c-105	2026-11-22	G	The expected load on Monday is high, are we ready?	D:2026-11-23	D:2026-11-23
+c-106	2026-11-22	G	The deploy is scheduled for Friday	D:2026-11-27	D:2026-11-27
+c-107	2026-11-22	G	The upgrade is planned for Tuesday	D:2026-11-24	D:2026-11-24
+c-108	2026-11-22	G	The maintenance is booked for Thursday	D:2026-11-26	D:2026-11-26
+c-109	2026-11-22	G	Is the meeting scheduled for Monday?	D:2026-11-23	D:2026-11-23
+c-110	2026-11-22	G	The meeting got moved to Thursday, who needs to know?	D:2026-11-26	D:2026-11-19
+c-111	2026-11-22	G	Do we need a hotfix on Friday?	D:2026-11-27	D:2026-11-27
+c-112	2026-11-22	G	Is the build red on Monday again?	D:2026-11-23	D:2026-11-23
+c-113	2026-11-22	G	What is the upload speed on Tuesday?	D:2026-11-24	D:2026-11-24
+c-114	2026-11-22	G	Which feed updates on Friday?	D:2026-11-27	D:2026-11-27
+c-115	2026-11-22	G	Will the seed data load on Monday?	D:2026-11-23	D:2026-11-23
+c-116	2026-11-22	G	Is the shed locked on Saturday?	D:2026-11-28	D:2026-11-28
+c-117	2026-11-22	G	Is the bed in the lab ready on Friday?	D:2026-11-27	D:2026-11-27
+c-118	2026-11-22	G	Do we need more nodes on Monday?	D:2026-11-23	D:2026-11-23
+c-119	2026-11-22	G	Does Fred deploy on Monday?	D:2026-11-23	D:2026-11-23
+c-120	2026-11-22	G	Will Ted join the call on Friday?	D:2026-11-27	D:2026-11-27
+c-121	2026-11-22	G	Is Ahmed on call on Friday?	D:2026-11-27	D:2026-11-27
+c-122	2026-11-22	G	Who will read the report on Friday?	D:2026-11-27	D:2026-11-27
+c-123	2026-11-22	G	Can you set the flag on Friday?	D:2026-11-27	D:2026-11-27
+c-124	2026-11-22	G	Let's cut the release on Thursday	D:2026-11-26	D:2026-11-26
+c-125	2026-11-22	G	Do we hit the rate limit on Monday?	D:2026-11-23	D:2026-11-23
+c-126	2026-11-22	G	Put it on the agenda for Tuesday	D:2026-11-24	D:2026-11-24
+c-127	2026-11-22	G	Let them know on Monday	D:2026-11-23	D:2026-11-23
+c-128	2026-11-22	G	Is the paid plan active on Monday?	D:2026-11-23	D:2026-11-23
+c-129	2026-11-22	G	Are the held jobs released on Friday?	D:2026-11-27	D:2026-11-27
+c-130	2026-11-22	G	Will the lost node rejoin on Tuesday?	D:2026-11-24	D:2026-11-24
+c-131	2026-11-22	G	Will the sent invoices be paid on Friday?	D:2026-11-27	D:2026-11-27
+c-132	2026-11-22	G	Is the left panel fixed on Monday?	D:2026-11-23	D:2026-11-23
+c-133	2026-11-22	G	Who is going to merge on Friday?	D:2026-11-27	D:2026-11-27
+c-134	2026-11-22	G	Are the frozen accounts unlocked on Thursday?	D:2026-11-26	D:2026-11-26
+c-135	2026-11-22	G	Is the broken test skipped on Monday?	D:2026-11-23	D:2026-11-23
+c-136	2026-11-22	G	Do the stolen laptops get wiped on Tuesday?	D:2026-11-24	D:2026-11-24
+c-137	2026-11-22	G	Should the rotated keys be revoked on Friday?	D:2026-11-27	D:2026-11-27
+c-138	2026-11-22	G	Which blocked users are reviewed on Wednesday?	D:2026-11-25	D:2026-11-25
+c-139	2026-11-22	G	Will the rejected PRs be closed on Monday?	D:2026-11-23	D:2026-11-23
+c-140	2026-11-22	G	What happens to the deleted files on Friday?	D:2026-11-27	D:2026-11-20
+c-141	2026-11-22	G	Which disabled checks come back on Tuesday?	D:2026-11-24	D:2026-11-24
+c-142	2026-11-22	G	Is the shared drive cleaned up on Saturday?	D:2026-11-28	D:2026-11-28
+c-143	2026-11-22	G	Does the limited beta open on Thursday?	D:2026-11-26	D:2026-11-26
+c-144	2026-11-22	G	Are the infrastructure costs recorded on Monday?	D:2026-11-23	D:2026-11-23
+c-145	2026-11-22	G	Do the bundled updates roll out on Wednesday?	D:2026-11-25	D:2026-11-25
+c-146	2026-11-22	G	Is the speed test on Tuesday?	D:2026-11-24	D:2026-11-24
+c-147	2026-11-22	G	Is there red tape on Monday?	D:2026-11-23	D:2026-11-23
+c-148	2026-11-25	G	Can you restart the crashed pods on Friday?	D:2026-11-27	D:2026-11-20
+c-149	2026-11-25	G	Is the postponed demo on Monday?	D:2026-11-30	D:2026-11-30
+c-150	2026-11-25	G	The release is expected on Friday	D:2026-11-27	D:2026-11-27
+c-151	2026-11-25	G	Who reviews the updated runbook on Thursday?	D:2026-11-26	D:2026-11-19
+c-152	2026-11-25	G	Will the queued jobs run on Saturday?	D:2026-11-28	D:2026-11-28
+c-153	2026-03-18	G	What about the failed jobs, do we rerun them on Friday?	D:2026-03-20	D:2026-03-20
+c-154	2026-03-18	G	Is the reserved capacity used on Thursday?	D:2026-03-19	D:2026-03-19
+c-155	2026-11-22	G	When is the scheduled maintenance, Tuesday?	D:2026-11-24	D:2026-11-24
+c-156	2026-11-22	G	Are the infected hosts quarantined on Monday?	D:2026-11-23	D:2026-11-23
+c-157	2026-11-22	G	Ted's birthday is on Thursday, what do we get him?	D:2026-11-26	D:2026-11-26
