@@ -16,6 +16,16 @@ import (
 // germanStopwords are common German words that are no common English words.
 // Matched as whole words, case-insensitive. The German stop words English uses
 // too sit in germanAmbiguousStopwords.
+//
+// The words after the first block came with #551 (German questions with fewer
+// than two of the first block were sent as written): German function words and
+// frequent verb forms, in ASCII spelling (a word with ä ö ü ß counts on its
+// letters already). Every one was checked against English: none is a word form
+// of the en_US hunspell dictionary (all affix forms, names included) or an
+// English abbreviation or chat form; the ones that are — du es mich mir dir
+// seine seiner allen am um im ins ans bis hinter ob falls halt eben oft nun nix
+// darin bin war hast will mag weiss tun tut mal sei — stay off the list
+// (germanListHomographs in the tests).
 var germanStopwords = map[string]struct{}{
 	"wie": {}, "der": {}, "das": {}, "und": {},
 	"ist": {}, "fur": {}, "auf": {}, "ein": {}, "nicht": {},
@@ -23,11 +33,87 @@ var germanStopwords = map[string]struct{}{
 	"zur": {}, "zum": {}, "oder": {}, "auch": {}, "sich": {},
 	"aus": {}, "noch": {}, "als": {}, "uber": {},
 	"nur": {}, "kann": {}, "aber": {}, "ich": {}, "wir": {},
-	"sie": {}, "wer": {}, "wo": {}, "warum": {}, "welche": {}, "welcher": {},
+	"sie": {}, "wer": {}, "wo": {}, "welche": {}, "welcher": {},
 	"welches": {}, "einen": {}, "einer": {}, "eines": {}, "einem": {},
 	"keine": {}, "kein": {}, "keiner": {}, "soll": {}, "muss": {},
 	"gibt": {}, "sind": {}, "waren": {}, "wurde": {}, "werden": {},
 	"haben": {}, "diese": {}, "dieser": {}, "dieses": {}, "diesem": {},
+	// #551: question words that are not enough on their own, articles and
+	// pronouns
+	"wieviel": {}, "wieviele": {}, "welchen": {}, "welchem": {},
+	"eine": {}, "dich": {}, "uns": {}, "euch": {}, "ihm": {}, "ihn": {}, "ihnen": {},
+	"ihr": {}, "ihre": {}, "ihren": {}, "ihrem": {}, "ihrer": {},
+	"mein": {}, "meine": {}, "meinen": {}, "meinem": {}, "meiner": {},
+	"dein": {}, "deine": {}, "deinen": {}, "sein": {}, "seinen": {}, "seinem": {},
+	"unser": {}, "unsere": {}, "unseren": {}, "unserem": {}, "euer": {}, "eure": {},
+	"jemand": {}, "niemand": {}, "etwas": {}, "nichts": {}, "alles": {}, "alle": {},
+	"jeder": {}, "jede": {}, "jedes": {}, "jeden": {}, "viele": {}, "vielen": {},
+	"beide": {}, "manche": {}, "selbst": {}, "einige": {},
+	// #551: prepositions and conjunctions
+	"beim": {}, "vom": {}, "durch": {}, "gegen": {}, "ohne": {}, "unter": {},
+	"zwischen": {}, "neben": {}, "seit": {}, "wegen": {}, "trotz": {}, "vor": {},
+	"statt": {}, "dass": {}, "weil": {}, "wenn": {}, "denn": {}, "sondern": {},
+	"damit": {}, "obwohl": {}, "sowie": {}, "bzw": {}, "sowohl": {}, "weder": {},
+	// #551: adverbs and particles
+	"schon": {}, "jetzt": {}, "heute": {}, "gestern": {}, "morgen": {}, "immer": {},
+	"wieder": {}, "sehr": {}, "ganz": {}, "gerade": {}, "hier": {}, "dort": {},
+	"dann": {}, "doch": {}, "bitte": {}, "danke": {}, "gern": {}, "gerne": {},
+	"vielleicht": {}, "wirklich": {}, "eigentlich": {}, "nochmal": {}, "etwa": {},
+	"bereits": {}, "sofort": {}, "sonst": {}, "nie": {}, "kaum": {}, "genau": {},
+	"nein": {}, "mehr": {}, "weniger": {}, "viel": {}, "wenig": {}, "zusammen": {},
+	"endlich": {}, "leider": {}, "trotzdem": {}, "deshalb": {}, "daher": {},
+	"dabei": {}, "darauf": {}, "daran": {}, "davon": {}, "dazu": {}, "danach": {},
+	"davor": {}, "bisher": {}, "irgendwie": {}, "irgendwo": {}, "sogar": {},
+	"ziemlich": {}, "soweit": {}, "drauf": {},
+	// #551: verb forms
+	"bist": {}, "seid": {}, "warst": {}, "wurden": {}, "gewesen": {}, "geworden": {},
+	"hatte": {}, "hatten": {}, "habe": {}, "habt": {}, "hab": {}, "kannst": {},
+	"konnte": {}, "konnten": {}, "musste": {}, "mussten": {}, "sollte": {},
+	"sollten": {}, "willst": {}, "wollen": {}, "wollte": {}, "darf": {}, "mochte": {},
+	"mache": {}, "machst": {}, "macht": {}, "machen": {}, "gemacht": {}, "geht": {},
+	"gehen": {}, "ging": {}, "kommt": {}, "kommen": {}, "kam": {}, "steht": {},
+	"stehen": {}, "liegt": {}, "liegen": {}, "sieht": {}, "sehen": {}, "sagt": {},
+	"sagen": {}, "gesagt": {}, "meint": {}, "findet": {}, "finde": {}, "finden": {},
+	"gefunden": {}, "brauche": {}, "braucht": {}, "brauchen": {}, "bekomme": {},
+	"bekommt": {}, "bekommen": {}, "bedeutet": {}, "bedeuten": {}, "funktioniert": {},
+	"klappt": {}, "fehlt": {}, "fehlen": {}, "zeigt": {}, "zeigen": {}, "geben": {},
+	"nimmt": {}, "nehmen": {}, "heisst": {}, "passiert": {}, "passt": {}, "hilft": {},
+	"helfen": {}, "dauert": {}, "kriege": {}, "kriegt": {}, "stimmt": {},
+	"erstellt": {}, "erstellen": {}, "gesehen": {}, "kostet": {}, "kosten": {},
+	"suchen": {}, "sucht": {},
+}
+
+// germanQuestionWords are German question words that are no English, Dutch or
+// Nordic word (#551): one is enough to translate a question without English
+// function words, like a domain term (Wann kommt das Paket, Wieso Timeout).
+// wer, wo and wie stay stop words: Dutch writes wie, and wo and wer are
+// common abbreviations.
+var germanQuestionWords = map[string]struct{}{
+	"warum": {}, "wann": {}, "wieso": {}, "weshalb": {}, "weswegen": {},
+	"woher": {}, "wohin": {}, "wozu": {}, "womit": {}, "wodurch": {},
+	"worauf": {}, "woran": {}, "worin": {}, "wovon": {}, "inwiefern": {},
+}
+
+// germanNounSuffixes end German nouns (Rechnung, Wohnungen, Erreichbarkeit,
+// Freiheit, Mitgliedschaft) and no English word of minGermanNounRunes letters
+// or more except those in englishSuffixWords (#551): such a word counts like a
+// word with ä ö ü ß, so a German keyword query (Heizung Wartung) is
+// translated. -lich is left out: English writes Heimlich, Ehrlich and clichés.
+var germanNounSuffixes = []string{"ung", "ungen", "keit", "keiten", "heit", "heiten", "schaft", "schaften"}
+
+// minGermanNounRunes is the shortest word read for a German noun ending; it
+// keeps young, sprung, strung and unsung out.
+const minGermanNounRunes = 7
+
+// englishSuffixWords are the word forms of the en_US hunspell dictionary of
+// minGermanNounRunes letters or more that end in one of germanNounSuffixes —
+// the English words (and names) the ending rule would otherwise read as
+// German.
+var englishSuffixWords = map[string]struct{}{
+	"aqualung": {}, "bandung": {}, "fahrenheit": {}, "gesundheit": {}, "hamhung": {},
+	"hamstrung": {}, "hertzsprung": {}, "kaohsiung": {}, "nibelung": {}, "overhung": {},
+	"overstrung": {}, "restrung": {}, "samsung": {}, "shantung": {}, "taichung": {},
+	"unstrung": {},
 }
 
 // germanAmbiguousStopwords are German stop words that are English words too:
@@ -180,19 +266,21 @@ const (
 // question.
 type translateEvidence struct {
 	// strong is evidence of a language the step translates that English does
-	// not share: German stop words and domain terms, Nordic function words,
-	// and lower-case words written with ä ö ü ß å æ ø.
+	// not share: German stop words, question words and domain terms, Nordic
+	// function words, and lower-case words written with ä ö ü ß å æ ø or
+	// ending like a German noun (germanNounSuffixes).
 	strong int
 	// weak is evidence English shares: the ambiguous German stop words and
-	// Nordic words, and capitalised words with ä ö ü ß å æ ø — a German noun
-	// or a name such as Müller or Zürich.
+	// Nordic words, and capitalised words with ä ö ü ß å æ ø or a German noun
+	// ending — a German noun or a name such as Müller or Zürich.
 	weak int
 	// stops counts German stop words and the ambiguous Nordic words (the
 	// two-stop-word rule).
 	stops int
 	// signal counts the single words that are enough on their own in a
-	// question without English: domain terms, Nordic function words and every
-	// word with ä ö ü ß å æ ø.
+	// question without English: German question words, domain terms, Nordic
+	// function words, every word with ä ö ü ß å æ ø and every word with a
+	// German noun ending.
 	signal int
 	// english counts English function words.
 	english int
@@ -217,9 +305,10 @@ const maxDetectWordBytes = 32
 //     roll" and a name such as Müller stay English, "Gibt es Änderungen in
 //     the schema?" stays German;
 //   - a question without English function words is translated on one word
-//     with ä ö ü ß å æ ø, one domain term, one Nordic function word, or two
-//     stop words — the rule before #210, which knew no Nordic word and no
-//     å æ ø.
+//     with ä ö ü ß å æ ø, one word with a German noun ending (Rechnung), one
+//     German question word (wann, wieso), one domain term, one Nordic
+//     function word, or two stop words — the rule before #210, which knew no
+//     Nordic word and no å æ ø, with the words #551 added.
 //
 // A quote ("…", „…“, “…”, «…», ‚…‘, '…', ´…´, ＂…＂, ″…″) is what the question
 // asks about, not the language it is asked in: an English question is decided
@@ -526,12 +615,14 @@ func (ev *translateEvidence) addToken(tok string) {
 }
 
 // addWord counts one word: by the list it is on (the first that has it), and
-// by its letters.
+// by its letters or, on no list and without those letters, by a German noun
+// ending.
 func (ev *translateEvidence) addWord(w *detectWord) {
+	listed := false
 	if !w.long {
-		ev.addListed(w.buf[:w.n], w.runes >= 2 && !w.lower)
+		listed = ev.addListed(w.buf[:w.n], w.runes >= 2 && !w.lower)
 	}
-	if w.letters {
+	if w.letters || !listed && !w.long && germanNounEnding(w.buf[:w.n], w.runes) {
 		ev.signal++
 		if w.capital {
 			ev.weak++
@@ -541,11 +632,27 @@ func (ev *translateEvidence) addWord(w *detectWord) {
 	}
 }
 
-// addListed counts a lower-cased word by the first list that has it. An
-// abbreviation is looked up only in the German lists, as before #210.
-func (ev *translateEvidence) addListed(lw []byte, abbreviation bool) {
+// germanNounEnding reports whether a lower-cased word of runes letters ends
+// like a German noun (germanNounSuffixes) and is no English word with that
+// ending.
+func germanNounEnding(lw []byte, runes int) bool {
+	if runes < minGermanNounRunes || has(englishSuffixWords, lw) {
+		return false
+	}
+	for _, suffix := range germanNounSuffixes {
+		if len(lw) >= len(suffix) && string(lw[len(lw)-len(suffix):]) == suffix {
+			return true
+		}
+	}
+	return false
+}
+
+// addListed counts a lower-cased word by the first list that has it and
+// reports whether one did. An abbreviation is looked up only in the German
+// lists, as before #210.
+func (ev *translateEvidence) addListed(lw []byte, abbreviation bool) bool {
 	switch {
-	case has(germanTechTerms, lw):
+	case has(germanTechTerms, lw), has(germanQuestionWords, lw):
 		ev.strong++
 		ev.signal++
 	case has(germanStopwords, lw):
@@ -563,7 +670,10 @@ func (ev *translateEvidence) addListed(lw []byte, abbreviation bool) {
 		ev.signal++
 	case has(englishFunctionWords, lw):
 		ev.english++
+	default:
+		return false
 	}
+	return true
 }
 
 // has looks a word up without allocating: the compiler reads the bytes of a

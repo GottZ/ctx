@@ -6,12 +6,104 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 )
 
 // The follow-ups of #210 collected in #551.
+
+// TestNeedsTranslation551GermanFrames (point 1): a German question whose
+// frame carries fewer than two of the stop words listed before #551 and no
+// umlaut — a question word such as wann, wieso, woher, weshalb or wozu, a
+// contraction such as beim, an adverb such as heute, a frequent verb form,
+// or a noun ending in -ung, -heit, -keit or -schaft — is translated. On
+// 89d9e70c each of these was sent as written.
+func TestNeedsTranslation551GermanFrames(t *testing.T) {
+	checkNeedsTranslation(t, true,
+		// the issue's example
+		`Woher kommt "the quick brown fox"?`,
+		// a German question word is enough on its own
+		"Wann kommt der Techniker",
+		"Wieso Timeout",
+		"weshalb so langsam",
+		"Wozu dient eigentlich der Cronjob?",
+		"Seit wann gibt es den Export?",
+		`Wann erscheint "connection refused"?`,
+		// stop words that were not on the list
+		"Was passiert beim Neustart",
+		"heute Abend noch deployen",
+		"Hab ich schon gemacht",
+		"Kommt drauf an, sagt der Kollege",
+		"geht nicht mehr",
+		`Fehler "permission denied" beim Login seit heute`,
+		// a noun with a German ending
+		"Heizung Wartung",
+		"Rechnung Oktober",
+		"Ummeldung Formular",
+		"Erreichbarkeit Hotline",
+		"Mitgliedschaft kuendigen",
+		"Gesundheitsamt Bescheinigungen",
+	)
+}
+
+// TestNeedsTranslation551EnglishControls (point 1): every word added to the
+// German lists is checked against English. English questions with the words
+// German and English share (in, was, war, die, fast, gift, not, bald, hat,
+// arm, kind, rock, stern, bin, will, halt, oft, am, um, im) and English words
+// with a German ending (Samsung, Fahrenheit, hamstrung) stay English.
+func TestNeedsTranslation551EnglishControls(t *testing.T) {
+	checkNeedsTranslation(t, false,
+		"War Thunder update notes",
+		"fast boot not working",
+		"gift wrap bald spot",
+		"rock band stern review",
+		"kind words arm sling",
+		"bin day halt",
+		"oft quoted line",
+		"am I late",
+		"um ok sure",
+		"im done here",
+		"Samsung TV firmware update",
+		"Fahrenheit to Celsius",
+		"hamstrung budget plans",
+		"Kaohsiung night market",
+		"young people meeting",
+		"was it fast",
+		"Die cast car models",
+	)
+}
+
+// germanListHomographs are words the German lists must not carry: each is a
+// German function word that is also an English word form (en_US hunspell,
+// all affix forms) or an English abbreviation or chat form. They were
+// checked out of the list added in #551; the ambiguous German stop words
+// (was die den hat des dem) count half and stay where they are.
+var germanListHomographs = []string{
+	"du", "es", "mich", "mir", "dir", "seine", "seiner", "allen", "am", "um", "im",
+	"ins", "ans", "bis", "hinter", "ob", "falls", "halt", "eben", "oft", "nun",
+	"nix", "darin", "bin", "war", "hast", "will", "mag", "weiss", "tun", "tut",
+	"mal", "sei", "in", "fast", "gift", "not", "bald", "arm", "kind", "rock",
+	"stern", "also", "so", "man", "fern", "hell", "rat", "rot",
+}
+
+// TestGermanListsCarryNoEnglishWord: none of the homographs is a strong
+// German word — a German stop word, question word or domain term.
+func TestGermanListsCarryNoEnglishWord(t *testing.T) {
+	for _, w := range germanListHomographs {
+		for name, set := range map[string]map[string]struct{}{
+			"germanStopwords": germanStopwords, "germanQuestionWords": germanQuestionWords, "germanTechTerms": germanTechTerms,
+		} {
+			if _, ok := set[w]; ok {
+				t.Errorf("%s carries %q, an English word", name, w)
+			}
+		}
+		if germanNounEnding([]byte(w), utf8.RuneCountInString(w)) {
+			t.Errorf("%q reads as a German noun ending", w)
+		}
+	}
+}
 
 // TestValidateTranslation551Letters (point 2): a translation that keeps a
 // letter beyond ASCII — a place or person name, an accent, a decomposed
