@@ -1,0 +1,33 @@
+# Holdout of the review round of issue #532, r1-n4-namen: names with a part of the day or a day keyword in them (N) and the same words as a time (Z); written with its expectations and hashed before the round's first edit (2026-11-25T20:48:22Z, sha256 of the source list cbc117b07bba2fa0).
+# Asked at noon UTC of the day. Expected: the dates by ";" as D:day, NONE for no rule; hours are not judged.
+# id, day, kind, question, expected, the answer of the rules at 5a28c475.
+n4-001	2026-11-25	N	Wer spielt bei Tonight Alive am Schlagzeug?	NONE	NIL
+n4-002	2026-11-25	N	Who produces The Tonight Show these days?	NONE	NIL
+n4-003	2026-11-25	N	Wie heißt der Kolumnist der Morgenpost?	NONE	NIL
+n4-004	2026-11-25	N	Who wrote the song Yesterday?	NONE	D:2026-11-24
+n4-005	2026-11-25	N	Wer moderiert die Heute-Show?	NONE	D:2026-11-25
+n4-006	2026-11-25	N	Was kostet ein Abo der Morgenzeitung?	NONE	NIL
+n4-007	2026-11-25	N	Who hosts Good Morning America now?	NONE	D:2026-11-25@8
+n4-008	2026-11-25	N	Is Friday Night Lights on Netflix?	NONE	D:2026-11-27@23
+n4-009	2026-11-25	N	Who directed the film Last Night in Soho?	NONE	D:2026-11-25@23
+n4-010	2026-11-25	N	Who founded the Evening Standard?	NONE	D:2026-11-25@19
+n4-011	2026-11-25	N	Hat jemand das Album Tomorrow's Harvest gehört?	NONE	NIL
+n4-012	2026-11-25	N	Wer spielt im Film Night Shift die Hauptrolle?	NONE	D:2026-11-25@23
+n4-013	2026-11-25	N	Welche Songs sind auf dem Album Midnight Tonight?	NONE	NIL
+n4-014	2026-11-25	N	Who sings in the band Tonight Tonight?	NONE	NIL
+n4-015	2026-11-25	N	Was lief am Montag in der Show Tonight Live?	D:2026-11-23	D:2026-11-23
+n4-016	2026-11-25	Z	Was läuft heute Abend in der Heute-Show?	D:2026-11-25	D:2026-11-25
+n4-017	2026-11-25	Z	Who is on The Tonight Show tonight?	D:2026-11-25	NIL
+n4-018	2026-11-25	Z	Is Tonight Alive playing tonight?	D:2026-11-25	NIL
+n4-019	2026-11-25	Z	What did Morning Brew publish yesterday?	D:2026-11-24	D:2026-11-25@8
+n4-020	2026-11-25	Z	Was stand gestern in der Morgenpost?	D:2026-11-24	D:2026-11-24
+n4-021	2026-11-25	Z	Wann spielt Tonight Alive morgen?	D:2026-11-26	D:2026-11-26
+n4-022	2026-11-25	Z	Who watched Friday Night Lights last night?	D:2026-11-24	D:2026-11-20@23
+n4-023	2026-11-25	Z	What's on tonight?	D:2026-11-25	NIL
+n4-024	2026-11-25	Z	Tonight, who is on call?	D:2026-11-25	NIL
+n4-025	2026-11-25	Z	Tonight: who deploys the hotfix?	D:2026-11-25	NIL
+n4-026	2026-11-25	Z	Wer moderiert heute Abend die Tagesschau?	D:2026-11-25	D:2026-11-25
+n4-027	2026-11-25	Z	Did the Evening Standard report the outage this morning?	D:2026-11-25	D:2026-11-25@8
+n4-028	2026-11-25	Z	Was the song Yesterday played at the party yesterday?	D:2026-11-24	D:2026-11-24
+n4-029	2026-11-25	Z	Tonight Alive spielen heute Abend in Berlin?	D:2026-11-25	D:2026-11-25
+n4-030	2026-11-25	Z	Wer hat gestern Nacht die Band Tonight Alive gesehen?	D:2026-11-24	D:2026-11-24

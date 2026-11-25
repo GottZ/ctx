@@ -18,11 +18,14 @@ import (
 // behind a noun, the three readings #517 left out, the rest forms of the
 // third holdout — and a control group, questions with their expectations
 // written and hashed before any rule changed, a third or more of each class
-// counter-cases, asked at noon UTC on several days. No question the rules
-// answered right at 5a28c475 (the last column) may be one they answer wrong
-// now, and every file keeps at least the number of questions it had right
-// when issue #532's pull request landed (holdout532Floor). Right is
-// holdout532Right.
+// counter-cases, asked at noon UTC on several days — and the holdout of the
+// review round (the files r1-*: English forms of the past and their
+// homographs, imperatives, a past and a coming clause, names, participle
+// clauses), written and hashed before the round's first edit, half of each
+// flank counter-cases. No question the rules answered right at 5a28c475 (the
+// last column) may be one they answer wrong now, and every file keeps at
+// least the number of questions it had right when issue #532's pull request
+// landed (holdout532Floor). Right is holdout532Right.
 func TestRules_HoldoutOfIssue532(t *testing.T) {
 	files, err := filepath.Glob("testdata/temporal_classes_532/*.tsv")
 	if err != nil || len(files) == 0 {
@@ -98,14 +101,19 @@ func TestRules_HoldoutOfIssue532(t *testing.T) {
 // holdout532Floor is, per class of the holdout of issue #532, the number of
 // questions the rules answered right when the issue's pull request landed.
 var holdout532Floor = map[string]int{
-	"a-tageszeit":            90,
-	"b-zwei-wochentage":      148,
-	"c-englisch-praeteritum": 153,
-	"d1-ellipse":             56,
-	"d2-ten-praesens":        59,
-	"d3-imperativ":           57,
-	"e-restformen":           61,
-	"f-kontrolle":            199,
+	"a-tageszeit":             90,
+	"b-zwei-wochentage":       148,
+	"c-englisch-praeteritum":  153,
+	"d1-ellipse":              56,
+	"d2-ten-praesens":         59,
+	"d3-imperativ":            57,
+	"e-restformen":            61,
+	"f-kontrolle":             199,
+	"r1-n1-englische-formen":  133,
+	"r1-n2-imperative":        88,
+	"r1-n3-vergangen-kommend": 44,
+	"r1-n4-namen":             25,
+	"r1-n5-partizip-ellipsen": 34,
 }
 
 // canon532 writes the dates of r as the holdout of issue #532 reads them:
