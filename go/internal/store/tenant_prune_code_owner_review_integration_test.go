@@ -311,8 +311,8 @@ func TestTenantDeleteDoesNotFinishOverAStatusSetBack(t *testing.T) {
 	}
 	_, _, _, tenant := pruneLeftovers(t, f.pool, tenantID, scopes)
 	t.Logf("delete over a status set back: %v; tenant row %d", perr, tenant)
-	if !errors.Is(perr, store.ErrTenantPruneIncomplete) || tenant != 1 {
-		t.Fatalf("delete: %v, tenant row %d; want ErrTenantPruneIncomplete and the tenant kept", perr, tenant)
+	if !errors.Is(perr, store.ErrTenantPruneIncomplete) || !errors.Is(perr, store.ErrTenantStatusSetBack) || tenant != 1 {
+		t.Fatalf("delete: %v, tenant row %d; want ErrTenantPruneIncomplete with ErrTenantStatusSetBack and the tenant kept", perr, tenant)
 	}
 	if err := store.PruneTenant(ctx, f.pool, tenantID, store.AuditStamp{}); err != nil {
 		t.Fatalf("the next delete: %v", err)

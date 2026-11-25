@@ -185,6 +185,13 @@ const tenantStatusOffboarding = "offboarding"
 // failure are deleted; running the delete again finishes it.
 var ErrTenantPruneIncomplete = errors.New("store: the tenant-delete stopped part-way; the tenant stays offboarding")
 
+// ErrTenantStatusSetBack: the tenant's status was no longer offboarding when
+// its delete came to delete the tenant row — an operator set it back while
+// the delete ran (issue #555). The delete stopped (it also carries
+// ErrTenantPruneIncomplete), but the tenant is NOT offboarding: what is left
+// of its keys, sessions and OAuth tokens authenticates again.
+var ErrTenantStatusSetBack = errors.New("store: the tenant's status was set back while its delete ran")
+
 // ErrScopeExists is returned by AssignTenantScope on a 23505 PK violation on
 // context_tenant_scopes.scope — the scope string is GLOBALLY unique (one scope =
 // one tenant), so a duplicate is the 409 path. The store inserts the scope AS-IS;

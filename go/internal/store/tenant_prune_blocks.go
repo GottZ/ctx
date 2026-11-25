@@ -347,7 +347,7 @@ func pruneNoLateScope(ctx context.Context, tx pgx.Tx, tenantID string, scopes []
 		// An operator set the status back while the delete ran: the tenant's
 		// door is open again (its runs write, a new key authenticates), and
 		// a delete that went on would not be the one that closed it.
-		return fmt.Errorf("the tenant's status was set to %q while its delete ran; run the delete again", status)
+		return fmt.Errorf("%w: it is %q now; run the delete again", ErrTenantStatusSetBack, status)
 	}
 	var late int
 	if err := tx.QueryRow(ctx, pruneLateScopesSQL, tenantID, scopes).Scan(&late); err != nil {

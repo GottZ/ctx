@@ -606,6 +606,12 @@ const tenantDeleteIncompleteMsg = "delete tenant failed: the tenant is offboardi
 // whose delete has begun (store.ErrTenantOffboarding, issue #555).
 const tenantOffboardingMsg = "the tenant is being deleted; it takes no further scope"
 
+// tenantDeleteStatusSetBackMsg answers a tenant-delete that stopped because
+// the tenant's status was set back while it ran (store.ErrTenantStatusSetBack):
+// the tenant is not offboarding then, which tenantDeleteIncompleteMsg says.
+const tenantDeleteStatusSetBackMsg = "delete tenant failed: the tenant's status was changed while the delete ran, so the tenant is not offboarding — " +
+	"what is left of its keys, sessions and OAuth tokens authenticates again — and part of its data is deleted; run tenant-delete again to finish it"
+
 // handleTenantDelete runs the T05b full-prune (store.PruneTenant): the FK-ordered,
 // batched mass-DELETE of the tenant's scope-carried data, its keys, then the
 // tenant row (design/01 §4.3.1). Admin-gated upstream (actionRequiresAdmin); the
@@ -669,7 +675,10 @@ func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Reques
 		// own: what an earlier one removed is not known here.
 		adminWriteFailed(r, "manage: tenant-delete failed", err, writeUnknown)
 		msg := "delete tenant failed"
-		if errors.Is(err, store.ErrTenantPruneIncomplete) {
+		switch {
+		case errors.Is(err, store.ErrTenantStatusSetBack):
+			msg = tenantDeleteStatusSetBackMsg
+		case errors.Is(err, store.ErrTenantPruneIncomplete):
 			msg = tenantDeleteIncompleteMsg
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": msg})
