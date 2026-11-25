@@ -941,8 +941,10 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 			// A server fault: its line names what the write left behind, as
 			// POST /api/store's does (issue #453). The answer is unchanged.
 			noteToolWrite(ctx, err)
+			// The cause is the line's, never the answer's (issue #555): a
+			// database error carries statement, table and SQLSTATE.
 			logRequestError(ctx, "mcp: store error", "error", err, "write_outcome", writeOutcome(err), "request_id", RequestIDFromContext(ctx))
-			return errResultReject(classInternal.reject(fmt.Sprintf("store failed: %v", err))), nil, nil
+			return errResultReject(classInternal.reject("store failed: internal error")), nil, nil
 		}
 		noteToolWrite(ctx, nil)
 		noteToolBlock(ctx, block.ID)
@@ -1042,7 +1044,9 @@ func mcpSearchHandler(cfg MCPConfig) mcp.ToolHandlerFor[searchInput, any] {
 			case errors.Is(err, store.ErrTooManyBlockGrants): // T04-20: refuse, never read scope-only
 				return errResult(tooManyGrantsMsg), nil, nil
 			default:
-				return errResult(fmt.Sprintf("search failed: %v", err)), nil, nil
+				// The cause in the line, not the answer (issue #555).
+				logRequestError(ctx, "mcp search: query error", "error", err, "request_id", RequestIDFromContext(ctx))
+				return classInternal.errResult("search failed: internal error"), nil, nil
 			}
 		}
 
@@ -1086,7 +1090,12 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 				data, _ := json.MarshalIndent(body, "", "  ")
 				return errResult(string(data)), nil, nil
 			}
-			return errResult(fmt.Sprintf("resolve failed: %v", err)), nil, nil
+			if errors.Is(err, store.ErrIDPrefixTooShort) || errors.Is(err, store.ErrNoScopes) {
+				return errResult(fmt.Sprintf("resolve failed: %v", err)), nil, nil // an answer about the id
+			}
+			// A fault of the resolve: the cause in the line (issue #555).
+			logRequestError(ctx, "mcp get: resolve error", "error", err, "request_id", RequestIDFromContext(ctx))
+			return classInternal.errResult("resolve failed: internal error"), nil, nil
 		}
 		if resolvedID == "" {
 			return errResult("block not found"), nil, nil
@@ -1094,7 +1103,8 @@ func mcpGetHandler(cfg MCPConfig) mcp.ToolHandlerFor[getInput, any] {
 
 		block, err := readBlockForGet(ctx, cfg.Pool, cfg.mcpTypeSnapshot(ctx), ar, resolvedID, grants, input.IncludeArchived, opts.omit())
 		if err != nil {
-			return errResult(fmt.Sprintf("get failed: %v", err)), nil, nil
+			logRequestError(ctx, "mcp get: read error", "error", err, "request_id", RequestIDFromContext(ctx))
+			return classInternal.errResult("get failed: internal error"), nil, nil // the cause in the line (issue #555)
 		}
 		// #201: a full id passes ResolveBlockID unchecked, so an unknown, a
 		// foreign and an archived id all arrive here as nil — and answer what
@@ -1143,7 +1153,8 @@ func mcpRecentHandler(cfg MCPConfig) mcp.ToolHandlerFor[recentInput, any] {
 			if errors.Is(err, store.ErrNoScopes) { // T07 fail-closed (design/01 §5.4)
 				return errResult("unauthorized: no resolved scopes"), nil, nil
 			}
-			return errResult(fmt.Sprintf("recent failed: %v", err)), nil, nil
+			logRequestError(ctx, "mcp recent: query error", "error", err, "request_id", RequestIDFromContext(ctx))
+			return classInternal.errResult("recent failed: internal error"), nil, nil // the cause in the line (issue #555)
 		}
 
 		if len(previews) == 0 {

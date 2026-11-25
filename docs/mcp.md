@@ -111,8 +111,14 @@ The codes are the ones the HTTP API uses for the same class:
 `supersedes_conflict`, `supersedes_not_allowed`, `reserved_category`, `provenance_protected`,
 `reserved_metadata`, `unknown_action`, `constraint`, `edit_mismatch`, `rate_limit`, `write_conflict`, `internal`
 (`TestRejectClassesAreDocumented` holds this list and the one in [api](api.md) to the classes of the handler).
-Other errors (an unknown id, an invalid type filter, a failed lookup) carry text only,
-so a client must not rely on a code being present.
+Other errors (an unknown id, an invalid type filter) carry text only,
+so a client must not rely on a code being present. A fault of the database under a
+tool's call — a dropped connection, a statement timeout, a constraint the tool does not
+map — answers `<tool> failed: internal error` (`cannot resolve block id: internal error`
+for an id the tool resolves) with the code `internal`; its cause, with the database's
+text, is in the server log line, never in the answer (issue #555; before, `store`,
+`search`, `get`, `recent`, `update`, `archive` and `blob_fetch` put the statement, the
+table and the SQLSTATE into their text).
 
 Which errors carry a code is a property of each tool's write path: `store`,
 `blob_store` and `blob_link` code every rejection; `update` codes the verdict of

@@ -39,6 +39,7 @@ package handler
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -230,7 +231,13 @@ func resolveUpdateTargetIn(ctx context.Context, pool *pgxpool.Pool, ar *auth.Aut
 		if len(matches) > 0 {
 			return "", fmt.Sprintf("ambiguous id prefix (%d matches) — re-specify with a longer prefix or the full id", len(matches))
 		}
-		return "", fmt.Sprintf("cannot resolve block id: %v", err)
+		if errors.Is(err, store.ErrIDPrefixTooShort) || errors.Is(err, store.ErrNoScopes) {
+			return "", fmt.Sprintf("cannot resolve block id: %v", err) // an answer about the id
+		}
+		// A fault of the resolve: the cause in the line, not in the answer
+		// (issue #555), as resolveBatchUpdateTarget answers it.
+		logRequestError(ctx, "mcp: resolve block id error", "error", err, "request_id", RequestIDFromContext(ctx))
+		return "", "cannot resolve block id: internal error"
 	}
 	if resolvedID == "" {
 		return "", "Block not found (or not in a writable scope of this key)"
