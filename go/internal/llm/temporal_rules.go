@@ -1959,6 +1959,7 @@ var ellipsisTails = toWordSet("too", "also", "either", "as", "all", "still")
 // ellipticTail reports whether a word of ellipsisTails follows the first
 // date word of the words [s, e) of c.
 func (c clauseWords) ellipticTail(s, e int) bool {
+	scanned(e - s)
 	date := false
 	for i := s; i < e; i++ {
 		w := c.words[i]
