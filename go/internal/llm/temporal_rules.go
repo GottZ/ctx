@@ -999,13 +999,20 @@ var englishStrongPast = []string{
 // the retro on Monday?" into a past; like the forms of englishIrregularPast
 // they are a past only where a simple past stands (englishFinitePast,
 // barePast), issue #532. "fell" is the present of "to fell" as well
-// ("Crews fell the trees on Monday"), which no place tells from the past,
-// so it is read as no past at all, as "read" and "set" are.
+// ("Crews fell the trees on Monday"), which takes an object: it is a past
+// where a simple past stands and no object follows it (transitiveFell:
+// "Which node fell over on Saturday?", "Throughput fell sharply").
 // "found" and "saw" of the older list are a noun or a present as well
 // ("Lost and found opens on Saturday?"), but read by their place they lose
 // the simple past before an object without an article ("The QA team found
 // three bugs on Friday?"), which 5a28c475 read; they stay where they stand.
-var englishPastHomographs = []string{"drew", "spoke", "stole", "woke", "drove", "sang", "rode", "rang", "tore"}
+var englishPastHomographs = []string{"drew", "spoke", "stole", "woke", "drove", "sang", "rode", "rang", "tore", "fell"}
+
+// transitiveFell reports whether words[i] is "fell" before its object, the
+// present of "to fell" (englishPastHomographs).
+func transitiveFell(words []string, i int) bool {
+	return words[i] == "fell" && i+1 < len(words) && imperativeObjects[words[i+1]]
+}
 
 // englishReportVerbs are the simple pasts of the English verbs of saying,
 // hearing, thinking and knowing a clause can follow without "that", and
@@ -1816,7 +1823,7 @@ func englishPassiveAt(words []string, i int) bool {
 // between, before the end of the words or a word a noun cannot be ("which
 // commits landed on Monday", "what caused it").
 func englishFinitePast(words []string, i int) bool {
-	if i == 0 || !englishParticiple(words[i]) && !englishIrregularPast[words[i]] {
+	if i == 0 || !englishParticiple(words[i]) && !englishIrregularPast[words[i]] || transitiveFell(words, i) {
 		return false
 	}
 	if englishSubjects[words[i-1]] {
@@ -1844,7 +1851,7 @@ func (c clauseWords) barePast(s, k, e int) bool {
 	i := k - s
 	if i <= 0 || !englishParticiple(words[i]) && !englishIrregularPast[words[i]] || !englishBareSubject(words, i) ||
 		!beforeNoNoun(words, i) && !c.nameAt(k+1) || englishPlanForms[words[i]] || i+1 < len(words) && englishTargetWords[words[i+1]] ||
-		englishReports(words, i, true) || finiteAfter(words, i) || c.nameAt(k) {
+		englishReports(words, i, true) || finiteAfter(words, i) || c.nameAt(k) || transitiveFell(words, i) {
 		return false
 	}
 	return !c.asks[k] || !datePhraseAfter(words, i)
