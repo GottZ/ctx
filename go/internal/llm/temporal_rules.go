@@ -4321,12 +4321,22 @@ var nameGenus = toWordSet("band", "show", "album", "song", "film", "movie", "ser
 	"gruppe", "track", "single", "tour", "book", "buch", "roman", "novel", "musical", "titel", "title")
 
 // nameWordAt reports whether word i of c, written with its capital inside a
-// sentence, is a word of a name (dayKeywordPartAt): beside another word
-// written so inside the sentence, or behind a word of nameGenus. A question
-// that writes all its words with their capital ("Who Is Playing Tonight?",
-// titled) gives no such sign.
+// sentence, is a word of a name (dayKeywordPartAt): before another word
+// written so in its clause ("Tonight Alive"), behind a word of nameGenus
+// ("die Band Tonight Alive", "the show Tonight Live"), or behind a word
+// written so that follows one ("das Album Midnight Tonight"). A capital
+// word before it alone is no sign — English writes a noun with its capital
+// as often ("Is the Release Tonight?", "Meeting with Anna Tonight?") — and
+// a question that writes all its words with their capital ("Who Is Playing
+// Tonight?", titled) gives none.
 func (c clauseWords) nameWordAt(i int) bool {
-	return !c.titled && c.capInSentence(i) && (c.capInSentence(i-1) || c.capInSentence(i+1) || nameGenus[c.words[i-1]])
+	if c.titled || !c.capInSentence(i) {
+		return false
+	}
+	if i+1 < len(c.words) && !c.starts[i+1] && c.capInSentence(i+1) {
+		return true
+	}
+	return !c.starts[i] && (nameGenus[c.words[i-1]] || i >= 2 && !c.starts[i-1] && c.capInSentence(i-1) && nameGenus[c.words[i-2]])
 }
 
 // capInSentence reports whether word i of c is written with its capital and

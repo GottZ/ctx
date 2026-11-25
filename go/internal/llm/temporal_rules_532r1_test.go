@@ -122,10 +122,11 @@ func TestRules_AnEnglishPresentGivesItsClauseATenseOfItsOwn(t *testing.T) {
 }
 
 // TestRules_TonightInANameNamesNoDay (issue #532, review round): "tonight"
-// written with its capital inside a sentence beside another word written so,
-// or behind a word of a kind of work or group ("Band", "Show", "Album"), is a
-// word of a name and names no day; at the start of a sentence, on its own
-// and in a question that capitalizes every word it is tonight.
+// written with its capital inside a sentence before another word written so
+// in its clause, or behind a word of a kind of work or group ("Band",
+// "Show", "Album"), is a word of a name and names no day; at the start of a
+// sentence, on its own, behind a capital noun alone and in a question that
+// capitalizes every word it is tonight.
 func TestRules_TonightInANameNamesNoDay(t *testing.T) {
 	check517(t, now517, want517{
 		"Wer spielt in der Band Tonight Alive?":        "nil",
@@ -135,11 +136,15 @@ func TestRules_TonightInANameNamesNoDay(t *testing.T) {
 		"Was lief am Montag in der Show Tonight Live?": "2026-11-16/past",
 		"Who sings in the band Tonight?":               "nil",
 		// counter-cases: tonight
-		"What's on Tonight?":                   "2026-11-22/today",
-		"Is Tonight Alive playing tonight?":    "2026-11-22/today",
-		"Who Is Playing Tonight?":              "2026-11-22/today",
-		"Tonight, who is on call?":             "2026-11-22/today",
-		"Ready? Tonight Anna deploys the fix.": "2026-11-22/today",
+		"What's on Tonight?":                                "2026-11-22/today",
+		"Is Tonight Alive playing tonight?":                 "2026-11-22/today",
+		"Who Is Playing Tonight?":                           "2026-11-22/today",
+		"Tonight, who is on call?":                          "2026-11-22/today",
+		"Ready? Tonight Anna deploys the fix.":              "2026-11-22/today",
+		"Is the Release Tonight?":                           "2026-11-22/today",
+		"Are you free Tonight, Anna?":                       "2026-11-22/today",
+		"Meeting with Anna Tonight?":                        "2026-11-22/today",
+		"Welche Songs sind auf dem Album Midnight Tonight?": "nil",
 	})
 }
 
