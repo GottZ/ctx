@@ -975,7 +975,7 @@ var englishPastVerbs = toWordSet(append([]string{
 	"fixed", "deployed", "cancelled", "canceled", "happened",
 	"broke", "crashed", "failed", "finished", "started", "created",
 	"moved", "changed", "removed", "deleted", "updated",
-	"merged", "pushed", "reviewed", "shipped", "ran", "wrote", "made", "got",
+	"merged", "pushed", "reviewed", "shipped", "ran", "wrote", "found", "saw", "made", "got",
 }, englishStrongPast...)...)
 
 // englishStrongPast are English forms of the simple past that are neither a
@@ -992,15 +992,18 @@ var englishStrongPast = []string{
 
 // englishPastHomographs are English forms of the simple past that are
 // another word as well: a name ("Drew", "Sang", "Rode"), a noun ("spoke",
-// "stole", "drove", "tore", "saw", and the German "Rang" and "Tore"), an
-// adjective ("woke") or a participle and a present ("found": "Lost and found
-// opens on Saturday?"). Read wherever they stand they turned "Will Drew join
+// "stole", "drove", "tore", and the German "Rang" and "Tore") or an
+// adjective ("woke"). Read wherever they stand they turned "Will Drew join
 // the retro on Monday?" into a past; like the forms of englishIrregularPast
 // they are a past only where a simple past stands (englishFinitePast,
 // barePast), issue #532. "fell" is the present of "to fell" as well
 // ("Crews fell the trees on Monday"), which no place tells from the past,
 // so it is read as no past at all, as "read" and "set" are.
-var englishPastHomographs = []string{"drew", "spoke", "stole", "woke", "drove", "sang", "rode", "rang", "tore", "found", "saw"}
+// "found" and "saw" of the older list are a noun or a present as well
+// ("Lost and found opens on Saturday?"), but read by their place they lose
+// the simple past before an object without an article ("The QA team found
+// three bugs on Friday?"), which 5a28c475 read; they stay where they stand.
+var englishPastHomographs = []string{"drew", "spoke", "stole", "woke", "drove", "sang", "rode", "rang", "tore"}
 
 // englishReportVerbs are the simple pasts of the English verbs of saying,
 // hearing, thinking and knowing a clause can follow without "that", and

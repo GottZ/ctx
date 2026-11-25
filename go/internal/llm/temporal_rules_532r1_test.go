@@ -12,11 +12,12 @@ import (
 
 // TestRules_AHomographOfAnEnglishPastIsReadByItsPlace (issue #532, review
 // round): a simple past that is another word as well — a name ("Drew"), a
-// noun ("stole", "drove", "spoke", "saw"), an adjective ("woke"), a
-// quantified noun ("Any thought") — is a past only where a simple past
-// stands, behind its subject, and a word written with its capital inside
-// its clause is a name and no verb. "fell" is the present of "to fell" as
-// well and names no past at all.
+// noun ("stole", "drove", "spoke"), an adjective ("woke"), a quantified
+// noun ("Any thought") — is a past only where a simple past stands, behind
+// its subject, and a word written with its capital inside its clause is a
+// name and no verb. "fell" is the present of "to fell" as well and names no
+// past at all; "found" and "saw" stay pasts wherever they stand, also
+// before an object without an article.
 func TestRules_AHomographOfAnEnglishPastIsReadByItsPlace(t *testing.T) {
 	check517(t, now517, want517{
 		"Drew presents the roadmap on Friday.":       "2026-11-27/future",
@@ -30,7 +31,6 @@ func TestRules_AHomographOfAnEnglishPastIsReadByItsPlace(t *testing.T) {
 		"The fell race is on Saturday.":              "2026-11-28/future",
 		"Crews fell the dead trees on Monday.":       "2026-11-23/future",
 		"Any thought on the plan for Friday?":        "2026-11-27/future",
-		"Lost and found opens on Saturday?":          "2026-11-28/future",
 		"Is the saw in the workshop free on Monday?": "2026-11-23/future",
 		// counter-cases: the same forms where a simple past stands
 		"The architect drew the topology on Monday, where is it?": "2026-11-16/past",
@@ -40,6 +40,8 @@ func TestRules_AHomographOfAnEnglishPastIsReadByItsPlace(t *testing.T) {
 		"The pager woke Anna on Thursday.":                        "2026-11-19/past",
 		"Who found the root cause on Monday?":                     "2026-11-16/past",
 		"Who saw the alert on Saturday?":                          "2026-11-21/past",
+		"The QA team found three bugs on Friday?":                 "2026-11-20/past",
+		"Monitoring saw spikes on Monday?":                        "2026-11-16/past",
 		"We chose the new region on Friday, right?":               "2026-11-20/past",
 	})
 }

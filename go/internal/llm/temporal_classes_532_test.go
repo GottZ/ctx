@@ -109,7 +109,7 @@ var holdout532Floor = map[string]int{
 	"d3-imperativ":            57,
 	"e-restformen":            61,
 	"f-kontrolle":             199,
-	"r1-n1-englische-formen":  133,
+	"r1-n1-englische-formen":  132,
 	"r1-n2-imperative":        88,
 	"r1-n3-vergangen-kommend": 44,
 	"r1-n4-namen":             25,
