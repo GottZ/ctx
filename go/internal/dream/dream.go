@@ -1330,7 +1330,7 @@ func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []stri
 // sub-selects read: it is referenced more than once, so PostgreSQL wrote
 // every eligible row into a tuplestore and read it seven times (886-1 098 ms
 // at 1 000 000 rows on the production image, 309 ms for the same rows in one
-// pass). now() is the statement's, the same instant in every FILTER.
+// pass). now() is the transaction's, the same instant in every FILTER.
 var queueDepthSQL = `SELECT
 		count(*) FILTER (WHERE embedding IS NOT NULL AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now()))::int,
 		count(*) FILTER (WHERE embedding IS NOT NULL AND dream_cooldown_until >= now())::int,

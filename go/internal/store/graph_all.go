@@ -57,10 +57,15 @@ var fullGraphSeedFilters = visibility.TypeVisible("b", "$3") + `
 // without a sort (37 buffers). UNION
 // drops a block that is in a read scope and granted, and a scope named twice;
 // the range admits exactly the scope's rows (scope is NOT NULL, a database's
-// collation deterministic). What stays linear is inside a read scope: the
-// blocks of one created_at at the end of its page are read whole (one
-// statement writing many of them), and a category or type filter that none of
-// its newest blocks match reads on through its range.
+// collation deterministic). Every arm reads its page whether or not the merge
+// keeps its rows, so a reader of R scopes reads up to R pages (the sum over
+// its scopes of min(rows, $4)): 72 685 buffers for 48 scopes of 2 000 blocks
+// each at the limit of 1 500, where the walk of idx_context_created read 82
+// when those scopes were the whole corpus — and every block of every other
+// tenant newer than them when they are not. What stays linear inside a read
+// scope: the blocks of one created_at at the end of its page are read whole
+// (one statement writing many of them), and a category or type filter that
+// none of its newest blocks match reads on through its range.
 var fullGraphSeedSQL = `SELECT u.id::text, left(u.title, 120), u.category, u.scope::text, u.created_at
 		 FROM (
 		   (SELECT x.id, x.title, x.category, x.scope, x.created_at

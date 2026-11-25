@@ -424,6 +424,7 @@ func TestRangeReadsFullGraphSeed(t *testing.T) {
 		{"read scope, granted blocks newer than it, limit 4", []string{rrRead}, true, 4, pageBound([]int{5}, 5)},
 		{"read scope named twice beside the flagged scope, granted blocks", []string{rrRead, rrGuard, rrRead}, true, 200,
 			pageBound([]int{201, 2 * rrGuardPairs, 201}, 5)},
+		{"the large scope read", []string{rrOther}, false, 200, pageBound([]int{201}, 0)},
 	} {
 		var st [2]rrStmt
 		for i, pool := range []*pgxpool.Pool{small, large} {

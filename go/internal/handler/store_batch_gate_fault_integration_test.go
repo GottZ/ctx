@@ -19,11 +19,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// gfCancelAt cancels the request when its pool sends the id prefix resolve.
+// gfCancelAt cancels the request when its pool sends the id prefix resolve
+// (store.ResolveBlockID: the prefix's primary-key range since issue #536).
 type gfCancelAt struct{ cancel context.CancelFunc }
 
 func (g *gfCancelAt) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
-	if strings.Contains(d.SQL, "id::text LIKE $1 || '%'") {
+	if strings.Contains(d.SQL, "WHERE id >= $1::uuid AND id <= $5::uuid") {
 		g.cancel()
 	}
 	return ctx

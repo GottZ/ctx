@@ -248,9 +248,11 @@ func TestRangeReadsSameRows(t *testing.T) {
 			t.Fatal(err)
 		}
 		// 300 blocks of one created_at (one statement writes them): a page
-		// that ends inside them takes the smallest ids of the tie.
-		if _, err := small.Exec(ctx, `INSERT INTO context_blocks (category, title, content, scope, type_name)
-			SELECT 'learnings', 'rr same ' || i, 'same body ' || i, 'rr-same', 'knowledge' FROM generate_series(1, 300) i`); err != nil {
+		// that ends inside them takes the smallest ids of the tie. Random
+		// (version 4) ids, as a database may hold from before uuidv7, so the
+		// order the index returns the tie in is not the order of the ids.
+		if _, err := small.Exec(ctx, `INSERT INTO context_blocks (id, category, title, content, scope, type_name)
+			SELECT gen_random_uuid(), 'learnings', 'rr same ' || i, 'same body ' || i, 'rr-same', 'knowledge' FROM generate_series(1, 300) i`); err != nil {
 			t.Fatal(err)
 		}
 		know := []string{"knowledge"}
@@ -448,6 +450,14 @@ func TestRangeReadsSameRows(t *testing.T) {
 
 	t.Run("block id prefix", func(t *testing.T) {
 		defer same.group(t)()
+		// Ids on the bounds of a prefix's range and just outside it.
+		for _, id := range []string{"0f0f0f0f-0000-0000-0000-000000000000", "0f0f0f0f-ffff-ffff-ffff-ffffffffffff",
+			"0f0f0f0e-ffff-ffff-ffff-ffffffffffff", "0f0f0f10-0000-0000-0000-000000000000"} {
+			if _, err := small.Exec(ctx, `INSERT INTO context_blocks (id, category, title, content, scope, type_name)
+				VALUES ($1::uuid, 'learnings', 'rr bound ' || $1, 'bound body', $2, 'knowledge')`, id, rrRead); err != nil {
+				t.Fatal(err)
+			}
+		}
 		ids := list(`(SELECT id::text FROM context_blocks WHERE scope = $1 ORDER BY id LIMIT 2)
 			UNION ALL (SELECT id::text FROM context_blocks WHERE scope = $2 ORDER BY id OFFSET 4000 LIMIT 2)
 			UNION ALL (SELECT id::text FROM context_blocks WHERE scope = $3 ORDER BY id DESC LIMIT 1)`, rrRead, rrOther, rrProj)
@@ -470,7 +480,7 @@ func TestRangeReadsSameRows(t *testing.T) {
 			// Spellings no id's text starts with: a hyphen moved, one left out.
 			prefixes = append(prefixes, id[:8]+id[9:13], id[:7]+"-"+id[8:12], id[:13]+id[14:18])
 		}
-		prefixes = append(prefixes, grant[:20])
+		prefixes = append(prefixes, grant[:20], "0f0f0f0f", "0f0f0f0f-", "0f0f0f0f-ffff-ffff-ffff-fffffffffff", "0f0f0f0f-0000-0000-0000-00000000000")
 		for _, prefix := range prefixes {
 			lo, hi, ok := store.IDPrefixRangeForTest(prefix)
 			for _, rd := range readers {

@@ -213,8 +213,9 @@ func TestGuardKeysGuardListReadsAnyStoredValue(t *testing.T) {
 // dropped it and answered with no rows (issue #238 §5: a caller's
 // guard_similarity:"x" failed the cast and every reader of the scope saw an
 // empty queue). The fault is injected with a function of a schema that the
-// session's search path puts ahead of pg_catalog: it shadows
-// pg_input_is_valid and raises for one value.
+// session's search path puts ahead of pg_catalog: it shadows jsonb_typeof,
+// which the list's order key reads the similarity with (issue #536), and
+// raises for one value.
 func TestGuardKeysGuardListReportsAFault(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -229,10 +230,10 @@ func TestGuardKeysGuardListReportsAFault(t *testing.T) {
 	}
 	for _, st := range []string{
 		`CREATE SCHEMA ctx_fault`,
-		`CREATE FUNCTION ctx_fault.pg_input_is_valid(v text, t text) RETURNS boolean LANGUAGE plpgsql AS $$
+		`CREATE FUNCTION ctx_fault.jsonb_typeof(v jsonb) RETURNS text LANGUAGE plpgsql AS $$
 		 BEGIN
-		   IF v = 'boom' THEN RAISE EXCEPTION 'injected fault'; END IF;
-		   RETURN pg_catalog.pg_input_is_valid(v, t);
+		   IF v = '"boom"'::jsonb THEN RAISE EXCEPTION 'injected fault'; END IF;
+		   RETURN pg_catalog.jsonb_typeof(v);
 		 END $$`,
 	} {
 		if _, err := pool.Exec(ctx, st); err != nil {
