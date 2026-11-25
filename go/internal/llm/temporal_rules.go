@@ -2188,6 +2188,9 @@ var (
 		"entstanden", "aufgestanden", "eingeschlafen", "aufgewacht", "umgezogen", "fehlgeschlagen",
 		"gekippt", "abgebrochen", "zusammengebrochen", "eingebrochen", "ausgebrochen", "worden", "abgeschmiert",
 		"gewechselt",
+		// "brechen" without an object takes "sein": "Der Build ist am
+		// Dienstag gebrochen" reports what broke (issue #532).
+		"gebrochen",
 	)
 )
 
@@ -3787,17 +3790,27 @@ func matchDayKeywordPart(query string, now time.Time) *TemporalResult {
 		idx  int
 		date TemporalDate
 	}
-	var hits []hit
+	var hits, plain []hit
 	for i := 0; i < len(c.words); i++ {
 		if d, ok := c.dayKeywordPartAt(i, now); ok {
 			hits = append(hits, hit{i, d})
+		} else if kw, ok := dayKeywordDays[c.words[i]]; ok && c.dayKeywordWord(i) {
+			kw = dayBeforeOrAfter(c.words, i, kw)
+			plain = append(plain, hit{i, TemporalDate{Ref: kw.word, Date: fmtDate(truncDate(kw.resolve(now))), Dir: kw.dir}})
 		}
+	}
+	weekdays := c.dayWeekdays()
+	// A day keyword without a part of the day answers here beside a weekday
+	// only, which would drop it ("Was ist gestern und am Montag passiert?"),
+	// issue #532; alone it is matchSimpleKeywords'.
+	if len(weekdays) > 0 {
+		hits = append(hits, plain...)
 	}
 	if len(hits) == 0 {
 		return nil
 	}
 	var tr *tenseReader
-	for _, w := range c.dayWeekdays() {
+	for _, w := range weekdays {
 		if tr == nil {
 			tr = newTenseReader(query)
 		}
@@ -3812,7 +3825,13 @@ func matchDayKeywordPart(query string, now time.Time) *TemporalResult {
 			dates = append(dates, h.date)
 		}
 	}
-	return multiResult(dates)
+	r := multiResult(dates)
+	// The weights of the first date's matcher: a weekday's where a weekday
+	// comes first.
+	if _, ok := weekdayWord(c.words[hits[0].idx]); ok {
+		r.DimensionWeights = dwLinearWeekday()
+	}
+	return r
 }
 
 // dayKeywordPartAt returns the date matchDayKeywordPart reads at word i of c.
@@ -3846,16 +3865,42 @@ func (c clauseWords) dayKeywordPartAt(i int, now time.Time) (TemporalDate, bool)
 
 func matchAnnualHoliday(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
-	year := now.Year()
+	var ref string
+	var month time.Month
+	var day int
+	var loc []int
 	switch {
 	case reWeihnachten.MatchString(lower):
-		return singleResult("Weihnachten", fmt.Sprintf("%d-12-25", year), "range")
+		ref, month, day, loc = "Weihnachten", time.December, 25, reWeihnachten.FindStringIndex(lower)
 	case reSilvester.MatchString(lower):
-		return singleResult("Silvester", fmt.Sprintf("%d-12-31", year), "range")
+		ref, month, day, loc = "Silvester", time.December, 31, reSilvester.FindStringIndex(lower)
 	case reNeujahr.MatchString(lower):
-		return singleResult("Neujahr", fmt.Sprintf("%d-01-01", year), "range")
+		ref, month, day, loc = "Neujahr", time.January, 1, reNeujahr.FindStringIndex(lower)
+	default:
+		return nil
 	}
-	return nil
+	// The holiday of the year a question means: the year written right
+	// behind it ("Weihnachten 2025"), else the last one when its clause is in
+	// the past and the next one otherwise ("Was war an Neujahr los?" asked in
+	// November is the past 1 January, "Was ist an Neujahr geplant?" the
+	// coming one), issue #532.
+	rest := strings.TrimLeft(lower[loc[1]:], asciiSpace)
+	if n := strings.IndexAny(rest, asciiSpace); n >= 0 {
+		rest = rest[:n]
+	}
+	if y, ok := isYear(strings.Trim(rest, wordTrim)); ok {
+		return singleResult(ref, fmtDate(time.Date(y, month, day, 0, 0, 0, 0, now.Location())), "range")
+	}
+	d := time.Date(now.Year(), month, day, 0, 0, 0, 0, now.Location())
+	today := truncDate(now)
+	if tenseAt(query, loc[0]) == "past" {
+		if d.After(today) {
+			d = d.AddDate(-1, 0, 0)
+		}
+	} else if d.Before(today) {
+		d = d.AddDate(1, 0, 0)
+	}
+	return singleResult(ref, fmtDate(d), "range")
 }
 
 // matchTimeOfDay detects time-of-day patterns: morgens, mittags, abends, nachts.
@@ -3872,6 +3917,8 @@ var (
 
 func matchTimeOfDay(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
+	c := clauseTokens(query)
+	lower = c.withoutUnreadDayParts(query, lower)
 	today := now.Format("2006-01-02")
 	var r *TemporalResult
 	// Reference hour per pattern (middle of each daypart).
@@ -3904,17 +3951,130 @@ func matchTimeOfDay(query string, now time.Time) *TemporalResult {
 	// "early", "late", "früh" and "spät" say how a thing came as often as
 	// when ("Was the Monday release late?", "Ist das Meeting am Dienstag zu
 	// früh angesetzt?"), issue #517.
-	c := clauseTokens(query)
 	weekdays := c.dayWeekdays()
 	for _, w := range weekdays {
 		if _, ok := c.dayPartAt(w.idx); ok {
 			return nil
 		}
 	}
-	if len(weekdays) > 0 && !c.todaysDayPart() {
+	// A day keyword of another day answers before a time-of-day word that
+	// belongs to none, as a weekday does ("Was passiert morgen, früh genug
+	// für das Review?", "Was the night build green yesterday?"), issue #532.
+	if (len(weekdays) > 0 || c.otherDayKeyword()) && !c.todaysDayPart() {
 		return nil
 	}
 	return r
+}
+
+// greetingWords open a greeting with a part of the day ("Guten Morgen",
+// "Good evening"); greetingParts are those parts, and greetingAddressees the
+// words a greeting of a part of the day alone at the start of a question
+// turns to ("Morning team", "Evening all"). attributiveOpeners before an
+// English part of the day make it a word of a noun ("the morning star", "the
+// night owl", "the last night train"), unless a preposition before them makes
+// it a time ("in the morning", "during the night"), issue #532.
+var (
+	greetingWords      = toWordSet("guten", "gute", "good")
+	greetingParts      = toWordSet("morgen", "abend", "tag", "nacht", "morning", "evening", "night", "afternoon")
+	greetingAddressees = toWordSet("all", "everyone", "everybody", "team", "folks", "zusammen", "allerseits")
+	englishDayParts    = toWordSet("morning", "evening", "night", "afternoon")
+	attributiveOpeners = toWordSet("the", "a", "an", "our", "my", "your", "their", "his", "her", "its", "that")
+	timePrepositions   = toWordSet("in", "during", "at", "through", "throughout", "over", "by", "into")
+)
+
+// greetingAt reports whether word i of c, a part of the day, is a greeting:
+// behind "guten", "gute" or "good", or an English part of the day that opens
+// the question before a comma or an addressee ("Morning, did …").
+func (c clauseWords) greetingAt(i int) bool {
+	w := c.words[i]
+	if !greetingParts[w] {
+		return false
+	}
+	if i > 0 && greetingWords[c.words[i-1]] {
+		return true
+	}
+	return i == 0 && englishDayParts[w] && w != "night" && (len(c.words) == 1 || c.starts[1] || greetingAddressees[c.words[1]])
+}
+
+// attributivePartAt reports whether word i of c, an English part of the day,
+// is a word of a noun phrase and names no time (attributiveOpeners).
+func (c clauseWords) attributivePartAt(i int) bool {
+	if !englishDayParts[c.words[i]] || i == 0 || c.starts[i] {
+		return false
+	}
+	prev := c.words[i-1]
+	if prev == "last" {
+		if i+1 < len(c.words) && !c.starts[i+1] && c.words[i+1] == "of" {
+			return true
+		}
+		if i < 2 || c.starts[i-1] {
+			return false
+		}
+		i, prev = i-1, c.words[i-2]
+	}
+	return attributiveOpeners[prev] && (i < 2 || c.starts[i-1] || !timePrepositions[c.words[i-2]])
+}
+
+// withoutUnreadDayParts returns lower, the lowercased query, with the words
+// of a part of the day that are a greeting or a word of a noun blanked, so
+// that matchTimeOfDay's expressions do not read them; a question whose
+// lowercasing changes its length is returned as it is.
+func (c clauseWords) withoutUnreadDayParts(query, lower string) string {
+	if len(lower) != len(query) {
+		return lower
+	}
+	var b []byte
+	for i, w := range c.words {
+		if greetingParts[w] && (c.greetingAt(i) || c.attributivePartAt(i)) {
+			if b == nil {
+				b = []byte(lower)
+			}
+			for k := c.offs[i]; k < c.offs[i]+len(w) && k < len(b); k++ {
+				b[k] = ' '
+			}
+		}
+	}
+	if b == nil {
+		return lower
+	}
+	return string(b)
+}
+
+// distanceWords count a distance behind "vor" or "in" (dayKeywordWord).
+var distanceWords = toWordSet("einer", "einem", "einen", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht",
+	"neun", "zehn", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "14", "30")
+
+// otherDayKeyword reports whether c has a day keyword of a day other than
+// today as a word of its own: not a greeting, not in a compound, not
+// "morgen" behind a weekday ("Montag morgen").
+func (c clauseWords) otherDayKeyword() bool {
+	for i, w := range c.words {
+		if _, ok := dayKeywordDays[w]; ok && w != "heute" && w != "today" && c.dayKeywordWord(i) {
+			return true
+		}
+	}
+	return false
+}
+
+// dayKeywordWord reports whether word i of c, a day keyword, names its day:
+// it is no greeting ("Guten Morgen"), not joined by a hyphen to a word that
+// names no day ("Morgen-Report"), not the start of a distance from it
+// ("gestern vor einer Woche", "heute in zwei Wochen"), and "morgen" is no
+// part of the day of a weekday right before it in its clause ("Montag
+// morgen").
+func (c clauseWords) dayKeywordWord(i int) bool {
+	if c.greetingAt(i) || c.inCompound(i) {
+		return false
+	}
+	if i+2 < len(c.words) && !c.starts[i+1] && (c.words[i+1] == "vor" || c.words[i+1] == "in") && distanceWords[c.words[i+2]] {
+		return false
+	}
+	if c.words[i] == "morgen" && i > 0 && !c.starts[i] {
+		if _, ok := weekdayWord(c.words[i-1]); ok {
+			return false
+		}
+	}
+	return true
 }
 
 // todayWords make the part of the day right behind them today's ("heute
@@ -4236,14 +4396,37 @@ func matchWeekday(query string, tokens []string, now time.Time) *TemporalResult 
 	return r
 }
 
+// dayBeforeOrAfter returns the day keyword the English phrase ending at
+// tokens[i] names: "the day before yesterday" is "vorgestern", "the day after
+// tomorrow" "übermorgen" (issue #532); any other keyword kw is itself.
+func dayBeforeOrAfter(tokens []string, i int, kw simpleKW) simpleKW {
+	if i < 2 || tokens[i-2] != "day" {
+		return kw
+	}
+	switch {
+	case kw.word == "yesterday" && tokens[i-1] == "before":
+		return dayKeywordDays["vorgestern"]
+	case kw.word == "tomorrow" && tokens[i-1] == "after":
+		return dayKeywordDays["übermorgen"]
+	}
+	return kw
+}
+
 func matchSimpleKeywords(query string, now time.Time) *TemporalResult {
-	tokens := ruleTokenize(query)
+	c := clauseTokens(query)
+	tokens := c.words
 	var dates []TemporalDate
 	seen := make(map[string]bool)
 
-	for _, tok := range tokens {
+	for i, tok := range tokens {
+		// A greeting and a compound name no day ("Guten Morgen",
+		// "Morgen-Report"), issue #532.
+		if c.greetingAt(i) || c.inCompound(i) {
+			continue
+		}
 		for _, kw := range simpleKeywords {
 			if fuzzyMatch(tok, kw.word) {
+				kw = dayBeforeOrAfter(tokens, i, kw)
 				d := truncDate(kw.resolve(now))
 				key := fmtDate(d)
 				if !seen[key] {
@@ -4925,8 +5108,7 @@ func NormalizeTemporalRules(query string, now time.Time) *TemporalResult {
 	// "last night": the keyword's day at the part's hour, with every weekday
 	// of the question, issue #532) — pure linear
 	if r := matchRelativeOrPartDays(query, now); r != nil {
-		r.DimensionWeights = dwLinear()
-		return r
+		return withWeights(r, dwLinear)
 	}
 
 	// Priority 8a: Annual holidays — month+seasonal (fixed-date recurring)

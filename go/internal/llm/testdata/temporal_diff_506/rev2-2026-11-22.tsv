@@ -288,7 +288,7 @@ Sie sagten, wir treffen uns am Montag	["Montag|2026-11-23..|future"] linear=0.60
 Ich will wissen, was am Montag passiert ist	["Montag|2026-11-16..|past"] linear=0.60,weekday=0.40
 We deployed on Friday, what broke on Monday?	["Friday|2026-11-20..|past"] linear=0.60,weekday=0.40	fixed	["Friday|2026-11-20..|past","Monday|2026-11-16..|past"] linear=0.60,weekday=0.40	the Monday of the second clause is a date of its own, by that clause's past (issue #517); before, only the first weekday counted
 What did we ship on Monday, and what is planned for Friday?	["Monday|2026-11-16..|past","Friday|2026-11-20..|past"] linear=0.60,weekday=0.40	fixed	["Monday|2026-11-16..|past","Friday|2026-11-27..|future"] linear=0.60,weekday=0.40	each weekday by the tense of its own clause: the Monday shipped, the Friday planned
-Wer hat gestern gesagt, dass wir am Montag deployen?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
+Wer hat gestern gesagt, dass wir am Montag deployen?	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40	disputed	["gestern|2026-11-21..|past","Montag|2026-11-23..|future"] linear=1.00	issue #532: yesterday is a date of its own beside the weekday (when it was said), both dates right; the first date is now yesterday's
 Damien hat gesagt, dass wir am Montag deployen.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
 Damien sagte, dass wir am Montag deployen.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40
 Damien sagte, wir deployen am Montag.	["Montag|2026-11-23..|future"] linear=0.60,weekday=0.40

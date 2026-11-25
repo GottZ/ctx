@@ -225,3 +225,38 @@ func TestRules_TheImperativeOfARequest(t *testing.T) {
 		"Schon mal am Montag, wo der Build rot war, nachgeschaut?": "2026-11-16/past",
 	})
 }
+
+// TestRules_TheRestFormsOfIssue532 (issue #532, point 5): "ist … gebrochen"
+// is a Perfekt; "the day before yesterday" and "the day after tomorrow" are
+// "vorgestern" and "übermorgen"; a holiday is the one of the year written
+// behind it, else the last one for a question in the past and the next one
+// otherwise; a greeting ("Guten Morgen", "Good evening", "Morning team") and
+// an English part of the day in a noun phrase ("the night owl") name no time;
+// a day keyword in a compound names no day ("Morgen-Job"), one of another
+// day answers before a time-of-day word that belongs to none, and one beside
+// a weekday is a date of its own, in the order of the question, unless a
+// distance follows it ("gestern vor einer Woche").
+func TestRules_TheRestFormsOfIssue532(t *testing.T) {
+	check517(t, now517, want517{
+		"Ist der Build am Dienstag gebrochen?":                        "2026-11-17/past",
+		"What happened the day before yesterday?":                     "2026-11-20/past",
+		"Who is on call the day after tomorrow?":                      "2026-11-24/future",
+		"Was ist an Neujahr geplant?":                                 "2027-01-01/range",
+		"Was war an Neujahr los?":                                     "2026-01-01/range",
+		"Was war an Weihnachten 2024?":                                "2024-12-25/range",
+		"Guten Morgen! Wie ist der Stand?":                            "nil",
+		"Good evening, any alerts?":                                   "nil",
+		"Morning team, what broke yesterday?":                         "2026-11-21/past",
+		"Who is the night owl here?":                                  "nil",
+		"Is the night build green today?":                             "2026-11-22/today",
+		"Läuft der Morgen-Job?":                                       "nil",
+		"Was passiert morgen, früh genug?":                            "2026-11-23/future",
+		"Was ist gestern und am Montag passiert?":                     "2026-11-21/past 2026-11-16/past",
+		"Was haben wir gestern gemacht - und was steht am Montag an?": "2026-11-21/past 2026-11-23/future",
+		// counter-cases
+		"What happened in the morning?":                                       "2026-11-22/today@8",
+		"Was haben wir am Montag, also gestern vor einer Woche, entschieden?": "2026-11-16/past",
+		"Ist morgen Montag?":                                                  "2026-11-23/future",
+		"Was steht morgen an?":                                                "2026-11-23/future",
+	})
+}
