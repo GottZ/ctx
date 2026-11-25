@@ -2091,6 +2091,12 @@ func englishAttributive(words []string, i int) bool {
 		return false
 	}
 	prev := words[i-1]
+	// "that" behind a noun is the pronoun of a relative clause and the form
+	// its verb: "The patch that crashed prod on Saturday …" (issue #532).
+	if prev == "that" && i >= 2 && !englishFiniteWords[words[i-2]] && !englishNPJoiners[words[i-2]] &&
+		!englishSubjects[words[i-2]] && !englishParticiple(words[i-2]) {
+		return false
+	}
 	return (englishDeterminers[prev] || englishWhSubjects[prev] || attributeOpeners[prev]) && !beforeNoNoun(words, i)
 }
 
