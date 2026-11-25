@@ -2795,10 +2795,17 @@ func (c clauseWords) clauseEllipsis(s, e int) bool {
 
 // stateParticiples are participles that name an arrangement or a state as
 // often as an act (pairedEllipsis): "Montag Büro geschlossen, Dienstag
-// Homeoffice angeordnet".
+// Homeoffice angeordnet". The second line holds those a review of the wave
+// found missing ("Am Freitag anberaumt, am Montag festgelegt?") and the
+// participles of arranging and of closing off a place found beside them
+// (issue #532); the list is open: a participle of an arrangement it does not
+// hold reads as an act.
 var stateParticiples = toWordSet("geschlossen", "geöffnet", "gesperrt", "freigegeben", "angeordnet", "vereinbart",
 	"eingeschränkt", "ausgebucht", "besetzt", "ausgelastet", "ausverkauft", "abgesagt", "verschoben", "aufgehoben",
-	"eingefroren", "genehmigt", "organisiert", "freigeschaltet", "gedrosselt", "angesagt", "zugesagt", "bestätigt")
+	"eingefroren", "genehmigt", "organisiert", "freigeschaltet", "gedrosselt", "angesagt", "zugesagt", "bestätigt",
+	"anberaumt", "festgelegt", "festgesetzt", "verabredet", "avisiert", "anvisiert", "eingetaktet", "fixiert",
+	"ausgemacht", "abgesprochen", "abgestimmt", "einberufen", "disponiert", "verplant", "geblockt",
+	"ausgeschrieben", "zugeteilt", "angefragt", "abgesperrt", "umgeleitet", "vermietet", "belegt", "verriegelt")
 
 // reasonWords ask for a reason.
 var reasonWords = toWordSet("warum", "wieso", "weshalb", "weswegen", "why")

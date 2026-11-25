@@ -110,3 +110,20 @@ func TestRules_TonightInANameNamesNoDay(t *testing.T) {
 		"Tonight, who is on call?":          "2026-11-22/today",
 	})
 }
+
+// TestRules_AParticipleOfAnArrangementMakesNoPairOfReports (issue #532,
+// review round): two participle clauses side by side are a Perfekt without
+// its auxiliary only where neither participle names an arrangement or a
+// state; "anberaumt", "festgelegt", "verabredet", "avisiert", "abgesperrt"
+// and the like name the date of what is arranged, as the base read them.
+func TestRules_AParticipleOfAnArrangementMakesNoPairOfReports(t *testing.T) {
+	check517(t, now517, want517{
+		"Am Freitag anberaumt, am Montag festgelegt?":    "2026-11-27/future 2026-11-23/future",
+		"Am Montag verabredet, am Donnerstag avisiert?":  "2026-11-23/future 2026-11-26/future",
+		"Am Freitag abgesperrt, am Samstag umgeleitet?":  "2026-11-27/future 2026-11-28/future",
+		"Am Donnerstag eingetaktet, am Freitag fixiert?": "2026-11-26/future 2026-11-27/future",
+		// counter-cases: two reports of acts
+		"Am Montag gemerged, am Dienstag zurückgerollt – warum?": "2026-11-16/past 2026-11-17/past",
+		"Am Freitag gekauft, am Samstag zurückgeschickt?":        "2026-11-20/past 2026-11-21/past",
+	})
+}
