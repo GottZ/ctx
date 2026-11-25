@@ -63,6 +63,10 @@ type clauseWords struct {
 	// asks: the clause of the word, as its punctuation ends it, ends with a
 	// question mark (barePast, issue #532).
 	asks []bool
+	// pastForms: a word has the shape of an English simple past that its
+	// place decides (englishParticiple, englishIrregularPast); without one
+	// barePasts and englishPastIn read nothing (issue #532).
+	pastForms bool
 	// closing caches the table of closingParticiples, filled once per
 	// question by the first clause that needs it (issue #506).
 	closing *[]int
@@ -105,6 +109,7 @@ func clauseTokens(query string) clauseWords {
 		lead := len(f) - len(strings.TrimLeft(f, wordTrim))
 		w := strings.Trim(f, wordTrim)
 		if w != "" {
+			c.pastForms = c.pastForms || englishParticiple(w) || englishIrregularPast[w]
 			c.words = append(c.words, w)
 			c.starts = append(c.starts, start)
 			c.sentence = append(c.sentence, sentence)
@@ -1755,6 +1760,7 @@ func (c clauseWords) barePast(s, k, e int) bool {
 // "last Friday night"). Without words behind it the date, if any, is the
 // subject's ("wednesday reverted?").
 func datePhraseAfter(words []string, i int) bool {
+	scanned(len(words) - i)
 	date := false
 	for _, w := range words[i+1:] {
 		_, part := dayPartHours[w]
@@ -1775,9 +1781,13 @@ var datePhraseWords = toWordSet("on", "at", "in", "by", "during", "the", "this",
 // bare subject (barePast) and that pastVerbs does not count, each read in its
 // clause.
 func (c clauseWords) barePasts(s, e int) int {
+	if !c.pastForms {
+		return 0
+	}
+	scanned(e - s)
 	n := 0
 	for k := s; k < e; k++ {
-		if englishPastVerbs[c.words[k]] {
+		if w := c.words[k]; englishPastVerbs[w] || !englishParticiple(w) && !englishIrregularPast[w] {
 			continue
 		}
 		cs, ce := c.clauseOf(k)
@@ -1794,7 +1804,7 @@ func (c clauseWords) barePasts(s, e int) int {
 // by its place (englishFinitePast): a verb of its own (issue #532), "Usage
 // dropped on Saturday, is that normal?".
 func (c clauseWords) englishPastIn(s, e, lang int) bool {
-	if lang == langGerman {
+	if lang == langGerman || !c.pastForms {
 		return false
 	}
 	scanned(e - s)
@@ -1812,6 +1822,7 @@ func (c clauseWords) englishPastIn(s, e, lang int) bool {
 // its pronoun ("Tickets closed on Friday will be reopened on Monday"), the
 // finite verb the later word (issue #532).
 func finiteAfter(words []string, i int) bool {
+	scanned(len(words) - i)
 	for _, w := range words[i+1:] {
 		if englishFiniteWords[w] {
 			return true
@@ -3791,6 +3802,7 @@ func matchDayKeywordPart(query string, now time.Time) *TemporalResult {
 		date TemporalDate
 	}
 	var hits, plain []hit
+	scanned(len(c.words))
 	for i := 0; i < len(c.words); i++ {
 		if d, ok := c.dayKeywordPartAt(i, now); ok {
 			hits = append(hits, hit{i, d})
@@ -3917,8 +3929,24 @@ var (
 
 func matchTimeOfDay(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
+	r := timeOfDayAt(lower, now)
+	if r == nil {
+		return nil
+	}
+	// Greetings and parts of the day in a noun phrase name no time ("Guten
+	// Morgen", "the night owl"): read again without them (issue #532).
 	c := clauseTokens(query)
-	lower = c.withoutUnreadDayParts(query, lower)
+	if unread := c.withoutUnreadDayParts(query, lower); unread != lower {
+		if r = timeOfDayAt(unread, now); r == nil {
+			return nil
+		}
+	}
+	return timeOfDayRest(c, r)
+}
+
+// timeOfDayAt is today at the hour of the first part of the day of
+// matchTimeOfDay's expressions in lower, or nil.
+func timeOfDayAt(lower string, now time.Time) *TemporalResult {
 	today := now.Format("2006-01-02")
 	var r *TemporalResult
 	// Reference hour per pattern (middle of each daypart).
@@ -3941,9 +3969,13 @@ func matchTimeOfDay(query string, now time.Time) *TemporalResult {
 		mk("abends", 19) // 17:00-22:00
 	case reNachts.MatchString(lower):
 		mk("nachts", 23) // 22:00-06:00
-	default:
-		return nil
 	}
+	return r
+}
+
+// timeOfDayRest is the rest of matchTimeOfDay: a part of the day that
+// belongs to a weekday, a weekday or a day keyword of another day beside it.
+func timeOfDayRest(c clauseWords, r *TemporalResult) *TemporalResult {
 	// A part of the day that belongs to a weekday is a time of that day, not
 	// of today: the weekday rules read it with its hour (dayPartAt). And a
 	// weekday that names a day answers before a time-of-day word that belongs
@@ -4023,6 +4055,7 @@ func (c clauseWords) withoutUnreadDayParts(query, lower string) string {
 	if len(lower) != len(query) {
 		return lower
 	}
+	scanned(len(c.words))
 	var b []byte
 	for i, w := range c.words {
 		if greetingParts[w] && (c.greetingAt(i) || c.attributivePartAt(i)) {
@@ -4048,6 +4081,7 @@ var distanceWords = toWordSet("einer", "einem", "einen", "zwei", "drei", "vier",
 // today as a word of its own: not a greeting, not in a compound, not
 // "morgen" behind a weekday ("Montag morgen").
 func (c clauseWords) otherDayKeyword() bool {
+	scanned(len(c.words))
 	for i, w := range c.words {
 		if _, ok := dayKeywordDays[w]; ok && w != "heute" && w != "today" && c.dayKeywordWord(i) {
 			return true
