@@ -1516,7 +1516,7 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 	// and the extra row tells the caller "≥10, narrow further" without paging.
 	// $1/$5 = the prefix's primary-key range (idPrefixRange), $2=readScopes,
 	// $3=maxCandidates(LIMIT), $4=grantedBlockIDs. An unnamed statement,
-	// planned with its range on every execution (QueryExecModeCacheDescribe):
+	// planned with its range on every execution (CustomPlanMode):
 	// the generic plan a connection switched to from its sixth execution
 	// cannot tell a range of a few ids from a wide one and walked the
 	// reader's scopes on idx_blocks_scope_updated instead (1 079 buffers for
@@ -1528,7 +1528,7 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 		 WHERE id >= $1::uuid AND id <= $5::uuid AND NOT is_archived AND (scope = ANY($2::text[]) OR id = ANY($4::uuid[]))
 		 ORDER BY updated_at DESC
 		 LIMIT $3`,
-		pgx.QueryExecModeCacheDescribe, lo, readScopes, maxCandidates, grantedBlockIDs, hi,
+		CustomPlanMode(pool), lo, readScopes, maxCandidates, grantedBlockIDs, hi,
 	)
 	if err != nil {
 		return "", nil, fmt.Errorf("store: resolve id prefix: %w", err)

@@ -68,7 +68,7 @@ type IssueReadQuery struct {
 // where the bitmap holds every block of the corpus that carries the word.
 // Only a plan that sees the word can tell the two apart, so SearchIssues
 // sends the statement as an unnamed statement, planned with its parameters
-// on every execution (pgx.QueryExecModeCacheDescribe; issue #536): pgx's
+// on every execution (CustomPlanMode; issue #536): pgx's
 // statement cache switched it to the generic plan from the sixth execution
 // per connection, which takes the bitmap for every word — 7 029 buffers
 // instead of 6 for a common word in a project of 100 000 issues. Exported so
@@ -247,7 +247,7 @@ func SearchIssues(ctx context.Context, pool *pgxpool.Pool, q IssueReadQuery) ([]
 	}
 	// A custom plan on every execution (IssueSearchUpdatedSQL): an unnamed
 	// statement, parsed and planned with its parameters each time.
-	rows, err := pool.Query(ctx, sql, pgx.QueryExecModeCacheDescribe, q.Scope, IssueTypeName, q.Status, q.Q, curTS, curID, labelArg(q.Labels), limit)
+	rows, err := pool.Query(ctx, sql, CustomPlanMode(pool), q.Scope, IssueTypeName, q.Status, q.Q, curTS, curID, labelArg(q.Labels), limit)
 	if err != nil {
 		return nil, nil, fmt.Errorf("issue search: query: %w", err)
 	}
