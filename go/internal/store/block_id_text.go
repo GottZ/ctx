@@ -28,6 +28,36 @@ func idIsUUIDText(s string) bool {
 	return true
 }
 
+// The canonical text of a block id (id::text): 32 lowercase hex digits with
+// a hyphen after the 8th, 12th, 16th and 20th — the lowest and the highest
+// id of that shape.
+const (
+	idTextLow  = "00000000-0000-0000-0000-000000000000"
+	idTextHigh = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+)
+
+// idPrefixRange returns the primary-key range [lo, hi] of the ids whose
+// canonical text starts with prefix: the prefix completed to the id's shape
+// with '0' (lo) and 'f' (hi), hyphens at their places. A uuid orders by its
+// bytes, the order of its canonical text, so the range holds exactly the ids
+// `id::text LIKE prefix || '%'` admits, and a scan of context_blocks_pkey
+// over it reads those ids only (issue #536: the text match had no index path
+// and read every visible row of the reader). ok is false when no id's text
+// starts with prefix — a hyphen where the text has a digit, a digit where it
+// has a hyphen, or more characters than the text has. prefix holds only
+// lowercase hex digits and hyphens (idPrefixMatchesNothing answers the rest).
+func idPrefixRange(prefix string) (lo, hi string, ok bool) {
+	if len(prefix) > len(idTextLow) {
+		return "", "", false
+	}
+	for i := 0; i < len(prefix); i++ {
+		if (prefix[i] == '-') != (idTextLow[i] == '-') {
+			return "", "", false
+		}
+	}
+	return prefix + idTextLow[len(prefix):], prefix + idTextHigh[len(prefix):], true
+}
+
 // idPrefixMatchesNothing reports a prefix with a character no block id's
 // text carries — id::text is lowercase hex digits and hyphens — so it
 // matches no block. Answered without the query (issue #547): there a '%' or

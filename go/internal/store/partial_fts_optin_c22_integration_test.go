@@ -143,6 +143,12 @@ func c22Explain(t *testing.T, ctx context.Context, q c22Querier, label, stmt str
 // list — both must match the statement's bind parameters in order.
 func c22GenericPlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, label, name, sig, stmt, execArgs string) ([]string, float64) {
 	t.Helper()
+	return c22PlanAs(t, ctx, pool, "force_generic_plan", label, name, sig, stmt, execArgs)
+}
+
+// c22PlanAs is c22GenericPlan under the plan_cache_mode mode.
+func c22PlanAs(t *testing.T, ctx context.Context, pool *pgxpool.Pool, mode, label, name, sig, stmt, execArgs string) ([]string, float64) {
+	t.Helper()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("%s: begin: %v", label, err)
@@ -150,8 +156,8 @@ func c22GenericPlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, label
 	// Rollback as a defer, never as a tail call: a t.Fatalf with an open
 	// transaction leaves the pool connection checked out and deadlocks Close.
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode = force_generic_plan"); err != nil {
-		t.Fatalf("%s: force_generic_plan: %v", label, err)
+	if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode = "+mode); err != nil {
+		t.Fatalf("%s: %s: %v", label, mode, err)
 	}
 	if _, err := tx.Exec(ctx, "PREPARE "+name+sig+" AS "+stmt); err != nil {
 		t.Fatalf("%s: prepare: %v\n%s", label, err, stmt)
@@ -475,12 +481,26 @@ func c22IssueFTSGates(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		{"IssueSearchCreatedSQL", store.IssueSearchCreatedSQL},
 	}
 
-	// (A3-1) Both statements ride the FTS GIN under a GENERIC plan.
+	// (A3-1) Both statements ride the FTS GIN for the rare needle on the plan
+	// production runs: SearchIssues sends them as unnamed statements, planned
+	// with their parameters on every execution (issue #536), which is the
+	// custom plan. The generic plan, which a connection switched to from its
+	// sixth execution before, still finds the GIN for IssueSearchUpdatedSQL —
+	// the conjunct's proof of the index predicate without a known type, lost
+	// without it (A3-2); IssueSearchCreatedSQL states its scope as a range
+	// since #536, and its generic plan, which no connection runs any more,
+	// may take the project's range instead. Neither plan seq-scans.
 	t.Run("A3_issue_fts_rides_the_gin_under_generic_plan", func(t *testing.T) {
 		for i, s := range stmts {
+			custom, ccost := c22PlanAs(t, ctx, pool, "force_custom_plan", "A3 "+s.name+" (custom)",
+				"c22_n3c_"+strconv.Itoa(i), sig, s.sql, execArgs)
+			if !c22UsesFTSIndex(custom) || c22SeqScansBlocks(custom) {
+				t.Errorf("%s: the custom plan (cost %.2f) names no FTS GIN index or seq-scans context_blocks: %s",
+					s.name, ccost, strings.Join(custom, " | "))
+			}
 			plan, cost := c22GenericPlan(t, ctx, pool, "A3 "+s.name+" (generic)",
 				"c22_n3_"+strconv.Itoa(i), sig, s.sql, execArgs)
-			if !c22UsesFTSIndex(plan) {
+			if s.name == "IssueSearchUpdatedSQL" && !c22UsesFTSIndex(plan) {
 				t.Errorf("%s: generic plan names neither FTS GIN index (cost %.2f): %s",
 					s.name, cost, strings.Join(plan, " | "))
 			}

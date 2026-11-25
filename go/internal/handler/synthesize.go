@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -191,8 +192,17 @@ func (h *SynthesizeHandler) pastWriteLogBoundary(ctx context.Context, windowStar
 	if boundary == nil || !windowStart.Before(*boundary) {
 		return "", nil
 	}
+	return writeLogBoundaryRefusal(*boundary), nil
+}
+
+// writeLogBoundaryRefusal is the text of a backfill refused at the write
+// log's eviction boundary: by pastWriteLogBoundary before the synthesis, or
+// by the synthesis itself, whose decision count reads the boundary in its own
+// snapshot (dream.WriteLogEvictedError, issue #536) — a retention run between
+// the two moves it past a window that passed the first check.
+func writeLogBoundaryRefusal(boundary time.Time) string {
 	return fmt.Sprintf("date window starts before the write-log eviction boundary (%s): the write-log retention deleted its guard and dream decisions, a backfill would replace the report with one without them",
-		boundary.UTC().Format(time.RFC3339)), nil
+		boundary.UTC().Format(time.RFC3339))
 }
 
 // devmode is the caller tenant's resolved tenant.devmode (C6-C). Nil-safe like
@@ -282,6 +292,11 @@ func (h *SynthesizeHandler) HandleDaily(w http.ResponseWriter, r *http.Request) 
 		blockID, err = dream.GenerateDailyReportFor(ctx, h.pool, router, scope, day)
 	}
 	if err != nil {
+		var evicted *dream.WriteLogEvictedError
+		if errors.As(err, &evicted) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": writeLogBoundaryRefusal(evicted.Boundary)})
+			return
+		}
 		if dispatch.IsRejection(err) {
 			// Dispatcher capacity rejection (design/03 §4.5.2 daily row): 429
 			// generic + B1 Retry-After, consistent with the E-U2 concurrency

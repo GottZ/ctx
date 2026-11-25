@@ -146,7 +146,9 @@ func TestGuardKeysGuardListReadsAnyStoredValue(t *testing.T) {
 	const scope = "gk-legacy"
 	ids := gkFlaggedPairs(t, pool, scope, "gk-legacy", 6)
 
-	// One value per flagged block; the first four are read as numbers.
+	// One value per flagged block; the first and the third are JSON numbers,
+	// the only values the list sorts by (issue #536: a JSON string such as
+	// "0.97" is not the guard's float8 and sorts last, like the rest).
 	values := []string{
 		`0.99`, `"0.97"`, `1e-3`, `"-5"`,
 		`"x"`, `""`, `{"v": 0.95}`, `[0.95]`, `true`, `null`, `"0.9x"`, `"  "`,
@@ -169,7 +171,7 @@ func TestGuardKeysGuardListReadsAnyStoredValue(t *testing.T) {
 	if len(items) != len(ids) {
 		t.Fatalf("GuardList: %d items, want %d", len(items), len(ids))
 	}
-	wantHead := []string{ids[0], ids[1], ids[2], ids[3]} // 0.99, 0.97, 0.001, -5
+	wantHead := []string{ids[0], ids[2]} // 0.99, 0.001
 	for i, want := range wantHead {
 		if items[i].ID != want {
 			got := make([]string, len(items))
@@ -211,8 +213,9 @@ func TestGuardKeysGuardListReadsAnyStoredValue(t *testing.T) {
 // dropped it and answered with no rows (issue #238 §5: a caller's
 // guard_similarity:"x" failed the cast and every reader of the scope saw an
 // empty queue). The fault is injected with a function of a schema that the
-// session's search path puts ahead of pg_catalog: it shadows
-// pg_input_is_valid and raises for one value.
+// session's search path puts ahead of pg_catalog: it shadows jsonb_typeof,
+// which the list's order key reads the similarity with (issue #536), and
+// raises for one value.
 func TestGuardKeysGuardListReportsAFault(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -227,10 +230,10 @@ func TestGuardKeysGuardListReportsAFault(t *testing.T) {
 	}
 	for _, st := range []string{
 		`CREATE SCHEMA ctx_fault`,
-		`CREATE FUNCTION ctx_fault.pg_input_is_valid(v text, t text) RETURNS boolean LANGUAGE plpgsql AS $$
+		`CREATE FUNCTION ctx_fault.jsonb_typeof(v jsonb) RETURNS text LANGUAGE plpgsql AS $$
 		 BEGIN
-		   IF v = 'boom' THEN RAISE EXCEPTION 'injected fault'; END IF;
-		   RETURN pg_catalog.pg_input_is_valid(v, t);
+		   IF v = '"boom"'::jsonb THEN RAISE EXCEPTION 'injected fault'; END IF;
+		   RETURN pg_catalog.jsonb_typeof(v);
 		 END $$`,
 	} {
 		if _, err := pool.Exec(ctx, st); err != nil {

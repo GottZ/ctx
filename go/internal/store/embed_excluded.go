@@ -260,9 +260,44 @@ var (
 		 ORDER BY 1`
 	// embedExcludedStarScopesSQL: the scopes in which a '*' entry may have a
 	// block to mark — the scopes of the name's unmarked pending blocks and of
-	// its stale ones, on the two partial index pairs (no other block of the
-	// name needs a marker).
-	embedExcludedStarScopesSQL = `SELECT scope::text FROM context_blocks
+	// its stale ones (no other block of the name needs a marker). The pending
+	// half reads the name's range of idx_embedding_pending_type_scope
+	// (type_name, scope, id) one scope at a time (issue #536): each step of
+	// the recursion takes the first entry after the scope before it, in the
+	// order of the index (name and scope as a range, ORDER BY its leading
+	// columns, LIMIT 1), one descent per scope that holds such a block, not
+	// one row per block. It runs with sorts off (embedExcludedBatchNoSort),
+	// where the index range in key order is the only path of a step without a
+	// sort, and only while that index stands (embedExcludedPendingIndexReadySQL);
+	// before, embedExcludedStarScopesBefore193SQL. Sent as the pool's own
+	// statement before, the pending half was planned on idx_context_scope by
+	// the production image's generic plan at random_page_cost 4 and read every
+	// pending block of the table's scopes (46 884 buffers at 1 000 000 pending
+	// blocks of another type). The stale half has no index carrying the name
+	// and reads the stale blocks of every name (idx_embedding_stale_sens), as
+	// before; the marked blocks of a name leave both halves.
+	embedExcludedStarScopesSQL = `WITH RECURSIVE p(scope) AS (
+		  (SELECT scope FROM context_blocks
+		    WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded
+		      AND type_name >= $1::text AND type_name <= $1::text
+		    ORDER BY type_name, scope
+		    LIMIT 1)
+		  UNION ALL
+		  SELECT n.scope FROM p CROSS JOIN LATERAL (
+		    SELECT scope FROM context_blocks
+		     WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded
+		       AND (type_name, scope) > ($1::text, p.scope) AND type_name <= $1::text
+		     ORDER BY type_name, scope
+		     LIMIT 1) n)
+		SELECT scope::text FROM p
+		UNION
+		SELECT scope::text FROM context_blocks
+		 WHERE embedding_stale AND NOT is_archived AND type_name = $1
+		ORDER BY 1`
+	// embedExcludedStarScopesBefore193SQL is embedExcludedStarScopesSQL while
+	// idx_embedding_pending_type_scope does not stand: both halves select the
+	// name by equality, on the pool, at their cost before 193.
+	embedExcludedStarScopesBefore193SQL = `SELECT scope::text FROM context_blocks
 		 WHERE embedding IS NULL AND NOT is_archived AND NOT embed_excluded AND type_name = $1
 		UNION
 		SELECT scope::text FROM context_blocks
@@ -284,8 +319,9 @@ const embedExcludedPendingIndexReadySQL = `SELECT EXISTS (SELECT 1 FROM pg_index
 		WHERE indexrelid = to_regclass('public.idx_embedding_pending_type_scope') AND indisvalid AND indisready
 		  AND pg_get_indexdef(indexrelid) = 'CREATE INDEX idx_embedding_pending_type_scope ON public.context_blocks USING btree (type_name, scope, id) WHERE ((embedding IS NULL) AND (NOT is_archived) AND (NOT embed_excluded))')`
 
-// embedExcludedBatchNoSort turns sorts off for a mark or clear batch and the
-// mark's left check, in the statement's own transaction (embedExcludedBatch):
+// embedExcludedBatchNoSort turns sorts off for a mark or clear batch, the
+// mark's left check and the scopes of a '*' entry (embedExcludedEntryScopes),
+// in the statement's own transaction (embedExcludedBatch):
 // every path of its selection besides its index range in key order (the
 // name's and scope's range of idx_embedding_pending_type_scope or of
 // idx_blocks_embed_excluded, the scope's range of
@@ -403,7 +439,7 @@ func ReconcileEmbedExcluded(ctx context.Context, pool *pgxpool.Pool) (EmbedExclu
 // its range.
 func reconcileEmbedExcludedEntry(ctx context.Context, pool *pgxpool.Pool, name, grp string, typeIndex bool) (updated int, done bool, err error) {
 	for round := 0; round < embedExcludedRounds; round++ {
-		scopes, err := embedExcludedEntryScopes(ctx, pool, name, grp)
+		scopes, err := embedExcludedEntryScopes(ctx, pool, name, grp, typeIndex)
 		if err != nil {
 			return updated, false, err
 		}
@@ -427,7 +463,7 @@ func reconcileEmbedExcludedEntry(ctx context.Context, pool *pgxpool.Pool, name, 
 			settled = settled && ok
 		}
 		if grp == "*" {
-			if clearing, err = embedExcludedStarClearScopes(ctx, pool, name); err != nil {
+			if clearing, err = embedExcludedStarClearScopes(ctx, pool, name, typeIndex); err != nil {
 				return updated, false, err
 			}
 		}
@@ -468,8 +504,9 @@ func embedExcludedAnswer(ctx context.Context, pool *pgxpool.Pool, name, scope st
 // from the registry); every other group answers true and has nothing to
 // clear. Without an excluded _global row (deleted, or another policy) any
 // scope may answer false, and the candidates are the scopes that hold a
-// marked block of the name (embedExcludedMarkedScopesSQL).
-func embedExcludedStarClearScopes(ctx context.Context, pool *pgxpool.Pool, name string) ([]string, error) {
+// marked block of the name (embedExcludedMarkedScopesSQL). typeIndex as for
+// reconcileEmbedExcludedEntry.
+func embedExcludedStarClearScopes(ctx context.Context, pool *pgxpool.Pool, name string, typeIndex bool) ([]string, error) {
 	var globalExcluded bool
 	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM context_block_types
 		 WHERE name = $1 AND scope = '_global' AND config->'retrieval'->>'policy' = 'excluded')`, name).Scan(&globalExcluded); err != nil {
@@ -488,7 +525,7 @@ func embedExcludedStarClearScopes(ctx context.Context, pool *pgxpool.Pool, name 
 			return nil, fmt.Errorf("store: embed-excluded lifting groups %q: %w", name, err)
 		}
 		for _, g := range groups {
-			scopes, err := embedExcludedEntryScopes(ctx, pool, name, g)
+			scopes, err := embedExcludedEntryScopes(ctx, pool, name, g, typeIndex)
 			if err != nil {
 				return nil, err
 			}
@@ -520,14 +557,32 @@ func embedExcludedStarClearScopes(ctx context.Context, pool *pgxpool.Pool, name 
 // scopes of the tenant for 't:<tenant_id>' (at this read; an assignment
 // queues the tenant's group again), the one scope for 's:<scope>', and for
 // '*' the scopes in which a block of the name may need a marker
-// (embedExcludedStarScopesSQL; what '*' clears, embedExcludedStarClearScopes
-// says).
-func embedExcludedEntryScopes(ctx context.Context, pool *pgxpool.Pool, name, grp string) ([]string, error) {
+// (embedExcludedStarScopesSQL, in a transaction with sorts off, while
+// idx_embedding_pending_type_scope stands — typeIndex — and
+// embedExcludedStarScopesBefore193SQL otherwise; what '*' clears,
+// embedExcludedStarClearScopes says).
+func embedExcludedEntryScopes(ctx context.Context, pool *pgxpool.Pool, name, grp string, typeIndex bool) ([]string, error) {
 	var rows pgx.Rows
 	var err error
 	switch {
+	case grp == "*" && typeIndex:
+		var scopes []string
+		if err := pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, embedExcludedBatchNoSort); err != nil {
+				return err
+			}
+			rows, err := tx.Query(ctx, embedExcludedStarScopesSQL, name)
+			if err != nil {
+				return err
+			}
+			scopes, err = pgx.CollectRows(rows, pgx.RowTo[string])
+			return err
+		}); err != nil {
+			return nil, fmt.Errorf("store: embed-excluded scopes %q %q: %w", name, grp, err)
+		}
+		return scopes, nil
 	case grp == "*":
-		rows, err = pool.Query(ctx, embedExcludedStarScopesSQL, name)
+		rows, err = pool.Query(ctx, embedExcludedStarScopesBefore193SQL, name)
 	case strings.HasPrefix(grp, "t:"):
 		rows, err = pool.Query(ctx, `SELECT scope::text FROM context_tenant_scopes WHERE tenant_id::text = $1 ORDER BY scope`, grp[2:])
 	case strings.HasPrefix(grp, "s:"):
