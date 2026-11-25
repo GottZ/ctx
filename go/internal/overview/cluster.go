@@ -1177,10 +1177,18 @@ UPDATE graph_overview_meta m
 // existing rows, creates none). attemptStart is this attempt's start time and
 // discards a stamp that a concurrent, SUCCESSFUL run has already overtaken.
 //
-// Deliberately exported and pool-based (not tx-bound): the caller is the
-// scheduler, and on the timeout path it must stamp with the OUTER context —
-// the rebuild's own context is expired exactly then.
-func StampAttempt(ctx context.Context, pool *pgxpool.Pool, scopes []string, reason string, candidates map[string]int, attemptStart time.Time) error {
+// Deliberately exported and pool-based (not bound to a caller's transaction):
+// the caller is the scheduler, and on the timeout path it must stamp with the
+// OUTER context — the rebuild's own context is expired exactly then.
+//
+// tenant is the run's tenant ("" for a run without one): the scoped stamp
+// creates the rows of its scopes, so it holds the tenant's gate as the run's
+// other writes do (store.HoldRunTenant, issue #555) — a stamp that comes after
+// the tenant's delete began writes nothing and answers
+// store.ErrRunTenantGone. Without the gate a stamp of a run that outlived its
+// tenant's delete left graph_overview_meta rows in scope names the next owner
+// gets.
+func StampAttempt(ctx context.Context, pool *pgxpool.Pool, tenant string, scopes []string, reason string, candidates map[string]int, attemptStart time.Time) error {
 	candScopes, candNs := candidateArrays(candidates)
 	if len(scopes) == 0 {
 		if _, err := pool.Exec(ctx, stampAttemptGlobalSQL, reason, candScopes, candNs, attemptStart); err != nil {
@@ -1188,7 +1196,13 @@ func StampAttempt(ctx context.Context, pool *pgxpool.Pool, scopes []string, reas
 		}
 		return nil
 	}
-	if _, err := pool.Exec(ctx, stampAttemptScopedSQL, scopes, reason, candScopes, candNs, attemptStart); err != nil {
+	if err := pgxdb.Write(ctx, pool, pgxdb.At("overview: stamping rebuild attempt"), func(tx pgx.Tx) error {
+		if err := store.HoldRunTenant(ctx, tx, tenant); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, stampAttemptScopedSQL, scopes, reason, candScopes, candNs, attemptStart)
+		return err
+	}); err != nil {
 		return fmt.Errorf("overview: stamping rebuild attempt (%s) for %v: %w", reason, scopes, err)
 	}
 	return nil

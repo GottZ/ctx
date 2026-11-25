@@ -144,7 +144,9 @@ DELETE FROM context_block_counts WHERE scope IN ` + pruneOwnedSQL
 // pruneQueueSQL deletes the embed-exclusion reconciles queued for the tenant
 // (grp 't:<tenant>') or one of its scopes (grp 's:<scope>'): the tenant's
 // types and blocks are gone, and a reconcile of a scope name runs for the
-// next owner on its own type writes.
+// next owner on its own type writes. The group names the tenant as PostgreSQL
+// writes a uuid (ctx_embed_excluded_group), which is the spelling PruneTenant
+// passes on.
 const pruneQueueSQL = `DELETE FROM context_embed_excluded_queue
  WHERE grp = 't:' || $2::text OR grp IN (SELECT 's:' || s FROM ` + pruneOwnedSQL + ` AS o(s))`
 

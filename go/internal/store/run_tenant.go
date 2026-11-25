@@ -11,19 +11,19 @@ import (
 	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
-// ErrRunTenantGone: the tenant a server run writes for is being deleted (or
-// gone) and the write wrote nothing (issue #555). A run reads its tenants at
-// the start of its cycle (only active ones) and writes later; the tenant's
-// delete may have begun in between. Runs skip the write: it is not an error
-// of the run.
-var ErrRunTenantGone = errors.New("store: the tenant this run writes for is being deleted; nothing was written")
+// ErrRunTenantGone: the tenant a server run writes for is not active any more
+// — being deleted, gone, or suspended — and the write wrote nothing (issue
+// #555). A run reads its tenants at the start of its cycle (only active ones)
+// and writes later; the tenant's delete may have begun in between, or an
+// operator suspended it. Runs skip the write: it is not an error of the run.
+var ErrRunTenantGone = errors.New("store: the tenant this run writes for is not active (suspended or being deleted); nothing was written")
 
 // runTenantCtx is the context key of a server run's tenant (WithRunTenant).
 type runTenantCtx struct{}
 
 // WithRunTenant returns ctx carrying the tenant a server run acts for — the
 // tenant whose scopes the run read and writes into (the scheduler's
-// background tenants, a project's tenant for the forge sync). Every write of
+// background tenants). Every write of
 // the run that puts a row into a scope then holds that tenant's gate
 // (holdRunTenant), as a request's write holds its key's (holdRequestKey). A
 // run without a tenant (the tenant-less single pass of a deployment without

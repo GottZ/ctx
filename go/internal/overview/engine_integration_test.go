@@ -149,7 +149,7 @@ func TestS67_G3_TimeBudgetFreezesWithoutTouchingIdentity(t *testing.T) {
 	// Und der Grund muss in graph_overview_meta schreibbar sein: der CHECK aus
 	// Mig 123/126 kennt genau die erlaubten Werte, und ein 23514 hier waere
 	// der Beweis, dass die Welle doch eine Migration braucht.
-	if err := StampAttempt(ctx, pool, nil, st.SkipReason, st.CandidateCount, time.Now()); err != nil {
+	if err := StampAttempt(ctx, pool, "", nil, st.SkipReason, st.CandidateCount, time.Now()); err != nil {
 		t.Fatalf("skip_reason %q ist nicht nach graph_overview_meta schreibbar: %v", st.SkipReason, err)
 	}
 }

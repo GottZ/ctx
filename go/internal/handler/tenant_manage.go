@@ -602,6 +602,10 @@ const defaultTenantID = store.DefaultTenantID
 const tenantDeleteIncompleteMsg = "delete tenant failed: the tenant is offboarding — its keys, sessions and OAuth tokens are refused — " +
 	"and part of its data is deleted; run tenant-delete again to finish it"
 
+// tenantOffboardingMsg answers a scope that was to be assigned to a tenant
+// whose delete has begun (store.ErrTenantOffboarding, issue #555).
+const tenantOffboardingMsg = "the tenant is being deleted; it takes no further scope"
+
 // handleTenantDelete runs the T05b full-prune (store.PruneTenant): the FK-ordered,
 // batched mass-DELETE of the tenant's scope-carried data, its keys, then the
 // tenant row (design/01 §4.3.1). Admin-gated upstream (actionRequiresAdmin); the
@@ -827,6 +831,8 @@ func (h *ManageHandler) handleScopeCreate(w http.ResponseWriter, r *http.Request
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{"success": false, "error": "tenant scope quota exceeded"})
 		case errors.Is(err, store.ErrTenantNotFound):
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
+		case errors.Is(err, store.ErrTenantOffboarding):
+			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": tenantOffboardingMsg})
 		default:
 			adminWriteFailed(r, "manage: scope-create failed", err, writeOutcome(err))
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "assign scope failed"})

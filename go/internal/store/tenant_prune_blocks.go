@@ -58,7 +58,7 @@ const pruneBlocksSQL = `DELETE FROM context_blocks WHERE id = ANY($1::uuid[])`
 // deploy) — a writer the prune cannot outrun: it fails then, the tenant stays
 // offboarding, and a later run finishes. Before it fails, the prune counts
 // what is left: a round that leaves nothing is followed by one more (up to
-// twice the bound), and the number the error names is what is left.
+// twice the bound and one), and the number the error names is what is left.
 const pruneClosingRounds = 10
 
 // pruneScopeBlocks deletes the dream links and the blocks of the tenant's
@@ -270,6 +270,9 @@ func pruneTenantClose(ctx context.Context, pool *pgxpool.Pool, tenantID string, 
 			if err := pruneTenantLast(ctx, tx, tenantID, scopes); err != nil {
 				return err
 			}
+			if err := pruneNoLateScope(ctx, tx, tenantID, scopes); err != nil {
+				return err
+			}
 			tag, err := tx.Exec(ctx, `DELETE FROM context_tenants WHERE id = $1::uuid`, tenantID)
 			if err == nil && tag.RowsAffected() == 0 {
 				// Another delete of the tenant came first (issue #555).
@@ -290,15 +293,50 @@ func pruneTenantClose(ctx context.Context, pool *pgxpool.Pool, tenantID string, 
 		if err != nil {
 			return fmt.Errorf("store: delete tenant: count what is left: %w", err)
 		}
-		if remaining == 0 && round < 2*pruneClosingRounds {
+		if remaining == 0 && round <= 2*pruneClosingRounds {
 			// The round drained what was there (a backlog, or one more row of a
 			// writer that holds no gate): the next finds nothing and deletes
 			// the tenant. Bounded, so a writer that writes one row per round
-			// cannot keep the delete going.
+			// cannot keep the delete going — the round after the last of the
+			// bound included: it deletes the tenant only when it finds nothing.
 			continue
 		}
 		return fmt.Errorf("store: delete tenant: rows kept arriving in its scopes for %d closing rounds (the last deleted %d, %d are left now); the tenant stays offboarding, run the delete again", round, left, remaining)
 	}
+}
+
+// pruneLateScopesSQL counts the scopes of the tenant $1 that are not among the
+// names $2 the prune read at its start.
+const pruneLateScopesSQL = `SELECT count(*)::int FROM context_tenant_scopes WHERE tenant_id = $1::uuid AND scope <> ALL($2::text[])`
+
+// pruneNoLateScope keeps the tenant row's delete from cascading away the
+// mapping of a scope the prune never worked on (issue #555): its rows would
+// stay in a scope no tenant owns, and the next tenant assigned the name would
+// own them. AssignTenantScopeTx refuses an offboarding tenant, so only a
+// writer that does not ask adds such a scope — an older instance during a
+// rolling deploy, or an assign after an operator set the tenant's status back
+// while its delete ran. The tenant row is locked first, as every assign locks
+// it, and the count is a statement of its own: it sees every assign that
+// committed before the lock was granted, and none can come after. The delete
+// fails then and the tenant stays offboarding; the next delete reads the
+// scope in its list.
+func pruneNoLateScope(ctx context.Context, tx pgx.Tx, tenantID string, scopes []string) error {
+	var one int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, tenantID).Scan(&one); err != nil {
+		if pgxdb.AbsentOrMalformed(err) {
+			// Another delete of the tenant came first.
+			return ErrTenantNotFound
+		}
+		return err
+	}
+	var late int
+	if err := tx.QueryRow(ctx, pruneLateScopesSQL, tenantID, scopes).Scan(&late); err != nil {
+		return err
+	}
+	if late > 0 {
+		return fmt.Errorf("%d scope(s) were assigned to the tenant while its delete ran; the tenant stays offboarding, run the delete again", late)
+	}
+	return nil
 }
 
 // pruneRowsLeftSQL counts the rows of every table the closing rounds drain

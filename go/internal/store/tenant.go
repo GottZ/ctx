@@ -171,6 +171,14 @@ var ErrTenantNotFound = errors.New("store: tenant not found")
 // 400 path, reservedSlug) is the caller's job; this enforces only schema gates.
 var ErrTenantSlugExists = errors.New("store: tenant slug already exists")
 
+// ErrTenantOffboarding: a scope was to be assigned to a tenant whose delete
+// has begun (AssignTenantScopeTx). Nothing was written.
+var ErrTenantOffboarding = errors.New("store: the tenant is being deleted; it takes no further scope")
+
+// tenantStatusOffboarding is the status the tenant-delete's first step sets
+// (markTenantOffboarding; the 059 CHECK's third value).
+const tenantStatusOffboarding = "offboarding"
+
 // ErrTenantPruneIncomplete wraps a failure of PruneTenant after its first
 // step (issue #555): the tenant is offboarding — ctx_auth refuses its keys,
 // sessions and OAuth tokens — and the batches that committed before the
@@ -297,13 +305,22 @@ func AssignTenantScope(ctx context.Context, pool *pgxpool.Pool, tenantID, scope 
 func AssignTenantScopeTx(ctx context.Context, tx pgx.Tx, tenantID, scope string, maxScopes *int) (created bool, err error) {
 	// Lock the owning tenant row: per-tenant serialisation + existence check in one
 	// step. No row (or a malformed id → 22P02) → ErrTenantNotFound (404, no oracle).
-	var lockedID string
+	var status string
 	if err = tx.QueryRow(ctx,
-		`SELECT id FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, tenantID).Scan(&lockedID); err != nil {
+		`SELECT status FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, tenantID).Scan(&status); err != nil {
 		if pgxdb.AbsentOrMalformed(err) {
 			return false, ErrTenantNotFound
 		}
 		return false, fmt.Errorf("store: assign scope lock: %w", err)
+	}
+	// A tenant whose delete has begun takes no further scope (issue #555): the
+	// delete read the tenant's scopes right after it marked the tenant
+	// offboarding, and prunes those. The row lock above waits for that mark
+	// (markTenantOffboarding updates the row), so the status read under it is
+	// the one the delete acts on: an assign that committed before the mark is
+	// in the delete's list, one after it is refused here.
+	if status == tenantStatusOffboarding {
+		return false, ErrTenantOffboarding
 	}
 
 	// Quota cap (nil / negative = unlimited). Counted under the lock so it observes
@@ -727,9 +744,15 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp AuditStamp) (err error) {
 	// Existence + the malformed/absent → ErrTenantNotFound contract, reusing the
 	// same oracle as GetTenant (no 22P02 → 500 side-channel).
-	if _, err := GetTenant(ctx, pool, tenantID); err != nil {
+	tn, err := GetTenant(ctx, pool, tenantID)
+	if err != nil {
 		return err
 	}
+	// The id as the database writes it, from here on: PostgreSQL reads the
+	// same uuid in capitals, in braces or without hyphens, and a statement
+	// that compares the tenant as text (the queued reconciles' group,
+	// pruneQueueSQL) would miss its rows under another spelling.
+	tenantID = tn.ID
 	// 0: the door closes first (see "WRITERS" above).
 	if err := markTenantOffboarding(ctx, pool, tenantID); err != nil {
 		return err

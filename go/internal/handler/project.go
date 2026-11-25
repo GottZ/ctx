@@ -247,6 +247,8 @@ func (h *ProjectHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "scope already exists"})
 		case errors.Is(err, store.ErrTenantNotFound):
 			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
+		case errors.Is(err, store.ErrTenantOffboarding):
+			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": tenantOffboardingMsg})
 		default:
 			internalError(w, ctx, "project: create error", err)
 		}

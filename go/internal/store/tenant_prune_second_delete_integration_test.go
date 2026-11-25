@@ -103,18 +103,21 @@ func TestSecondTenantDeleteLeavesTheNextOwnersRows(t *testing.T) {
 // block into scope right after the prune's last pass statement (the projects)
 // and after the commit of every closing round for which after says so, and
 // one more right after the count the closing rounds run once they are
-// pruneClosingRounds deep, when late is set.
+// pruneClosingRounds deep, when late is set — or after each of the first
+// lateCounts of those counts.
 type closingRoundWriter struct {
-	t       *testing.T
-	pool    *pgxpool.Pool
-	scope   string
-	after   func(round int) bool
-	late    bool
-	mu      sync.Mutex
-	closing bool
-	round   int
-	wrote   int
-	counted bool
+	t          *testing.T
+	pool       *pgxpool.Pool
+	scope      string
+	after      func(round int) bool
+	late       bool
+	lateCounts int
+	lateWrote  int
+	mu         sync.Mutex
+	closing    bool
+	round      int
+	wrote      int
+	counted    bool
 }
 
 type closingRoundMark struct{}
@@ -146,6 +149,9 @@ func (w *closingRoundWriter) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ p
 	case "count":
 		if w.late && !w.counted {
 			w.counted, write = true, true
+		} else if w.lateWrote < w.lateCounts {
+			w.lateWrote++
+			write = true
 		}
 	}
 	if write {

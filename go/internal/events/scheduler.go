@@ -1107,7 +1107,7 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 
 			blockID, err := dream.GenerateDailyReport(bt.runCtx(ctx), s.pool, router, scope)
 			if errors.Is(err, store.ErrRunTenantGone) {
-				slog.Info("scheduler: daily synthesis skipped — its tenant is being deleted", "scope", scope)
+				slog.Info("scheduler: daily synthesis skipped — its tenant is not active", "scope", scope)
 				continue
 			}
 			if err != nil {
@@ -1417,7 +1417,16 @@ func (s *Scheduler) stampOverviewAttempt(ctx context.Context, bt backgroundTenan
 	// why the status section carries the reason alongside the number instead of
 	// the number alone.
 	s.consecutiveOverviewFails.Add(1)
-	if err := overview.StampAttempt(ctx, s.pool, bt.owned, reason, candidates, attemptStart); err != nil {
+	err := overview.StampAttempt(ctx, s.pool, bt.id, bt.owned, reason, candidates, attemptStart)
+	if errors.Is(err, store.ErrRunTenantGone) {
+		// The tenant's delete began since the cycle read it (issue #555): no
+		// row of its scopes is written after that. This is also where a
+		// refusal of the worker process ends, which arrives as text and takes
+		// the error exit of the rebuild.
+		slog.Info("scheduler: overview attempt not stamped — its tenant is not active", "reason", reason, "tenant_scope", bt.scope)
+		return
+	}
+	if err != nil {
 		slog.Error("scheduler: overview attempt stamp failed", "error", err,
 			"reason", reason, "tenant_scope", bt.scope, "scope_filter", bt.owned)
 	}
@@ -1470,7 +1479,7 @@ func (s *Scheduler) renderRootMap(ctx context.Context, bt backgroundTenant) {
 		store.IntersectWindow(cfgT.Scheduler.ReadScopes, bt.owned))
 	switch {
 	case errors.Is(err, store.ErrRunTenantGone):
-		slog.Info("scheduler: root map skipped — its tenant is being deleted", "tenant_scope", bt.scope)
+		slog.Info("scheduler: root map skipped — its tenant is not active", "tenant_scope", bt.scope)
 	case err != nil:
 		slog.Warn("scheduler: root map failed", "error", err, "tenant_scope", bt.scope)
 	case res.Written:
@@ -1602,7 +1611,7 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	if errors.Is(jerr, store.ErrRunTenantGone) {
 		// The tenant's delete has begun (issue #555): no journal row, no
 		// rebuild; the next cycle leaves the tenant out.
-		slog.Info("scheduler: overview rebuild skipped — its tenant is being deleted", "tenant_scope", bt.scope)
+		slog.Info("scheduler: overview rebuild skipped — its tenant is not active", "tenant_scope", bt.scope)
 		return
 	}
 	if jerr != nil {
@@ -1650,7 +1659,7 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		// persist wrote nothing, and the next cycle leaves the tenant out.
 		// (Through the worker process the error arrives as text and is
 		// logged below.)
-		slog.Info("scheduler: overview rebuild skipped — its tenant is being deleted", "tenant_scope", bt.scope)
+		slog.Info("scheduler: overview rebuild skipped — its tenant is not active", "tenant_scope", bt.scope)
 		s.closeOverviewRun(ctx, runID, overview.RunResult{Outcome: "failed", SkipReason: "tenant-deleted", Stats: stats})
 		return
 	}
@@ -2349,7 +2358,7 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 		slog.Info("scheduler: running digest", "scope", homeScope)
 		res, err := run(bt.runCtx(ctx), s.pool, s.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, bt.scope, homeScope, window)
 		if errors.Is(err, store.ErrRunTenantGone) {
-			slog.Info("scheduler: digest skipped — its tenant is being deleted", "scope", homeScope)
+			slog.Info("scheduler: digest skipped — its tenant is not active", "scope", homeScope)
 			continue
 		}
 		if res.MapID != "" {
