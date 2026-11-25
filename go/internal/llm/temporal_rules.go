@@ -965,20 +965,32 @@ var englishPastVerbs = toWordSet(append([]string{
 	"fixed", "deployed", "cancelled", "canceled", "happened",
 	"broke", "crashed", "failed", "finished", "started", "created",
 	"moved", "changed", "removed", "deleted", "updated",
-	"merged", "pushed", "reviewed", "shipped", "ran", "wrote", "found", "saw", "made", "got",
+	"merged", "pushed", "reviewed", "shipped", "ran", "wrote", "made", "got",
 }, englishStrongPast...)...)
 
 // englishStrongPast are English forms of the simple past that are neither a
 // participle nor another word (issue #532): wherever they stand they name a
 // past, as "went" and "broke" do. Forms that are a noun as well ("rose",
 // "bore", "bit") and those whose present is the same form ("read", "set",
-// "put", "cut", "hit", "let") are not among them.
+// "put", "cut", "hit", "let") are not among them, and neither are the forms
+// that are another word as well (englishPastHomographs).
 var englishStrongPast = []string{
-	"knew", "grew", "threw", "flew", "drew", "blew", "chose", "froze", "spoke", "stole", "woke", "wore", "tore",
-	"swore", "gave", "ate", "became", "sang", "sank", "drank", "swam", "rang", "shook", "drove", "rode", "forgot",
-	"forgave", "arose", "overtook", "undertook", "mistook", "withdrew", "overran", "overthrew", "rewrote",
-	"underwent", "outgrew", "took", "came", "began", "fell",
+	"knew", "grew", "threw", "flew", "blew", "chose", "froze", "wore", "swore", "gave", "ate", "became", "sank",
+	"drank", "swam", "shook", "forgot", "forgave", "arose", "overtook", "undertook", "mistook", "withdrew",
+	"overran", "overthrew", "rewrote", "underwent", "outgrew", "took", "came", "began",
 }
+
+// englishPastHomographs are English forms of the simple past that are
+// another word as well: a name ("Drew", "Sang", "Rode"), a noun ("spoke",
+// "stole", "drove", "tore", "saw", and the German "Rang" and "Tore"), an
+// adjective ("woke") or a participle and a present ("found": "Lost and found
+// opens on Saturday?"). Read wherever they stand they turned "Will Drew join
+// the retro on Monday?" into a past; like the forms of englishIrregularPast
+// they are a past only where a simple past stands (englishFinitePast,
+// barePast), issue #532. "fell" is the present of "to fell" as well
+// ("Crews fell the trees on Monday"), which no place tells from the past,
+// so it is read as no past at all, as "read" and "set" are.
+var englishPastHomographs = []string{"drew", "spoke", "stole", "woke", "drove", "sang", "rode", "rang", "tore", "found", "saw"}
 
 // englishReportVerbs are the simple pasts of the English verbs of saying,
 // hearing, thinking and knowing a clause can follow without "that", and
@@ -1017,12 +1029,12 @@ func englishReports(words []string, i int, regular bool) bool {
 // participle as well, and the short forms on -ed englishParticiple does not
 // read: like a form on -ed they are a past only where a simple past stands
 // (englishFinitePast) — "We met on Tuesday", not "the lost node" (issue
-// #532).
-var englishIrregularPast = toWordSet(
+// #532). The homographs of englishPastHomographs are read the same way.
+var englishIrregularPast = toWordSet(append([]string{
 	"met", "sent", "built", "lost", "paid", "held", "kept", "left", "told", "sold", "bought", "brought", "caught",
 	"taught", "thought", "meant", "spent", "won", "heard", "said", "slept", "stood", "understood", "stuck", "struck",
 	"hung", "dug", "fought", "sought", "dealt", "lent", "fled", "used", "died", "tied", "owed",
-)
+}, englishPastHomographs...)...)
 
 // pastVerbSet is every verb form the tense detection reads as past, of both
 // languages (yearFollower takes them as words that follow a year).
@@ -1809,11 +1821,20 @@ func (c clauseWords) barePast(s, k, e int) bool {
 	words := c.words[s:e]
 	i := k - s
 	if i <= 0 || !englishParticiple(words[i]) && !englishIrregularPast[words[i]] || !englishBareSubject(words, i) ||
-		!beforeNoNoun(words, i) || englishPlanForms[words[i]] || i+1 < len(words) && englishTargetWords[words[i+1]] ||
-		englishReports(words, i, true) || finiteAfter(words, i) {
+		!beforeNoNoun(words, i) && !c.nameAt(k+1) || englishPlanForms[words[i]] || i+1 < len(words) && englishTargetWords[words[i+1]] ||
+		englishReports(words, i, true) || finiteAfter(words, i) || c.nameAt(k) {
 		return false
 	}
 	return !c.asks[k] || !datePhraseAfter(words, i)
+}
+
+// nameAt reports whether word i of c is written with its capital inside its
+// clause, where English writes a name and no verb: "Meet Drew at the office
+// on Monday" has no simple past, "The pager woke Anna on Thursday" a verb
+// before a name (barePast, issue #532). A question that capitalizes most of
+// its words has no such capitals (caps).
+func (c clauseWords) nameAt(i int) bool {
+	return i > 0 && i < len(c.words) && c.caps[i] && !c.starts[i]
 }
 
 // datePhraseAfter reports whether the words behind words[i] are a phrase of
@@ -1913,7 +1934,9 @@ var (
 // makes it an attribute ("the failed jobs"), which no word between leaves.
 func englishBareSubject(words []string, i int) bool {
 	j := 0
-	if englishDeterminers[words[0]] {
+	// A quantifier opens the noun phrase as a determiner does: "Any thought
+	// on Friday?" is no simple past (issue #532).
+	if englishDeterminers[words[0]] || attributeOpeners[words[0]] {
 		j = 1
 	}
 	if n := i - j; n < 1 || n > 3 {
@@ -1959,8 +1982,10 @@ func beforeNoNoun(words []string, i int) bool {
 }
 
 // englishAfterVerb are adverbs that follow a verb and no noun ("fired twice
-// on Monday", "left early on Friday"), issue #532.
-var englishAfterVerb = toWordSet("twice", "once", "early", "late", "overnight")
+// on Monday", "left early on Friday"), and the pronouns that are its object
+// ("The pager woke everyone on Sunday"), issue #532.
+var englishAfterVerb = toWordSet("twice", "once", "early", "late", "overnight", "everyone", "everybody", "someone",
+	"somebody", "anyone", "anybody", "nobody")
 
 // strongPastForms are the simple past of the strong and mixed German verbs a
 // question asks with; a verb behind "was" ending in one is in the past
