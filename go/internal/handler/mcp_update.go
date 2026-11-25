@@ -401,6 +401,9 @@ func mcpStageUpdate(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, inp
 	if rej := updateBudgetReject(err); rej != nil {
 		return errResultReject(rej), nil, nil
 	}
+	if rej := requestKeyGoneReject(err); rej != nil {
+		return errResultReject(rej), nil, nil // the key was deleted while the request ran (issue #555)
+	}
 	if err != nil {
 		logRequestError(ctx, "mcp: stage pending update failed", "error", err, "write_outcome", statementOutcome(err))
 		return errResult("stage failed: could not persist the staged write"), nil, nil

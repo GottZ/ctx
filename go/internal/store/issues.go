@@ -229,6 +229,11 @@ func InsertIssueBlock(ctx context.Context, tx pgx.Tx, f IssueFields, writableSco
 	if len(f.Content) > maxIssueBodyBytes {
 		return nil, ErrIssueBody
 	}
+	// The request's key, the first lock of the caller's transaction (issue
+	// #555, holdRequestKey; issueTx and the forge's apply open it for this).
+	if err := holdRequestKey(ctx, tx); err != nil {
+		return nil, err
+	}
 	seq, err := nextLocalSeq(ctx, tx, "ctx-issue-seq:"+f.Scope,
 		"scope = $1 AND type_name = '"+IssueTypeName+"'", f.Scope)
 	if err != nil {

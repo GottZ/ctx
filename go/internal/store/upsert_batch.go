@@ -170,6 +170,9 @@ type BatchResult struct {
 // Lock order, the same for every batch, so two batches never wait for each
 // other in opposite orders:
 //
+//  0. a request's key row FOR KEY SHARE (holdRequestKey, issue #555) — a
+//     batch whose key a tenant-delete removed writes nothing; it waits for
+//     nothing but that delete, so it comes before every lock below;
 //  1. the supersedes lock of every scope the batch names — written or not,
 //     an update item's current scope (read without a lock first,
 //     readBatchUpdateTargets) and the scope it moves to — EXCLUSIVE, in sorted
@@ -341,6 +344,10 @@ type batchIdentity struct{ scope, category, title string }
 // with its no-op decision, the writes, then the parent links. The budget is
 // the caller's, spent after this (WriteBudget.spend).
 func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep batchPrep, apiKeyID string, types *blocktype.Set, extra []string) ([]BatchResult, error) {
+	// The request's key before every other lock (issue #555, holdRequestKey).
+	if err := holdRequestKey(ctx, tx); err != nil {
+		return nil, err
+	}
 	current, err := readBatchUpdateTargets(ctx, tx, items)
 	if err != nil {
 		return nil, err
@@ -555,7 +562,7 @@ func (b WriteBudget) book(ctx context.Context, tx pgx.Tx, blockIDs []string, int
 		blockIDs = []string{}
 	}
 	if _, err := tx.Exec(ctx, writeBookingSQL, b.APIKeyID, blockIDs, intents); err != nil {
-		return fmt.Errorf("store: write booking: %w", err)
+		return fmt.Errorf("store: write booking: %w", requestKeyGoneOr(err))
 	}
 	return nil
 }

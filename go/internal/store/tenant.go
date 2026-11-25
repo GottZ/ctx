@@ -171,6 +171,12 @@ var ErrTenantNotFound = errors.New("store: tenant not found")
 // 400 path, reservedSlug) is the caller's job; this enforces only schema gates.
 var ErrTenantSlugExists = errors.New("store: tenant slug already exists")
 
+// ErrTenantPruneIncomplete wraps a failure of PruneTenant after its first
+// step (issue #555): the tenant is offboarding — ctx_auth refuses its keys,
+// sessions and OAuth tokens — and the batches that committed before the
+// failure are deleted; running the delete again finishes it.
+var ErrTenantPruneIncomplete = errors.New("store: the tenant-delete stopped part-way; the tenant stays offboarding")
+
 // ErrScopeExists is returned by AssignTenantScope on a 23505 PK violation on
 // context_tenant_scopes.scope — the scope string is GLOBALLY unique (one scope =
 // one tenant), so a duplicate is the 409 path. The store inserts the scope AS-IS;
@@ -506,7 +512,7 @@ func SetTenantLimitsTx(ctx context.Context, tx pgx.Tx, tenantID string, maxScope
 // lower if lock contention is observed. Not load-bearing for correctness.
 const pruneBatchSize = 2000
 
-// drainBatched runs one bounded DELETE (its last argument is the batch limit)
+// drainBatched runs one bounded DELETE (the batch limit among its arguments)
 // until a round affects 0 rows and returns the rows deleted in total — the
 // batch loop of the tenant prune and of the scope purge's blob drain
 // (scope_purge.go). Each round is its own statement, so no lock or WAL burst
@@ -528,7 +534,9 @@ func drainBatched(ctx context.Context, pool *pgxpool.Pool, sql string, args ...a
 // pruneScopeDeletes lists the scope-carried data tables drained after the
 // dream links and the blocks (pruneScopeBlocks), IN FK ORDER. Each statement
 // is fully static (no string interpolation → no gosec G201). $1 = the
-// tenant's scopes (text[]), $2 = the batch limit. The ctid sub-select is the
+// tenant's scopes (text[]), $2 = the batch limit, $3 = the tenant: a scope of
+// $1 is drained only while it is still the tenant's (issue #555, see
+// "SECOND DELETE" at PruneTenant). The ctid sub-select is the
 // table-agnostic "DELETE a bounded slice" idiom (pruneLinksSQL uses it for
 // context_dream_links, whose PK is composite). ORDER IS LOAD-BEARING:
 //
@@ -554,14 +562,15 @@ func drainBatched(ctx context.Context, pool *pgxpool.Pool, sql string, args ...a
 // to a 300 000-row write log; since 172 every FK on context_blocks has a serving
 // index, pinned by TestBlockForeignKeysHaveAServingIndex.)
 var pruneScopeDeletes = []struct{ table, sql string }{
-	{"context_blobs", `DELETE FROM context_blobs WHERE ctid IN (SELECT ctid FROM context_blobs WHERE scope = ANY($1) LIMIT $2)`},
-	{"context_sources", `DELETE FROM context_sources WHERE ctid IN (SELECT ctid FROM context_sources WHERE scope = ANY($1) LIMIT $2)`},
-	{"context_chat_sessions", `DELETE FROM context_chat_sessions WHERE ctid IN (SELECT ctid FROM context_chat_sessions WHERE scope = ANY($1) LIMIT $2)`},
+	{"context_blobs", `DELETE FROM context_blobs WHERE ctid IN (SELECT ctid FROM context_blobs WHERE scope = ANY($1) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $3::uuid) LIMIT $2)`},
+	{"context_sources", `DELETE FROM context_sources WHERE ctid IN (SELECT ctid FROM context_sources WHERE scope = ANY($1) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $3::uuid) LIMIT $2)`},
+	{"context_chat_sessions", `DELETE FROM context_chat_sessions WHERE ctid IN (SELECT ctid FROM context_chat_sessions WHERE scope = ANY($1) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $3::uuid) LIMIT $2)`},
 }
 
 // pruneSecretsSQL drains the secrets of the tenant's scopes (step 6 and the
-// closing rounds); $1 = the scopes.
-const pruneSecretsSQL = `DELETE FROM context_secrets WHERE scope = ANY($1::text[])`
+// closing rounds); $1 = the scopes, $2 = the tenant (only a scope it still
+// owns, issue #555).
+const pruneSecretsSQL = `DELETE FROM context_secrets WHERE scope = ANY($1::text[]) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $2::uuid)`
 
 // PruneTenant is the full-prune behind tenant-delete (T05b, design/01 §4.3.1): an
 // FK-ordered, batched mass-DELETE of the tenant's scope-carried data, then its
@@ -639,13 +648,40 @@ const pruneSecretsSQL = `DELETE FROM context_secrets WHERE scope = ANY($1::text[
 // authenticated before it can still write after its scope's pass — the
 // closing rounds after the key step (pruneTenantClose) delete what such a
 // write left, under the scopes' supersedes locks, and delete the tenant row
-// in the round that finds nothing. Not covered: a write whose request
-// authenticated before the first step and that commits after the last round
-// — a request in flight for the whole prune: a single store, which takes no
-// supersedes lock, or a block batch that waits for a scope's lock behind the
-// last round (second review of PR #554). Its rows lie in a scope no tenant
-// owns, and the next tenant assigned that scope name owns them
-// (AssignTenantScope adopts the rows of a tenantless scope).
+// in the round that finds nothing. A request in flight for the whole prune —
+// authenticated before the first step, writing after the last round — writes
+// nothing (issue #555): every write of a request that puts a row into a scope
+// holds the key the request authenticated with (holdRequestKey, its
+// transaction's first lock, or the foreign key on the key of the row it
+// inserts), and the key step deletes every key of the tenant after the
+// passes and before the closing rounds. A write that holds its key makes the
+// key step wait and commits before it, so the closing rounds see its rows; a
+// write after the key step finds its key gone (ErrRequestKeyGone). Before,
+// such a write — a single store, which takes no supersedes lock, or a block
+// batch behind the last round's scope locks — stayed in a scope no tenant
+// owned, and the next tenant assigned that scope name owned it
+// (AssignTenantScope adopts the rows of a tenantless scope). The server's own
+// runs carry no key: a run that read the tenant's scopes before the first
+// step and writes after the last round is not covered (the background leaves
+// a tenant that is not active at its next cycle).
+//
+// SECOND DELETE (issue #555): two deletes of one tenant can run side by side
+// (an operator repeats one whose client gave up, or two instances get the
+// same request), and each reads the tenant's scope names at its start. Once
+// one of them has deleted the tenant row, a tenant created with the same slug
+// can be assigned one of those names and write there; the other's statements,
+// keyed by the names it read, deleted that tenant's rows and answered
+// success. Every scope-keyed statement of the prune therefore names only a
+// scope the tenant still owns (the context_tenant_scopes row of the scope with
+// this tenant's id, in the statement itself): a scope that passed to another
+// tenant is not touched, whatever runs beside, and a delete that finds the
+// tenant row gone at its end answers ErrTenantNotFound. The statement's
+// snapshot cannot see a row of the next owner without seeing the scope as
+// that owner's — the next owner gets the scope only after the tenant row,
+// and with it its scope mappings, is gone. Both deletes may run to their end;
+// what they delete is the tenant's either way. No lock spans the delete, so
+// nothing is left held when its instance dies part-way (the tenant stays
+// offboarding and the next delete finishes it).
 //
 // STAGED WRITES (issue #277): step 7 deletes the staged writes of the keys
 // it deletes (context_pending_writes, which hold block content), right after
@@ -661,7 +697,7 @@ const pruneSecretsSQL = `DELETE FROM context_secrets WHERE scope = ANY($1::text[
 // (migrations 160, 161): they run in one transaction stamped with the caller's
 // actor and request id and ALWAYS via='offboarding' — whatever stamp.Via says —
 // so the prune/delete rows name the offboarding, never a psql edit.
-func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp AuditStamp) error {
+func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp AuditStamp) (err error) {
 	// Existence + the malformed/absent → ErrTenantNotFound contract, reusing the
 	// same oracle as GetTenant (no 22P02 → 500 side-channel).
 	if _, err := GetTenant(ctx, pool, tenantID); err != nil {
@@ -671,6 +707,13 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 	if err := markTenantOffboarding(ctx, pool, tenantID); err != nil {
 		return err
 	}
+	// From here on a failure leaves the tenant offboarding and part of it
+	// deleted; the caller says so (issue #555).
+	defer func() {
+		if err != nil && !errors.Is(err, ErrTenantNotFound) {
+			err = fmt.Errorf("%w: %w", ErrTenantPruneIncomplete, err)
+		}
+	}()
 	scopes, err := TenantScopes(ctx, pool, tenantID)
 	if err != nil {
 		return fmt.Errorf("store: prune tenant scopes: %w", err)
@@ -681,11 +724,11 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 	// tables in FK order (skip if the tenant owns no scope — nothing
 	// scope-discriminated can belong to it then).
 	if len(scopes) > 0 {
-		if err := pruneScopeBlocks(ctx, pool, scopes); err != nil {
+		if err := pruneScopeBlocks(ctx, pool, tenantID, scopes); err != nil {
 			return err
 		}
 		for _, d := range pruneScopeDeletes {
-			if _, err := drainBatched(ctx, pool, d.sql, scopes, pruneBatchSize); err != nil {
+			if _, err := drainBatched(ctx, pool, d.sql, scopes, pruneBatchSize, tenantID); err != nil {
 				return fmt.Errorf("store: prune %s: %w", d.table, err)
 			}
 		}
@@ -702,7 +745,7 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 	// while `scopes` still lists the tenant's scopes; ANY of an empty list is a no-op.
 	// The I-I gate proves "PruneTenant -> 0 context_secrets rows of the tenant scope".
 	if len(scopes) > 0 {
-		if _, err := pool.Exec(ctx, pruneSecretsSQL, scopes); err != nil {
+		if _, err := pool.Exec(ctx, pruneSecretsSQL, scopes, tenantID); err != nil {
 			return fmt.Errorf("store: prune tenant secrets: %w", err)
 		}
 	}

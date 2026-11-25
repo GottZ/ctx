@@ -457,6 +457,10 @@ func executeConfirmedBlobOp(ctx context.Context, pool *pgxpool.Pool, ar *auth.Au
 	}
 
 	blob, err := store.UpsertBlob(ctx, pool, cw.Category, cw.Title, cw.Filename, cw.MimeType, cw.Scope, cw.Data, cw.Tags, cw.Metadata, cw.ContextBlockID)
+	if rej := requestKeyGoneReject(err); rej != nil {
+		// The key was deleted after the consume (issue #555): nothing written.
+		return confirmOutcome{Kind: confirmExecRejected, Op: cw.Op, Reject: rej.prefixed(confirmBlobStorePrefix)}
+	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "23") {
 		// An integrity-constraint violation is the request's, answered as the

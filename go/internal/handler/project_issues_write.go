@@ -307,7 +307,9 @@ func logIssueWrite(pool *pgxpool.Pool, apiKeyID, blockID, reqID string) {
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := store.LogAccess(bgCtx, pool, apiKeyID, blockID, "write"); err != nil {
+		// The key gone with its tenant's delete after the write (issue #555):
+		// nothing to book on, no fault.
+		if err := store.LogAccess(bgCtx, pool, apiKeyID, blockID, "write"); err != nil && !errors.Is(err, store.ErrRequestKeyGone) {
 			slog.Error("project-issues: write log", "error", err, "block_id", blockID, "request_id", reqID)
 		}
 	}()

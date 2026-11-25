@@ -216,6 +216,9 @@ func meterBlobWrite(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, ar
 	}
 
 	logID, err := store.LogAccessRef(ctx, pool, ar.ApiKeyID, "", store.ActionBlobWrite)
+	if rej := requestKeyGoneReject(err); rej != nil {
+		return "", rej // the key was deleted while the request ran (issue #555)
+	}
 	if err != nil {
 		logRequestError(ctx, "blob-store: write metering error", "error", err, "request_id", reqID)
 		return "", classInternal.reject("Internal server error")
@@ -369,6 +372,9 @@ func executeBlobWrite(ctx context.Context, pool *pgxpool.Pool, cfg ConfigStore, 
 	metadata := scanBlobPayload(ctx, cfg, in, reqID)
 
 	blob, err := store.UpsertBlob(ctx, pool, in.Category, in.Title, in.Filename, in.MimeType, writeScope, in.Data, in.Tags, metadata, in.ContextBlockID)
+	if rej := requestKeyGoneReject(err); rej != nil {
+		return nil, blobRejection(rej) // the key was deleted while the request ran (issue #555)
+	}
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "23") {

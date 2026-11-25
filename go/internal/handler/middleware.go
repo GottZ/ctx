@@ -697,6 +697,10 @@ func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			}
 
 			ctx := context.WithValue(r.Context(), authResultKey, result)
+			// The request's key travels to every write the request makes
+			// (issue #555, store.WithRequestKey): a write whose key a
+			// tenant-delete removed while the request ran writes nothing.
+			ctx = store.WithRequestKey(ctx, result.ApiKeyID)
 			if csrfSecret != "" {
 				ctx = context.WithValue(ctx, csrfTokenContextKey{}, csrfSecret)
 			}

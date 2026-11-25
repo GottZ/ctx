@@ -916,6 +916,10 @@ func UpsertBlock(ctx context.Context, pool *pgxpool.Pool, category, title, conte
 	u := prepareUpsert(category, title, content, tags, metadata, scope, scopeExplicit, sens, typeName, temporalExtraction(content))
 	var b *Block
 	if err := pgxdb.Write(ctx, pool, pgxdb.At("store: upsert block"), func(tx pgx.Tx) error {
+		// A request's key first (issue #555, holdRequestKey).
+		if err := holdRequestKey(ctx, tx); err != nil {
+			return err
+		}
 		var err error
 		b, err = u.exec(ctx, tx)
 		return err
@@ -3166,7 +3170,7 @@ func LogAccess(ctx context.Context, pool *pgxpool.Pool, apiKeyID, blockID, actio
 		apiKeyID, block, action,
 	)
 	if err != nil {
-		return fmt.Errorf("store: log access: %w", err)
+		return fmt.Errorf("store: log access: %w", requestKeyGoneOr(err))
 	}
 	return nil
 }
@@ -3205,7 +3209,7 @@ func LogAccessRef(ctx context.Context, pool *pgxpool.Pool, apiKeyID, blobID, act
 		apiKeyID, blob, action,
 	).Scan(&logID)
 	if err != nil {
-		return "", fmt.Errorf("store: log access ref: %w", err)
+		return "", fmt.Errorf("store: log access ref: %w", requestKeyGoneOr(err))
 	}
 	return logID, nil
 }

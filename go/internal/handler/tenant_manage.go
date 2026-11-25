@@ -591,6 +591,12 @@ func (h *ManageHandler) handleTenantUpdate(w http.ResponseWriter, r *http.Reques
 // tenant must lift this guard explicitly.
 const defaultTenantID = store.DefaultTenantID
 
+// tenantDeleteIncompleteMsg is the answer of a tenant-delete that failed
+// after its first step (store.ErrTenantPruneIncomplete): the tenant's state
+// and the way on (issue #555).
+const tenantDeleteIncompleteMsg = "delete tenant failed: the tenant is offboarding — its keys, sessions and OAuth tokens are refused — " +
+	"and part of its data is deleted; run tenant-delete again to finish it"
+
 // handleTenantDelete runs the T05b full-prune (store.PruneTenant): the FK-ordered,
 // batched mass-DELETE of the tenant's scope-carried data, its keys, then the
 // tenant row (design/01 §4.3.1). Admin-gated upstream (actionRequiresAdmin); the
@@ -617,9 +623,20 @@ func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "the default tenant cannot be deleted"})
 		return
 	}
+	// The delete runs to its end whatever the client does (issue #555), as a
+	// confirmed purge does: a client that gave up (the CLI's 120 s, a proxy's
+	// read timeout) cancelled the batch in flight and left the tenant
+	// offboarding and half deleted. Its answer goes out through the
+	// keepalive's rolling write deadline (query_keepalive.go): http.Server's
+	// WriteTimeout (120 s) is fixed when the request was read, and a delete at
+	// the target scale runs for minutes. Every batch is its own transaction,
+	// so a delete that ends at shutdown leaves whole batches.
+	ka := armQueryKeepalive(r.Context(), w, false)
+	defer ka.close()
+	w = ka
 	// The key hard-delete is recorded as via='offboarding' with this server-admin
 	// as actor (PruneTenant pins the channel; migration 160).
-	err = store.PruneTenant(r.Context(), h.pool, req.ID, auditStamp(r, ar))
+	err = store.PruneTenant(context.WithoutCancel(r.Context()), h.pool, req.ID, auditStamp(r, ar))
 	if errors.Is(err, store.ErrTenantNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 		return
@@ -628,7 +645,11 @@ func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Reques
 		// PruneTenant deletes in several statements, each committing on its
 		// own: what an earlier one removed is not known here.
 		adminWriteFailed(r, "manage: tenant-delete failed", err, writeUnknown)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "delete tenant failed"})
+		msg := "delete tenant failed"
+		if errors.Is(err, store.ErrTenantPruneIncomplete) {
+			msg = tenantDeleteIncompleteMsg
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": msg})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": req.ID})

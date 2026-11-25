@@ -135,7 +135,8 @@ func CreateSession(ctx context.Context, pool *pgxpool.Pool, scope string, readSc
 		scope, readScopes, createdBy, title)
 	s, err := scanSession(row)
 	if err != nil {
-		return nil, fmt.Errorf("store: create chat session: %w", err)
+		// The creating key is gone (issue #555): its foreign key found no row.
+		return nil, fmt.Errorf("store: create chat session: %w", requestKeyGoneOr(err))
 	}
 	return s, nil
 }

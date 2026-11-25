@@ -414,6 +414,9 @@ func mcpStageStoreBatch(ctx context.Context, cfg MCPConfig, set *blocktype.Set, 
 		return errResultReject(rej), nil, nil
 	}
 	noteToolStaged(ctx, err, true)
+	if rej := requestKeyGoneReject(err); rej != nil {
+		return errResultReject(rej), nil, nil // the key was deleted while the request ran (issue #555)
+	}
 	if err != nil {
 		logRequestError(ctx, "mcp: stage pending batch failed", "error", err, "write_outcome", writeOutcome(err), "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil

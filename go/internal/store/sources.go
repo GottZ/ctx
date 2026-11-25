@@ -106,6 +106,9 @@ func InsertChunk(ctx context.Context, pool *pgxpool.Pool, sourceID string, chunk
 
 	var b *Block
 	err := pgxdb.Write(ctx, pool, pgxdb.At("store: insert chunk"), func(tx pgx.Tx) error {
+		if err := holdRequestKey(ctx, tx); err != nil { // issue #555
+			return err
+		}
 		b = &Block{}
 		var textChanged bool
 		if err := tx.QueryRow(ctx, query, args...).Scan(

@@ -966,7 +966,9 @@ func mcpStoreHandler(cfg MCPConfig) mcp.ToolHandlerFor[storeInput, any] {
 		// while the counter is still in flight. A failed booking is logged, never
 		// fatal: the block is written, and losing an audit row must not turn a
 		// completed write into an error result.
-		if err := store.LogAccess(ctx, cfg.Pool, ar.ApiKeyID, block.ID, "write"); err != nil {
+		// The key gone with its tenant's delete after the write (issue #555):
+		// nothing to book on, no fault.
+		if err := store.LogAccess(ctx, cfg.Pool, ar.ApiKeyID, block.ID, "write"); err != nil && !errors.Is(err, store.ErrRequestKeyGone) {
 			logRequestError(ctx, "mcp: write log error", "error", err, "block_id", block.ID)
 		}
 

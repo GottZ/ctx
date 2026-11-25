@@ -129,6 +129,9 @@ func mcpStageArchive(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, in
 	noteToolBlock(ctx, resolvedID)
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, block.Scope, store.OpArchive, "mcp", canonical, hash, ttl)
 	noteToolStaged(ctx, err, false)
+	if rej := requestKeyGoneReject(err); rej != nil {
+		return errResultReject(rej), nil, nil // the key was deleted while the request ran (issue #555)
+	}
 	if err != nil {
 		logRequestError(ctx, "mcp: stage pending archive failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil

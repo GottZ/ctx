@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"errors"
+
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -27,9 +29,35 @@ const writeConflictMsg = "the write met concurrent changes of the rows it needed
 // resolve, the confirmed archive, the MCP issue tools). Not mapped: the
 // writes of a stage (they write a staged write, no block) and the blob
 // writes (blob store, link and delete) — a deadlock there answers 500.
+//
+// A write whose key a tenant-delete deleted while the request ran
+// (store.ErrRequestKeyGone, issue #555) is the other concurrent change that
+// leaves a write with nothing written; it is answered here too, as
+// requestKeyGoneReject says, so every surface this funnel reaches refuses it
+// alike.
 func writeConflictReject(err error) *writeReject {
+	if rej := requestKeyGoneReject(err); rej != nil {
+		return rej
+	}
 	if err == nil || !store.IsWriteConflict(err) {
 		return nil
 	}
 	return classWriteConflict.reject(writeConflictMsg)
+}
+
+// requestKeyGoneMsg is the one wording of classUnauthorized for a write whose
+// key was deleted while its request ran.
+const requestKeyGoneMsg = "the key this request authenticated with no longer exists — its tenant is being deleted; nothing was written"
+
+// requestKeyGoneReject maps store.ErrRequestKeyGone — the key the request
+// authenticated with was deleted while the request ran; the one path that
+// deletes a key row is a tenant-delete's key step — onto 401 unauthorized: the
+// request's identity is gone, as it would be at its next authentication. A
+// refusal, not a fault: no line of its own, and nothing was written. nil for
+// any other error.
+func requestKeyGoneReject(err error) *writeReject {
+	if err == nil || !errors.Is(err, store.ErrRequestKeyGone) {
+		return nil
+	}
+	return classUnauthorized.reject(requestKeyGoneMsg)
 }

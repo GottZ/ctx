@@ -104,6 +104,9 @@ func (s *chatStageRunner) StageWrite(ctx context.Context, category, title, conte
 	if rej := updateBudgetReject(err); rej != nil {
 		return nil, rej.Msg, nil
 	}
+	if rej := requestKeyGoneReject(err); rej != nil {
+		return nil, rej.Msg, nil // the key was deleted while the request ran (issue #555)
+	}
 	if err != nil {
 		logRequestError(ctx, "chat: stage pending write failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return nil, "", err
@@ -224,6 +227,9 @@ func (s *chatStageRunner) StageUpdate(ctx context.Context, id string, category, 
 	})
 	if rej := updateBudgetReject(err); rej != nil {
 		return nil, rej.Msg, nil
+	}
+	if rej := requestKeyGoneReject(err); rej != nil {
+		return nil, rej.Msg, nil // the key was deleted while the request ran (issue #555)
 	}
 	if err != nil {
 		logRequestError(ctx, "chat: stage pending update failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)

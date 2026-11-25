@@ -281,6 +281,10 @@ func (h *ChatHandler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	} else {
 		sess, err = store.CreateSession(r.Context(), h.pool, ar.HomeScope, ar.ReadScopes, ar.ApiKeyID, "")
 	}
+	if rej := requestKeyGoneReject(err); rej != nil {
+		writeJSONReject(w, rej) // the key was deleted while the request ran (issue #555)
+		return
+	}
 	if err != nil {
 		logRequestError(r.Context(), "chat: load/create session", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "internal error"})

@@ -119,7 +119,9 @@ func StagePendingWrite(ctx context.Context, q pgxdb.Rower, apiKeyID, scope, op, 
 	pw := PendingWrite{APIKeyID: apiKeyID, PayloadHash: payloadHash}
 	err := row.Scan(&pw.ID, &pw.Scope, &pw.Op, &pw.Origin, &pw.Payload, &pw.CreatedAt, &pw.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("pending write: stage: %w", ErrPendingWriteKeyGone)
+		// Also a request whose key is gone (ErrRequestKeyGone, issue #555): the
+		// handlers answer it as every write of such a request.
+		return nil, fmt.Errorf("pending write: stage: %w (%w)", ErrPendingWriteKeyGone, ErrRequestKeyGone)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("pending write: stage: %w", err)

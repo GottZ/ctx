@@ -133,7 +133,9 @@ func PutSecret(ctx context.Context, tx pgx.Tx, name, scope string, nonce, cipher
 		name, scope, ciphertext, nonce, keyVersion, by,
 	).Scan(&created)
 	if err != nil {
-		return false, fmt.Errorf("secrets: put %s: %w", name, err)
+		// A creator key the insert names is gone (issue #555): its tenant is
+		// being deleted, the foreign key's key share found no row.
+		return false, fmt.Errorf("secrets: put %s: %w", name, requestKeyGoneOr(err))
 	}
 	return created, nil
 }

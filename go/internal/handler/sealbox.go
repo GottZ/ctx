@@ -144,6 +144,10 @@ func (h *SecretsHandler) HandlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	created, err := h.putSealed(r, name, nonce, ct, scope)
+	if rej := requestKeyGoneReject(err); rej != nil {
+		writeJSONReject(w, rej) // the key was deleted while the request ran (issue #555)
+		return
+	}
 	if err != nil {
 		h.fail(w, r, "secrets: persist failed", err)
 		return

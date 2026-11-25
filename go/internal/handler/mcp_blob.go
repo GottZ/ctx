@@ -326,6 +326,9 @@ func mcpStageBlobLink(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, i
 	noteToolBlob(ctx, blobID)
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, scope, store.OpBlobLink, "mcp", canonical, hash, ttl)
 	noteToolStaged(ctx, err, false)
+	if rej := requestKeyGoneReject(err); rej != nil {
+		return errResultReject(rej), nil, nil // the key was deleted while the request ran (issue #555)
+	}
 	if err != nil {
 		logRequestError(ctx, "mcp: stage pending blob link failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
@@ -453,6 +456,9 @@ func mcpStageBlobStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, 
 
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, writeScope, store.OpBlobStore, "mcp", canonical, hash, ttl)
 	noteToolStaged(ctx, err, false)
+	if rej := requestKeyGoneReject(err); rej != nil {
+		return errResultReject(rej), nil, nil // the key was deleted while the request ran (issue #555)
+	}
 	if err != nil {
 		logRequestError(ctx, "mcp: stage pending blob write failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil

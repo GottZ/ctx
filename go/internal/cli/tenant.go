@@ -26,6 +26,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -225,16 +226,45 @@ func tenantUpdateCmd(getClient func() (*Client, error)) *cobra.Command {
 	return cmd
 }
 
+// tenantDeleteCallBudget is the client budget of `ctx tenant delete`: none
+// (issue #555), as for `ctx manage purge`. The delete runs to its end on the
+// server whatever the client does, for minutes at the target scale (a
+// 100 000-block tenant took 9 s); the CLI's 120 s ended the request first,
+// and the answer of the delete was lost. A variable for tests.
+var tenantDeleteCallBudget time.Duration
+
+// tenantDeleteLeftMsg is what the CLI adds when the request ended before the
+// answer: the delete is not stopped by that.
+const tenantDeleteLeftMsg = "the delete goes on at the server: the tenant stays offboarding (its keys, sessions and OAuth tokens are refused) " +
+	"until it ends, and `ctx tenant get <id>` answers not found once it has — run the delete again to see how it ended"
+
 func tenantDeleteCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <tenant-id>",
 		Short: "Delete a tenant: full prune of its scoped data and keys (server-admin)",
 		Long: "IRREVERSIBLE full prune: every block in the tenant's scopes, its keys,\n" +
-			"then the tenant row. The default tenant is refused server-side (400).",
+			"then the tenant row. The default tenant is refused server-side (400).\n" +
+			"The call waits for the server's answer without the 120 s client timeout:\n" +
+			"the delete runs to its end on the server either way. From its first step\n" +
+			"the tenant is offboarding and its keys are refused.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			resp, err := tenantManage(getClient, map[string]any{"action": "tenant-delete", "id": args[0]})
+			get := func() (*Client, error) {
+				c, err := getClient()
+				if err != nil {
+					return nil, err
+				}
+				return c.withTimeout(tenantDeleteCallBudget), nil
+			}
+			c, err := get()
 			if err != nil {
+				return err
+			}
+			resp, err := c.Post("manage", map[string]any{"action": "tenant-delete", "id": args[0]})
+			if err != nil {
+				return fmt.Errorf("%w — %s", err, tenantDeleteLeftMsg)
+			}
+			if err := checkEnvelope(resp, envelopeRequired); err != nil {
 				return err
 			}
 			PrintJSON(resp)
