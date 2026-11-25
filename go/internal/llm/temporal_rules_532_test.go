@@ -304,5 +304,6 @@ func TestRules_TheReviewOfIssue532(t *testing.T) {
 		"Heute ist Sonntag, was steht an?":                                   "2026-11-22/today",
 		"Am Montag repariert, am Dienstag wieder kaputt?":                    "2026-11-16/past 2026-11-17/past",
 		"The release slipped to Friday":                                      "2026-11-27/future",
+		"The vendor confirmed the release happens on Friday":                 "2026-11-27/future",
 	})
 }
