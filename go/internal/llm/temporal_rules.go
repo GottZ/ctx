@@ -4201,8 +4201,11 @@ func (c clauseWords) withHolidays(query, lower string, hits []keywordHit, dates 
 func (c clauseWords) dayKeywordPartAt(i int, now time.Time) (TemporalDate, bool) {
 	w := c.words[i]
 	if w == "tonight" || w == "tonight's" {
-		// Behind a determiner it is a word of a name ("The Tonight Show").
-		if i > 0 && !c.starts[i] && englishDeterminers[c.words[i-1]] {
+		// Behind a determiner it is a word of a name ("The Tonight Show"),
+		// and so it is written with its capital beside another such word or
+		// behind a word of nameGenus ("Wer spielt in der Band Tonight
+		// Alive?"), issue #532.
+		if i > 0 && !c.starts[i] && englishDeterminers[c.words[i-1]] || c.nameWordAt(i) {
 			return TemporalDate{}, false
 		}
 		return TemporalDate{Ref: w, Date: fmtDate(now), Dir: "today"}, true
@@ -4224,6 +4227,36 @@ func (c clauseWords) dayKeywordPartAt(i int, now time.Time) (TemporalDate, bool)
 		d.Hour = &h
 	}
 	return d, true
+}
+
+// nameGenus are the words of a kind of work or group a name follows ("die
+// Band Tonight Alive", "the show Tonight Live"), issue #532.
+var nameGenus = toWordSet("band", "show", "album", "song", "film", "movie", "series", "serie", "podcast", "sendung",
+	"gruppe", "track", "single", "tour", "book", "buch", "roman", "novel", "musical", "titel", "title")
+
+// nameWordAt reports whether word i of c, written with its capital inside a
+// sentence, is a word of a name (dayKeywordPartAt): beside another word
+// written so inside the sentence, or behind a word of nameGenus. A sentence
+// that writes all its words with their capital ("Who Is Playing Tonight?")
+// gives no such sign.
+func (c clauseWords) nameWordAt(i int) bool {
+	if !c.capInSentence(i) || !c.capInSentence(i-1) && !c.capInSentence(i+1) && !nameGenus[c.words[i-1]] {
+		return false
+	}
+	ss, se := c.sentenceOf(i)
+	scanned(se - ss)
+	for k := ss; k < se; k++ {
+		if !c.written[k] {
+			return true
+		}
+	}
+	return false
+}
+
+// capInSentence reports whether word i of c is written with its capital and
+// does not start a sentence.
+func (c clauseWords) capInSentence(i int) bool {
+	return i > 0 && i < len(c.words) && !c.sentence[i] && c.written[i]
 }
 
 // lastNightAt is dayKeywordPartAt for "last night" or "letzte Nacht" at word
