@@ -429,6 +429,10 @@ func writeBackendTxFailure(w http.ResponseWriter, r *http.Request, action, stage
 // its column — nulField and int4Field refuse the rest before) is the
 // caller's refusal as well and writes no line (issue #505).
 func writeBackendStoreError(w http.ResponseWriter, r *http.Request, action string, err error) {
+	if rej := requestKeyGoneReject(err); rej != nil {
+		writeJSONReject(w, rej) // the key was deleted while the request ran (issue #555)
+		return
+	}
 	if !errors.Is(err, store.ErrBackendNameExists) && callerDataError(err) == nil {
 		adminWriteFailed(r, "manage: "+action+" failed", err, writeRolledBack)
 	}

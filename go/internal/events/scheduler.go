@@ -577,6 +577,16 @@ func (s *Scheduler) SetProjectHub(hub *ProjectHub) {
 type backgroundTenant struct {
 	scope string
 	owned []string
+	// id is the tenant (issue #555): a run's writes for it hold its gate
+	// (store.WithRunTenant, runCtx), so a run that read the tenant before
+	// its delete writes nothing after the delete's first step. "" in the
+	// tenant-less fallback, which holds nothing.
+	id string
+}
+
+// runCtx is ctx carrying bt's tenant for the run's writes (store.WithRunTenant).
+func (bt backgroundTenant) runCtx(ctx context.Context) context.Context {
+	return store.WithRunTenant(ctx, bt.id)
 }
 
 // backgroundTenants returns the per-tenant resolution context the background
@@ -647,12 +657,12 @@ func (s *Scheduler) backgroundTenantFor(ctx context.Context, t store.Tenant) (ba
 		}
 		// owned may be nil (no rows yet) -> unbounded fallback; or
 		// {private,shared,work} -> clamps to the byte-identical legacy set.
-		return backgroundTenant{scope: store.GlobalScope, owned: owned}, true
+		return backgroundTenant{scope: store.GlobalScope, owned: owned, id: t.ID}, true
 	}
 	if err != nil || len(owned) == 0 {
 		return backgroundTenant{}, false
 	}
-	return backgroundTenant{scope: owned[0], owned: owned}, true
+	return backgroundTenant{scope: owned[0], owned: owned, id: t.ID}, true
 }
 
 // backgroundTenantScopes projects backgroundTenants to the config-resolution
@@ -1095,7 +1105,11 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 
 			slog.Info("scheduler: daily synthesis started", "scope", scope)
 
-			blockID, err := dream.GenerateDailyReport(ctx, s.pool, router, scope)
+			blockID, err := dream.GenerateDailyReport(bt.runCtx(ctx), s.pool, router, scope)
+			if errors.Is(err, store.ErrRunTenantGone) {
+				slog.Info("scheduler: daily synthesis skipped — its tenant is being deleted", "scope", scope)
+				continue
+			}
 			if err != nil {
 				slog.Error("scheduler: daily synthesis failed", "error", err, "scope", scope)
 				continue
@@ -1496,7 +1510,7 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// map reads the liveness row this very attempt just wrote. It takes the
 	// OUTER ctx on purpose — on the timeout path rctx is expired exactly when
 	// the map is due.
-	defer s.renderRootMap(ctx, bt)
+	defer s.renderRootMap(bt.runCtx(ctx), bt)
 	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: overview rebuild gate/resolution/cap/timeout are server-global policy knobs, not tenant-scoped — the B-W6 per-tenant loop varies the SCOPE FILTER per tick, not these.
 	if !cfg.GraphOverview.Enabled {
 		s.stampOverviewAttempt(ctx, bt, "disabled", nil, attemptStart)
@@ -1592,6 +1606,7 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		OverviewTypes: typeSet.OverviewTypes(),
 		MaxNodes:      cfg.GraphOverview.MaxNodes,
 		ScopeFilter:   bt.owned,
+		RunTenant:     bt.id,
 		// S3: der CSR-Loader steuert den Rechenpfad IM KIND, also muss der
 		// Schalter ueber die Prozessgrenze. Default aus.
 		CSRLoader: cfg.GraphOverview.CSRLoader,
@@ -2314,7 +2329,11 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 		}
 		window := store.IntersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
 		slog.Info("scheduler: running digest", "scope", homeScope)
-		res, err := run(ctx, s.pool, s.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, bt.scope, homeScope, window)
+		res, err := run(bt.runCtx(ctx), s.pool, s.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, bt.scope, homeScope, window)
+		if errors.Is(err, store.ErrRunTenantGone) {
+			slog.Info("scheduler: digest skipped — its tenant is being deleted", "scope", homeScope)
+			continue
+		}
 		if res.MapID != "" {
 			maps = append(maps, res.MapID)
 		}

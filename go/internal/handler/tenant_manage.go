@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -487,6 +488,10 @@ func writeCallerDataError(w http.ResponseWriter, status int, err error) bool {
 // database refused a value of the request (writeCallerDataError), else 500
 // with text and the route's failure line (adminWriteFailed).
 func writeAdminFailure(w http.ResponseWriter, r *http.Request, msg string, err error, outcome, text string) {
+	if rej := requestKeyGoneReject(err); rej != nil {
+		writeJSONReject(w, rej) // a refusal, not a fault (issue #555): no line
+		return
+	}
 	if writeCallerDataError(w, http.StatusBadRequest, err) {
 		return
 	}
@@ -607,6 +612,18 @@ const tenantDeleteIncompleteMsg = "delete tenant failed: the tenant is offboardi
 // database as a 22021. Every failure PruneTenant returns is then the
 // server's — 500 with its line — since its statements commit one by one and
 // write_outcome must say that an earlier one may have removed something.
+// tenantDeleteDeadline bounds a tenant-delete that runs detached from its
+// client (issue #555, review round): without it, a delete waiting on a lock
+// that a session elsewhere never gives up ran until the process ended. Fixed,
+// not a policy: a delete that reaches it stops at its next statement, rolls
+// back the batch in flight, leaves the tenant offboarding and answers
+// tenantDeleteIncompleteMsg — and the next tenant-delete goes on from what is
+// left, so no tenant needs a longer one. Measured: 100 000 blocks in 9.1–9.8 s
+// (TestPrune100kPlain), so 10 M blocks in about 16 min; the bound is more than
+// seven times that. A delete holds one pool connection at a time (each batch
+// its own transaction) and no model or write budget. A variable for tests.
+var tenantDeleteDeadline = 2 * time.Hour
+
 func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	if req.ID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "id required"})
@@ -636,7 +653,9 @@ func (h *ManageHandler) handleTenantDelete(w http.ResponseWriter, r *http.Reques
 	w = ka
 	// The key hard-delete is recorded as via='offboarding' with this server-admin
 	// as actor (PruneTenant pins the channel; migration 160).
-	err = store.PruneTenant(context.WithoutCancel(r.Context()), h.pool, req.ID, auditStamp(r, ar))
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), tenantDeleteDeadline)
+	defer cancel()
+	err = store.PruneTenant(dctx, h.pool, req.ID, auditStamp(r, ar))
 	if errors.Is(err, store.ErrTenantNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "tenant not found"})
 		return

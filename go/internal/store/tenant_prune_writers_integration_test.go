@@ -202,11 +202,13 @@ func TestTenantPruneRefusesTheTenantsKeysFromItsStart(t *testing.T) {
 	}
 }
 
-// A request that authenticated before the prune began writes into a scope
-// whose pass has ended (the prune held at its key step): the closing pass
-// takes the row before the tenant row goes, and the prune reports success
-// with nothing left. Both writer kinds: the single store (no scope lock)
-// and the block batch (the scope lock).
+// A writer that holds no gate (an older instance beside this one in a rolling
+// deploy; a request write holds its key's gate and is refused after the key
+// step) writes into a scope whose pass has ended (the prune held at its last
+// pass statement, the projects): the closing pass takes the row before the
+// tenant row goes, and the prune reports success with nothing left. Both
+// writer kinds: the single store (no scope lock) and the block batch (the
+// scope lock).
 func TestTenantPruneClosingPassTakesAnInFlightWrite(t *testing.T) {
 	f := newP547Fixture(t)
 	ctx := context.Background()
@@ -220,12 +222,12 @@ func TestTenantPruneClosingPassTakesAnInFlightWrite(t *testing.T) {
 			if err != nil || !ar.IsValid {
 				t.Fatalf("the key does not authenticate: %+v, %v", ar, err)
 			}
-			h := newPruneHold(func(sql string) bool { return strings.Contains(sql, "DELETE FROM context_api_keys") })
+			h := newPruneHold(func(sql string) bool { return strings.Contains(sql, "DELETE FROM context_projects WHERE tenant_id") })
 			done := make(chan error, 1)
 			go func() { done <- store.PruneTenant(ctx, pruneHoldPool(t, f.dsn, h), tenantID, store.AuditStamp{}) }()
 			waitPruneHeld(t, h, done)
 			if n, _, _, _ := pruneLeftovers(t, f.pool, tenantID, scopes); n != 0 {
-				t.Fatalf("%d blocks left when the prune reached its key step", n)
+				t.Fatalf("%d blocks left when the prune reached its last pass statement", n)
 			}
 			// The request that authenticated before the prune writes now.
 			if kind == "single" {

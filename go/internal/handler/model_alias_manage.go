@@ -635,6 +635,10 @@ func lockedModelAlias(ctx context.Context, w http.ResponseWriter, tx pgx.Tx, id 
 
 // writeModelAliasStoreErr answers a failed store write.
 func writeModelAliasStoreErr(ctx context.Context, w http.ResponseWriter, op string, err error) {
+	if rej := requestKeyGoneReject(err); rej != nil {
+		writeJSONReject(w, rej) // the key was deleted while the request ran (issue #555)
+		return
+	}
 	var (
 		imm     *store.ModelAliasImmutableError
 		granted *store.ModelAliasGrantedError

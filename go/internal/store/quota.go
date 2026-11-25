@@ -87,6 +87,10 @@ func UpsertTenantQuota(ctx context.Context, pool *pgxpool.Pool, scope string, q 
 		by = &stamp.ActorKeyID
 	}
 	err := pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
+		// The request's key first (issue #555, holdRequestKey): the row names a scope.
+		if err := holdRequestKey(ctx, tx); err != nil {
+			return err
+		}
 		if err := stampAudit(ctx, tx, stamp); err != nil {
 			return err
 		}

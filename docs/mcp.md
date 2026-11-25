@@ -132,7 +132,7 @@ confirmed update; the issue tools code
 (`store`, `store_batch`, `update`, `archive`, `guard_resolve`, the issue tools) can answer `write_conflict` for a write that lost to concurrent
 writes of its rows and wrote nothing (issue #547; the same call can be sent again); every tool that puts a row into a
 scope (`store`, `store_batch`, `blob_store`, the issue tools) and every stage answers `unauthorized` when the key the
-call authenticated with was deleted while it ran — its tenant is being deleted — and nothing was written (issue #555); and any tool can
+call authenticated with was deleted, or lost a scope, while it ran — a tenant it belongs to or names is being deleted — and nothing was written (issue #555); and any tool can
 additionally answer `internal` for a server fault (below).
 
 **Server faults.** A panic while a tool call runs — in its handler or anywhere below it

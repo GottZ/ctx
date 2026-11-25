@@ -512,10 +512,10 @@ func SetTenantLimitsTx(ctx context.Context, tx pgx.Tx, tenantID string, maxScope
 // lower if lock contention is observed. Not load-bearing for correctness.
 const pruneBatchSize = 2000
 
-// drainBatched runs one bounded DELETE (the batch limit among its arguments)
+// drainBatched runs one bounded DELETE (its last argument is the batch limit)
 // until a round affects 0 rows and returns the rows deleted in total — the
-// batch loop of the tenant prune and of the scope purge's blob drain
-// (scope_purge.go). Each round is its own statement, so no lock or WAL burst
+// batch loop of the scope purge's blob drain (scope_purge.go; the tenant
+// prune has its own, pruneDrain). Each round is its own statement, so no lock or WAL burst
 // spans the whole drain.
 func drainBatched(ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) (int64, error) {
 	var total int64
@@ -528,6 +528,23 @@ func drainBatched(ctx context.Context, pool *pgxpool.Pool, sql string, args ...a
 			return total, nil
 		}
 		total += tag.RowsAffected()
+	}
+}
+
+// pruneDrain runs one bounded DELETE of the prune ($1 the scopes, $2 the
+// batch limit, $3 the tenant) until a round deletes fewer than
+// pruneBatchSize rows: such a round drained what was there when it ran
+// (issue #555, as pruneScopeBatch). Whatever a writer that holds no gate
+// still writes after it is the closing rounds' (pruneTenantClose).
+func pruneDrain(ctx context.Context, pool *pgxpool.Pool, sql string, scopes []string, tenantID string) error {
+	for {
+		tag, err := pool.Exec(ctx, sql, scopes, pruneBatchSize, tenantID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() < pruneBatchSize {
+			return nil
+		}
 	}
 }
 
@@ -547,9 +564,10 @@ func drainBatched(ctx context.Context, pool *pgxpool.Pool, sql string, args ...a
 //	graph_cluster_member → blocks; context_chat_messages → chat_sessions), so
 //	blocks/blobs/sources/sessions have no hard inter-ordering among themselves.
 //
-// TENANT-DECISION(tenant-prune-order): dream_links→blocks→blobs→sources→
-// chat_sessions, then model keys + model consumers + knowledge keys
-// (context_api_keys; HARD, one tx), then tenant (CASCADE clears tenant_scopes).
+// TENANT-DECISION(tenant-prune-order): model keys + model consumers +
+// knowledge keys (context_api_keys; HARD, one tx — the key step, first since
+// #555), then dream_links→blocks→blobs→sources→chat_sessions→write_log, the
+// sweeps (pruneScopeSweeps), then tenant (CASCADE clears tenant_scopes).
 // Umentscheidbar only if a future migration sets the dream_links FK to ON DELETE
 // CASCADE (then step 1 would be redundant) — while 016:18-19 has no ON DELETE,
 // links-first is forced (design/01 §4.3.1).
@@ -565,32 +583,39 @@ var pruneScopeDeletes = []struct{ table, sql string }{
 	{"context_blobs", `DELETE FROM context_blobs WHERE ctid IN (SELECT ctid FROM context_blobs WHERE scope = ANY($1) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $3::uuid) LIMIT $2)`},
 	{"context_sources", `DELETE FROM context_sources WHERE ctid IN (SELECT ctid FROM context_sources WHERE scope = ANY($1) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $3::uuid) LIMIT $2)`},
 	{"context_chat_sessions", `DELETE FROM context_chat_sessions WHERE ctid IN (SELECT ctid FROM context_chat_sessions WHERE scope = ANY($1) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $3::uuid) LIMIT $2)`},
+	// The guard's and the dream's write log of the scopes (issue #555): the
+	// daily report reads a scope's decisions of the day by scope, and its
+	// rows carry the blocks' titles (idx_write_log_scope serves the scope).
+	{"context_write_log", `DELETE FROM context_write_log WHERE ctid IN (SELECT ctid FROM context_write_log WHERE scope = ANY($1) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $3::uuid) LIMIT $2)`},
 }
 
-// pruneSecretsSQL drains the secrets of the tenant's scopes (step 6 and the
-// closing rounds); $1 = the scopes, $2 = the tenant (only a scope it still
-// owns, issue #555).
-const pruneSecretsSQL = `DELETE FROM context_secrets WHERE scope = ANY($1::text[]) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $2::uuid)`
-
-// PruneTenant is the full-prune behind tenant-delete (T05b, design/01 §4.3.1): an
-// FK-ordered, batched mass-DELETE of the tenant's scope-carried data, then its
-// model consumers and keys (step 7b), then its knowledge keys, then the tenant row. It is deliberately NOT a metadata-only step and NOT a
+// PruneTenant is the full-prune behind tenant-delete (T05b, design/01 §4.3.1): the
+// tenant marked offboarding, then its model consumers and keys (step 7b) and its
+// knowledge keys (the key step, first since #555), then an FK-ordered, batched
+// mass-DELETE of the tenant's scope-carried data and the sweeps of everything
+// else that names its scopes, then the tenant row. It is deliberately NOT a metadata-only step and NOT a
 // single-Tx CASCADE: the data (blocks/links/blobs/sources/sessions) is tenant-LESS
 // (scope-discriminated, Modell C), there is no implicit CASCADE onto
 // context_blocks, and at 1M+ blocks a single mass-DELETE would be an over-large
 // lock + WAL burst (§6.3 N11). An unknown/malformed tenant id is ErrTenantNotFound
 // (404, no oracle) — the prune never pretends to delete a tenant that never was.
 //
-// AUDIT TABLES (context_access_log / context_llm_log / context_write_log) are NOT
-// purged here. They carry the tenant only via api_key_id, and llm_log is a
+// AUDIT TABLES (context_access_log / context_llm_log) are NOT purged here, nor
+// is the audit of every entity but a setting in context_settings_audit (read
+// by tenant id, never by scope). The write log of the tenant's scopes and the
+// audit of its settings are (issue #555): the daily report counts a scope's
+// write log by scope, and GET /api/settings/{key} lists a setting's audit by
+// scope — the next owner of the name would read them. The access and LLM logs
+// carry the tenant only via api_key_id, and llm_log is a
 // TimescaleDB hypertable with NO api_key_id FK at all (verified against the live
 // schema; the design/01 §6.3 prose "ON DELETE SET NULL" is wrong for llm_log). Per
 // §6.3 this is a Policy/Admin-axis decision (N11), NOT to be silently subsumed
 // under the data prune:
 //
 // TENANT-DECISION(prune-audit-tables): named retention boundary (Option B) — audit
-// rows are KEPT; access_log/write_log.api_key_id go NULL via their SET-NULL FK when
-// the keys are hard-deleted; llm_log keeps the (FK-less) api_key_id column and the
+// rows are KEPT (but for the write log of the tenant's scopes and its settings'
+// audit, above); access_log.api_key_id and the write log of other scopes go NULL
+// via their SET-NULL FK when the keys are hard-deleted; llm_log keeps the (FK-less) api_key_id column and the
 // retention janitor (CTX_LLMLOG_RETENTION_DAYS) ages the bodies out. Umentscheidbar
 // to Option A (DELETE ... WHERE api_key_id = ANY(keys) BEFORE the key delete) when
 // a deployment needs a full compliance body-wipe on offboarding — but that is the
@@ -640,30 +665,32 @@ const pruneSecretsSQL = `DELETE FROM context_secrets WHERE scope = ANY($1::text[
 // takes none of them and does not wait for the prune
 // (TestTenantPruneBesideAuthenticatedWriters samples it).
 //
-// WRITERS (issue #547): nothing of the tenant's scopes outlives a prune that
-// reports success. Its first step sets the tenant's status to 'offboarding'
-// (markTenantOffboarding): ctx_auth refuses every key of a tenant that is not
-// active, so a request that starts after it never reaches a write, and the
-// background leaves the tenant's scopes at its next cycle. A request that
-// authenticated before it can still write after its scope's pass — the
-// closing rounds after the key step (pruneTenantClose) delete what such a
-// write left, under the scopes' supersedes locks, and delete the tenant row
-// in the round that finds nothing. A request in flight for the whole prune —
-// authenticated before the first step, writing after the last round — writes
-// nothing (issue #555): every write of a request that puts a row into a scope
-// holds the key the request authenticated with (holdRequestKey, its
-// transaction's first lock, or the foreign key on the key of the row it
-// inserts), and the key step deletes every key of the tenant after the
-// passes and before the closing rounds. A write that holds its key makes the
-// key step wait and commits before it, so the closing rounds see its rows; a
-// write after the key step finds its key gone (ErrRequestKeyGone). Before,
-// such a write — a single store, which takes no supersedes lock, or a block
-// batch behind the last round's scope locks — stayed in a scope no tenant
-// owned, and the next tenant assigned that scope name owned it
-// (AssignTenantScope adopts the rows of a tenantless scope). The server's own
-// runs carry no key: a run that read the tenant's scopes before the first
-// step and writes after the last round is not covered (the background leaves
-// a tenant that is not active at its next cycle).
+// WRITERS (issues #547, #555): nothing that names the tenant or one of its
+// scopes outlives a prune that reports success. Its first step sets the
+// tenant's status to 'offboarding' (markTenantOffboarding): ctx_auth refuses
+// every key of a tenant that is not active, so a request that starts after it
+// never reaches a write, and it takes the run tenant's gate exclusively, so a
+// server run's write for the tenant (the digest, the daily synthesis, the
+// root map, the overview's persist: store.WithRunTenant) commits before it
+// or writes nothing (holdRunTenant). Its key step comes next, before any data
+// pass: it takes the gate of every key it deletes or takes a scope from —
+// the tenant's keys, and every other key that names one of its scopes — and
+// a request write holds its key's gate as its transaction's first lock
+// (holdRequestKey), so the key step waits for the request writes in flight
+// and every one after it finds its key gone or its scope taken and writes
+// nothing (ErrRequestKeyGone). The passes over the tenant's scopes then run
+// beside no writer of the tenant; the closing rounds after them
+// (pruneTenantClose) take what a writer that holds no gate still wrote (an
+// older instance during a rolling deploy) and delete the tenant row in the
+// round that finds nothing. Before #555 the key step came after the passes,
+// so the writers it stopped wrote into scopes whose pass had ended — a block
+// pass beside a writer that wrote faster than a batch came round never ended
+// (the pass ended only on a batch that found nothing) —, and a write in
+// flight for the whole prune stayed in a scope no tenant owned, which the
+// next tenant assigned that scope name owned (AssignTenantScope adopts the
+// rows of a tenantless scope). The scope itself cannot tell a scope just
+// deleted from one never assigned once the tenant row is gone; the writer's
+// key, or its run's tenant, is the mark.
 //
 // SECOND DELETE (issue #555): two deletes of one tenant can run side by side
 // (an operator repeats one whose client gave up, or two instances get the
@@ -719,6 +746,18 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 		return fmt.Errorf("store: prune tenant scopes: %w", err)
 	}
 	scopes = sortedScopes(scopes)
+	// 7b + 7, before every data pass (issue #555): the key step — HARD-delete
+	// the tenant's model keys and model consumers (7b, see above), then its
+	// knowledge keys and every key whose home is one of its scopes (7), and
+	// take its scopes out of every other key. DeleteApiKey is a SOFT delete
+	// (active=false, api_keys.go:102) which would leave the RESTRICT FK and
+	// block step 8 with 23001; so would a deactivated consumer. It waits for
+	// the request writes that hold one of those keys (lockRequestKeysExclusive)
+	// and refuses every one after it (holdRequestKey), so the passes below run
+	// beside no request write of the tenant's scopes ("WRITERS" above).
+	if err := pruneTenantKeys(ctx, pool, tenantID, scopes, stamp); err != nil {
+		return fmt.Errorf("store: prune tenant keys: %w", err)
+	}
 	// 1-2: the dream links and the blocks, per scope and batch under the
 	// scope's supersedes lock (pruneScopeBlocks); 3-5: the other scope-carried
 	// tables in FK order (skip if the tenant owns no scope — nothing
@@ -728,25 +767,31 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 			return err
 		}
 		for _, d := range pruneScopeDeletes {
-			if _, err := drainBatched(ctx, pool, d.sql, scopes, pruneBatchSize, tenantID); err != nil {
+			if err := pruneDrain(ctx, pool, d.sql, scopes, tenantID); err != nil {
 				return fmt.Errorf("store: prune %s: %w", d.table, err)
 			}
 		}
 	}
-	// 6: PROJECT-SECRET-DRAIN (K14, design/02 §5.2): context_secrets rows carry the
-	// scope ONLY as a plain column (no FK to context_blocks / context_tenant_scopes,
-	// 051), so NOTHING cascades them — a naked prune would leave a live forge PAT
-	// (I-F seals it under 'forge.token.<project_id>' in the PROJECT scope, sync.go)
-	// AND any future webhook secret ('webhook.github.<id>', W13) alive in a scope
-	// whose owning tenant is gone. That is a token surviving its tenant's death —
-	// the exact leak §5.2 mandates draining here (the found=false sync gate is the
-	// SECOND line; this delete is the FIRST). Drained by SCOPE (the secret's key), so
-	// it MUST run before the scope teardown (step 8 CASCADE-clears the scope mapping)
-	// while `scopes` still lists the tenant's scopes; ANY of an empty list is a no-op.
-	// The I-I gate proves "PruneTenant -> 0 context_secrets rows of the tenant scope".
+	// 6: the secrets (PROJECT-SECRET-DRAIN, K14, design/02 §5.2 — the I-I gate
+	// proves "PruneTenant -> 0 context_secrets rows of the tenant scope"), the
+	// tenant's configuration, the graph's aggregates and the rows of other
+	// tenants and keys that name one of its scopes (pruneScopeSweeps, issue
+	// #555). Drained by SCOPE, so it MUST run before the scope teardown (step 8
+	// CASCADE-clears the scope mapping) while `scopes` still lists the
+	// tenant's scopes.
+	// One transaction, stamped as the key step is: the configuration deletes
+	// write their audit rows through their tables' triggers, and those rows
+	// name the offboarding.
+	stamp.Via = ViaOffboarding
 	if len(scopes) > 0 {
-		if _, err := pool.Exec(ctx, pruneSecretsSQL, scopes, tenantID); err != nil {
-			return fmt.Errorf("store: prune tenant secrets: %w", err)
+		if err := pgxdb.Write(ctx, pool, pgxdb.At("store: prune sweeps"), func(tx pgx.Tx) error {
+			if err := stampAudit(ctx, tx, stamp); err != nil {
+				return err
+			}
+			_, err := pruneSweep(ctx, tx, tenantID, scopes)
+			return err
+		}); err != nil {
+			return fmt.Errorf("store: prune tenant %w", err)
 		}
 	}
 	// Drain the project register (K14, design/03 §3.1/§7-W4). context_projects is
@@ -757,87 +802,9 @@ func PruneTenant(ctx context.Context, pool *pgxpool.Pool, tenantID string, stamp
 	if _, err := pool.Exec(ctx, `DELETE FROM context_projects WHERE tenant_id = $1::uuid`, tenantID); err != nil {
 		return fmt.Errorf("store: prune tenant projects: %w", err)
 	}
-	// 7b + 7: HARD-delete the tenant's model keys and model consumers (7b, see
-	// above), then its knowledge keys (7). DeleteApiKey is a SOFT delete (active=
-	// false, api_keys.go:102) which would leave the RESTRICT FK and block step 8
-	// with 23001; so would a deactivated consumer.
-	stamp.Via = ViaOffboarding
-	if err := pgxdb.Write(ctx, pool, pgxdb.Stages{}, func(tx pgx.Tx) error {
-		if err := stampAudit(ctx, tx, stamp); err != nil {
-			return err
-		}
-		// Consumer rows first, keys after: the lock order of every consumer
-		// writer (RotateKey/UpdateConsumer lock the consumer FOR UPDATE, then
-		// write its keys; so does the deactivation trigger). Deleting the keys
-		// first would hold them while waiting for a consumer such a writer
-		// holds — a deadlock (40P01) that rolls this step back.
-		if _, err := tx.Exec(ctx,
-			`SELECT 1 FROM context_model_consumers WHERE tenant_id = $1::uuid ORDER BY id FOR UPDATE`, tenantID); err != nil {
-			return fmt.Errorf("model consumers lock: %w", err)
-		}
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM context_model_consumer_grants WHERE consumer_id IN (SELECT id FROM context_model_consumers WHERE tenant_id = $1::uuid)`,
-			tenantID); err != nil {
-			return fmt.Errorf("model grants: %w", err)
-		}
-		// W06-15: the limits rows of the tenant and its consumers, here in
-		// the stamped transaction and before the consumers — a CASCADE
-		// would write their audit rows without the tenant (consumer gone)
-		// or without via (tenant row, step 8, outside this transaction).
-		if err := pruneGatewayLimits(ctx, tx, tenantID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM context_model_keys WHERE consumer_id IN (SELECT id FROM context_model_consumers WHERE tenant_id = $1::uuid)`,
-			tenantID); err != nil {
-			return fmt.Errorf("model keys: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `DELETE FROM context_model_consumers WHERE tenant_id = $1::uuid`, tenantID); err != nil {
-			return fmt.Errorf("model consumers: %w", err)
-		}
-		// The keys, then the staged writes of exactly the keys deleted, in a
-		// statement of its own (issue #277): since migration 194 no foreign
-		// key cascades a key delete onto context_pending_writes. The key
-		// delete takes the row lock the key read of every stage writer
-		// conflicts with (FOR KEY SHARE: a new stage, a re-arm, a consume —
-		// pendingWriteKeySQL): it waits for a writer that holds a key
-		// and then deletes that key, whose stage the next statement — a
-		// snapshot of its own — sees as the writer left it and deletes; a
-		// writer that comes after finds its key gone and writes nothing (the
-		// "snapshot of its own" is READ COMMITTED, which pgxdb.Write pins). So
-		// the stage delete never waits for a stage row: on this hypertable a
-		// delete that waited for an update of its row deleted nothing once
-		// the update committed (PostgreSQL 18.6, TimescaleDB 2.31.0), which
-		// is why the re-arm and the consume hold the key too. Deleting by the
-		// ids the key delete returned, not by the tenant, also takes the
-		// stages of a key minted while the prune ran. The order key rows,
-		// then stage rows is the one the cascade had and the one every stage
-		// writer takes.
-		rows, err := tx.Query(ctx, `DELETE FROM context_api_keys WHERE tenant_id = $1::uuid RETURNING id::text`, tenantID)
-		if err != nil {
-			return err
-		}
-		keyIDs, err := pgx.CollectRows(rows, pgx.RowTo[string])
-		if err != nil {
-			return err
-		}
-		if len(keyIDs) == 0 {
-			// No key, no stage (issue #547): an empty id list deletes
-			// nothing and would still lock the hypertable — and wait for
-			// whoever holds it.
-			return nil
-		}
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM context_pending_writes WHERE api_key_id = ANY($1::uuid[])`, keyIDs); err != nil {
-			return fmt.Errorf("pending writes: %w", err)
-		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("store: prune tenant keys: %w", err)
-	}
 	// 8: the closing rounds over the scopes, then the tenant row in the round
 	// that finds nothing; ON DELETE CASCADE clears context_tenant_scopes.
-	return pruneTenantClose(ctx, pool, tenantID, scopes)
+	return pruneTenantClose(ctx, pool, tenantID, scopes, stamp)
 }
 
 // UpdateTenant patches status and/or display_name (empty string = leave

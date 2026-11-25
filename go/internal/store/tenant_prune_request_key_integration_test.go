@@ -45,7 +45,7 @@ func (w *requestKeyWriters) start(t *testing.T, f *p547Fixture, key string, scop
 	if err != nil || !ar.IsValid {
 		t.Fatalf("authenticate before the delete: %+v, %v", ar, err)
 	}
-	rctx := store.WithRequestKey(ctx, ar.ApiKeyID)
+	rctx := requestCtx(ctx, ar)
 	budget := &store.WriteBudget{APIKeyID: ar.ApiKeyID, Limit: 0}
 	loop := func(name string, write func(i int) error) {
 		w.wg.Add(1)
@@ -143,6 +143,12 @@ func TestTenantPruneBesideRequestsInFlight(t *testing.T) {
 		runs, seed, took.Round(time.Millisecond), written, refused)
 }
 
+// requestCtx is the context the authentication middleware gives a request
+// of ar (handler.Auth): its key and the scopes the key granted.
+func requestCtx(ctx context.Context, ar *auth.AuthResult) context.Context {
+	return store.WithRequestKey(ctx, store.RequestKey{ID: ar.ApiKeyID, HomeScope: ar.HomeScope, AllowedScopes: ar.AllowedScopes, WriteScopes: ar.WriteScopes})
+}
+
 func envInt(name string, def int) int {
 	if n, err := strconv.Atoi(os.Getenv(name)); err == nil && n > 0 {
 		return n
@@ -174,7 +180,7 @@ func TestRequestKeyHoldLockPairs(t *testing.T) {
 		if err != nil || !ar.IsValid {
 			t.Fatalf("authenticate: %v", err)
 		}
-		return store.WithRequestKey(ctx, ar.ApiKeyID), ar.ApiKeyID
+		return requestCtx(ctx, ar), ar.ApiKeyID
 	}
 	both := func(a, b func() error) (error, error) {
 		var wg sync.WaitGroup
@@ -190,6 +196,7 @@ func TestRequestKeyHoldLockPairs(t *testing.T) {
 
 	t.Run("writers of two keys × tenant-delete", func(t *testing.T) {
 		var refusals int64
+		var longest time.Duration
 		for r := range rounds {
 			tenantID, scopes, key1 := pruneWritersTenant(t, f, fmt.Sprintf("kp%03d", r), 2)
 			_, key2, err := store.CreateApiKey(ctx, f.pool, "second key", scopes[0], scopes, tenantID)
@@ -262,7 +269,18 @@ func TestRequestKeyHoldLockPairs(t *testing.T) {
 				}
 				return err
 			})
-			perr := store.PruneTenant(ctx, f.pool, tenantID, store.AuditStamp{})
+			// A round is bounded: on the CI's two cores the delete of the
+			// first form of #555 stood 10 min in its block pass beside these
+			// writers (the pass ended only on a batch that found nothing, and
+			// the single store wrote the rows again faster than a batch came
+			// round; the key step, which would have stopped the writers, came
+			// after the passes).
+			pctx, cancel := context.WithTimeout(ctx, time.Minute)
+			start := time.Now()
+			perr := store.PruneTenant(pctx, f.pool, tenantID, store.AuditStamp{})
+			took := time.Since(start)
+			cancel()
+			longest = max(longest, took)
 			close(stop)
 			wg.Wait()
 			if msg := failed.Load(); msg != nil {
@@ -276,7 +294,7 @@ func TestRequestKeyHoldLockPairs(t *testing.T) {
 			}
 			refusals += refused.Load()
 		}
-		t.Logf("%d rounds, %d writes refused after the key step", rounds, refusals)
+		t.Logf("%d rounds, %d writes refused after the key step, the longest delete took %s", rounds, refusals, longest.Round(time.Millisecond))
 	})
 
 	t.Run("writer × AssignTenantScope", func(t *testing.T) {

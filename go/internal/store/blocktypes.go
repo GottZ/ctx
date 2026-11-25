@@ -203,6 +203,10 @@ func CreateBlockType(ctx context.Context, pool *pgxpool.Pool, in BlockTypeWrite,
 	if err := pgxdb.Write(ctx, pool,
 		pgxdb.Stages{Begin: "store: create block type begin", Commit: "store: create block type commit"},
 		func(tx pgx.Tx) error {
+			// The request's key first (issue #555, holdRequestKey): the row names a scope.
+			if err := holdRequestKey(ctx, tx); err != nil {
+				return err
+			}
 			if err := stampBlockTypeTx(ctx, tx, by, requestID); err != nil {
 				return err
 			}

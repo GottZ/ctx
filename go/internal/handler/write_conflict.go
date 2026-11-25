@@ -47,7 +47,7 @@ func writeConflictReject(err error) *writeReject {
 
 // requestKeyGoneMsg is the one wording of classUnauthorized for a write whose
 // key was deleted while its request ran.
-const requestKeyGoneMsg = "the key this request authenticated with no longer exists — its tenant is being deleted; nothing was written"
+const requestKeyGoneMsg = "the key this request authenticated with was deleted, or lost a scope, while the request ran — a tenant it belongs to or names is being deleted; nothing was written"
 
 // requestKeyGoneReject maps store.ErrRequestKeyGone — the key the request
 // authenticated with was deleted while the request ran; the one path that

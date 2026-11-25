@@ -697,10 +697,16 @@ func Auth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			}
 
 			ctx := context.WithValue(r.Context(), authResultKey, result)
-			// The request's key travels to every write the request makes
-			// (issue #555, store.WithRequestKey): a write whose key a
-			// tenant-delete removed while the request ran writes nothing.
-			ctx = store.WithRequestKey(ctx, result.ApiKeyID)
+			// The request's key and the scopes it granted travel to every
+			// write the request makes (issue #555, store.WithRequestKey): a
+			// write whose key a tenant-delete removed, or took a scope from,
+			// while the request ran writes nothing.
+			ctx = store.WithRequestKey(ctx, store.RequestKey{
+				ID:            result.ApiKeyID,
+				HomeScope:     result.HomeScope,
+				AllowedScopes: result.AllowedScopes,
+				WriteScopes:   result.WriteScopes,
+			})
 			if csrfSecret != "" {
 				ctx = context.WithValue(ctx, csrfTokenContextKey{}, csrfSecret)
 			}

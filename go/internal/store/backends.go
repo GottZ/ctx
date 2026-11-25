@@ -83,6 +83,10 @@ var ErrBackendNameExists = errors.New("already exists")
 // CreateBackend inserts one pool row and returns its id. The unique name
 // constraint surfaces as a caller-ready error (ErrBackendNameExists).
 func CreateBackend(ctx context.Context, tx pgx.Tx, b *backends.Backend, by *string) (string, error) {
+	// The request's key first (issue #555, holdRequestKey): the row names a scope.
+	if err := holdRequestKey(ctx, tx); err != nil {
+		return "", err
+	}
 	if err := setTxActor(ctx, tx, by); err != nil {
 		return "", err
 	}

@@ -2,18 +2,19 @@
 
 // Issue #555, point 1 (found by the review of the wave): the key step of a
 // tenant-delete against two writers of two keys of the tenant, in one fixed
-// interleaving. The delete has passed the tenant's scope and stands before
-// its key step; a block Y was written into the scope after the pass (a
-// request in flight). Writer "late" (a single update of Y, UpdateBlockBooked:
-// the row first, its key's share last, through the booking's foreign key)
-// stands before its booking, holding Y. Writer "first" (a single store of
-// Y's identity, UpsertBlock: its key's share first) holds its key and stands
-// at its next statement. Then: the key step runs and waits, the first writer
-// goes on and waits for Y, the late writer goes on and books. With the
-// update's key share taken last, through its booking's foreign key, the key
-// step (holding the late key's row, deleted) waited for the first writer's
-// key, the first writer for Y, and the late writer for its key: 40P01, and
-// the delete stopped part-way. The booked update holds its key first now.
+// interleaving. A block Y of the tenant's scope; writer "late" (a single
+// update of Y, UpdateBlockBooked: its key's gate first, then the row Y, its
+// key's row last through the booking's foreign key) stands before its
+// booking, holding Y; writer "first" (a single store of Y's identity,
+// UpsertBlock) holds its key's gate and stands at its next statement. Then:
+// the delete's key step asks for both gates and waits, the first writer goes
+// on and waits for Y, the late writer goes on and books. In the first form of
+// #555 the update took its key's share last, after Y: the key step (holding
+// the late key's row, deleted) waited for the first writer's key, the first
+// writer for Y, and the late writer for its key — 40P01, and the delete
+// stopped part-way. Every request write takes its key's gate first now, and
+// the key step takes the gates before any row, so it waits for both writers
+// and nothing waits for it.
 package store_test
 
 import (
@@ -21,7 +22,6 @@ import (
 	"errors"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -73,41 +73,30 @@ func TestTenantDeleteKeyStepBesideABookedUpdate(t *testing.T) {
 			if !lateIsFirstKey {
 				late, first = ar2, ar1
 			}
-			cLate, cFirst := store.WithRequestKey(ctx, late.ApiKeyID), store.WithRequestKey(ctx, first.ApiKeyID)
+			cLate, cFirst := requestCtx(ctx, late), requestCtx(ctx, first)
 			f.block(t, scopes[0], "kscycle seed")
 
-			hp := newPruneHold(func(sql string) bool { return strings.HasPrefix(sql, "DELETE FROM context_api_keys") })
 			hl := newPruneHold(func(sql string) bool { return strings.HasPrefix(sql, "INSERT INTO context_access_log") })
-			var sawHold atomic.Bool
-			hf := newPruneHold(func(sql string) bool {
-				if strings.Contains(sql, "FROM context_api_keys WHERE id = $1::uuid FOR KEY SHARE") {
-					sawHold.Store(true)
-					return false
-				}
-				return sawHold.Load()
-			})
-			pp, pl, pf := pruneHoldPool(t, f.dsn, hp), pruneHoldPool(t, f.dsn, hl), pruneHoldPool(t, f.dsn, hf)
+			// The first writer's gate is a batch (not traced as a query): the
+			// first statement after its BEGIN is the one after the gate.
+			hf := newPruneHold(func(sql string) bool { return !strings.HasPrefix(strings.ToLower(sql), "begin") })
+			pl, pf := pruneHoldPool(t, f.dsn, hl), pruneHoldPool(t, f.dsn, hf)
 			var rel sync.Map
 			release := func(h *pruneHold) {
 				if _, done := rel.LoadOrStore(h, true); !done {
 					close(h.release)
 				}
 			}
-			t.Cleanup(func() { release(hp); release(hl); release(hf) }) // runs before the pools close
+			t.Cleanup(func() { release(hl); release(hf) }) // runs before the pools close
 
-			// 1. The delete stands before its key step.
-			pruneDone := make(chan error, 1)
-			go func() { pruneDone <- store.PruneTenant(ctx, pp, tenantID, store.AuditStamp{}) }()
-			waitPruneHeld(t, hp, pruneDone)
-
-			// 2. Y, written after the pass by a request of the late key.
+			// 1. Y, written by a request of the late key.
 			const title = "kscycle y"
 			y, err := store.UpsertBlock(cLate, f.pool, "learnings", title, "y before", nil, nil, scopes[0], true, store.SensitivityWrite{}, "")
 			if err != nil {
 				t.Fatalf("Y: %v", err)
 			}
 
-			// 3. The late writer holds Y and stands before its booking.
+			// 2. The late writer holds its gate and Y and stands before its booking.
 			lateDone := make(chan error, 1)
 			go func() {
 				content := "y updated"
@@ -116,7 +105,7 @@ func TestTenantDeleteKeyStepBesideABookedUpdate(t *testing.T) {
 			}()
 			waitPruneHeld(t, hl, lateDone)
 
-			// 4. The first writer holds its key and stands at its next statement.
+			// 3. The first writer holds its gate and stands at its next statement.
 			firstDone := make(chan error, 1)
 			go func() {
 				_, err := store.UpsertBlock(cFirst, pf, "learnings", title, "y stored", nil, nil, scopes[0], true, store.SensitivityWrite{}, "")
@@ -125,22 +114,23 @@ func TestTenantDeleteKeyStepBesideABookedUpdate(t *testing.T) {
 			select {
 			case <-hf.held:
 			case err := <-firstDone:
-				t.Fatalf("the first writer ended (%v) before it was held: it holds no key share first", err)
+				t.Fatalf("the first writer ended (%v) before it was held", err)
 			case <-time.After(10 * time.Second):
-				t.Fatalf("the first writer did not reach the statement after its key share")
+				t.Fatalf("the first writer did not reach the statement after its gate")
 			}
 
-			// 5. The key step runs and waits.
-			release(hp)
+			// 4. The delete's key step asks for both gates and waits.
+			pruneDone := make(chan error, 1)
+			go func() { pruneDone <- store.PruneTenant(ctx, f.pool, tenantID, store.AuditStamp{}) }()
 			if !waitLockWaiters(f.pool, 1) {
 				t.Fatalf("the key step did not wait")
 			}
-			// 6. The first writer goes on and waits for Y.
+			// 5. The first writer goes on and waits for Y.
 			release(hf)
 			if !waitLockWaiters(f.pool, 2) {
 				t.Logf("the first writer did not wait for Y (it may have gone through)")
 			}
-			// 7. The late writer books.
+			// 6. The late writer books.
 			began := time.Now()
 			release(hl)
 			var perr, lerr, ferr error
@@ -160,7 +150,7 @@ func TestTenantDeleteKeyStepBesideABookedUpdate(t *testing.T) {
 				}
 			}
 			took := time.Since(began)
-			t.Logf("%s: after %s — tenant-delete: %v (40P01 %v); late writer (update, key share last): %v (40P01 %v); first writer (store, key share first): %v (40P01 %v)",
+			t.Logf("%s: after %s — tenant-delete: %v (40P01 %v); late writer (booked update): %v (40P01 %v); first writer (store): %v (40P01 %v)",
 				name, took.Round(time.Millisecond), perr, keyStepIs40P01(perr), lerr, keyStepIs40P01(lerr), ferr, keyStepIs40P01(ferr))
 			if perr != nil {
 				if err := store.PruneTenant(ctx, f.pool, tenantID, store.AuditStamp{}); err != nil {

@@ -5,9 +5,12 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -140,5 +143,101 @@ func TestTenantDeleteRunsOnWhenItsClientLeaves(t *testing.T) {
 	t.Logf("after the client left: answer %d %.200q; tenant rows %d, blocks in its scope %d", rec.Code, rec.Body.String(), tenants, blocks)
 	if tenants != 0 || blocks != 0 {
 		t.Errorf("a delete whose client left stopped part-way: tenant rows %d, blocks %d — want it run to its end", tenants, blocks)
+	}
+}
+
+// TestTenantDeleteAnswersPastTheWriteTimeout: a delete that runs longer than
+// the server's write timeout (here 1 s, in production 120 s) still reaches
+// its client: the keepalive rolls the write deadline while the delete works.
+// Without it the answer was written after the deadline and the client read a
+// closed connection.
+func TestTenantDeleteAnswersPastTheWriteTimeout(t *testing.T) {
+	shrinkHeartbeat(t, 100*time.Millisecond, time.Second)
+	plain, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	admin, _ := kaServerAdmin(ctx, t, plain)
+	setup := mcHandler(t, plain, false, false)
+	tn := auMakeTenant(ctx, t, plain, setup, admin, "i555-wt")
+	if _, err := store.UpsertBlock(ctx, plain, "learnings", "i555 wt", "content", nil, nil, tn.scope, true, store.SensitivityWrite{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	hold := &statementHold{match: func(sql string) bool { return strings.Contains(sql, "DELETE FROM context_dream_links WHERE ctid IN") },
+		held: make(chan struct{}), release: make(chan struct{})}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = hold
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(traced.Close)
+	h := mcHandler(t, traced, false, false)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{WriteTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := context.WithValue(context.WithValue(r.Context(), authResultKey, admin), requestIDKey, "0555-wt")
+		h.HandleManage(w, r.WithContext(c))
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	go func() { <-hold.held; time.Sleep(3 * time.Second); close(hold.release) }()
+	body, _ := json.Marshal(map[string]any{"action": "tenant-delete", "id": tn.id})
+	start := time.Now()
+	resp, err := http.Post("http://"+ln.Addr().String()+"/api/manage", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("a delete of %s past the 1 s write timeout: %v — its answer was lost", time.Since(start).Round(time.Millisecond), err)
+	}
+	b, rerr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if rerr != nil || resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"success":true`) {
+		t.Fatalf("a delete of %s past the 1 s write timeout: %d %q (%v), want 200 success", time.Since(start).Round(time.Millisecond), resp.StatusCode, b, rerr)
+	}
+}
+
+// TestTenantDeleteStopsAtItsDeadline: a delete that runs past its deadline
+// (here 300 ms; in production tenantDeleteDeadline) stops at its next
+// statement, answers that the tenant is offboarding and the delete has to run
+// again, and the next delete finishes it.
+func TestTenantDeleteStopsAtItsDeadline(t *testing.T) {
+	plain, dsn := testdb.SetupTestDBWithDSN(t)
+	ctx := context.Background()
+	admin, _ := kaServerAdmin(ctx, t, plain)
+	setup := mcHandler(t, plain, false, false)
+	tn := auMakeTenant(ctx, t, plain, setup, admin, "i555-dl")
+	if _, err := store.UpsertBlock(ctx, plain, "learnings", "i555 dl", "content", nil, nil, tn.scope, true, store.SensitivityWrite{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	orig := tenantDeleteDeadline
+	tenantDeleteDeadline = 300 * time.Millisecond
+	t.Cleanup(func() { tenantDeleteDeadline = orig })
+	hold := &statementHold{match: func(sql string) bool { return strings.Contains(sql, "DELETE FROM context_dream_links WHERE ctid IN") },
+		held: make(chan struct{}), release: make(chan struct{})}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = hold
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(traced.Close)
+	go func() { <-hold.held; time.Sleep(time.Second); close(hold.release) }()
+	status, resp := kaManage(t, mcHandler(t, traced, false, false), admin, "0555-dl", map[string]any{"action": "tenant-delete", "id": tn.id})
+	msg, _ := resp["error"].(string)
+	if status != http.StatusInternalServerError || !strings.Contains(msg, "offboarding") || !strings.Contains(msg, "run tenant-delete again") {
+		t.Fatalf("a delete past its deadline: %d %v, want 500 naming the state and the way on", status, resp)
+	}
+	var st string
+	if err := plain.QueryRow(ctx, `SELECT status FROM context_tenants WHERE id = $1::uuid`, tn.id).Scan(&st); err != nil || st != "offboarding" {
+		t.Fatalf("tenant after the deadline: %q (%v), want offboarding", st, err)
+	}
+	tenantDeleteDeadline = orig
+	if status, resp := kaManage(t, setup, admin, "0555-dl2", map[string]any{"action": "tenant-delete", "id": tn.id}); status != http.StatusOK {
+		t.Fatalf("the next delete: %d %v", status, resp)
 	}
 }

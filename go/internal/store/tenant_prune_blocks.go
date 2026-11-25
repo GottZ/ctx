@@ -51,18 +51,14 @@ const pruneClosureLinksSQL = `DELETE FROM context_dream_links WHERE source_block
 const pruneBlocksSQL = `DELETE FROM context_blocks WHERE id = ANY($1::uuid[])`
 
 // pruneClosingRounds bounds the closing rounds of a prune (pruneTenantClose)
-// that still find rows. A fixed bound, not a policy: a round finds rows only
-// when a write committed in the tenant's scopes after the round before it,
-// or when what was written after its scope's pass is more than one round
-// deletes (pruneBatchSize per table); since the prune's first step refuses
-// the tenant's keys (markTenantOffboarding) and its key step removes them,
-// only a request that held its key at the key step can still have written
-// — once (holdRequestKey). Rows that keep arriving round after round come
-// from a writer without a key (a run inside the process), which a prune
-// cannot outrun: it fails then, the tenant stays offboarding, and a later
-// run finishes. Before it fails, the prune counts what is left: a backlog
-// that the last round drained is no reason to fail (issue #555), and the
-// number the error names is what is left.
+// that still find rows. A fixed bound, not a policy: since the key step runs
+// before the passes and the first step holds off the server runs (issue
+// #555), a round finds rows only when a writer that holds no gate wrote into
+// the tenant's scopes after the passes (an older instance during a rolling
+// deploy) — a writer the prune cannot outrun: it fails then, the tenant stays
+// offboarding, and a later run finishes. Before it fails, the prune counts
+// what is left: a round that leaves nothing is followed by one more (up to
+// twice the bound), and the number the error names is what is left.
 const pruneClosingRounds = 10
 
 // pruneScopeBlocks deletes the dream links and the blocks of the tenant's
@@ -88,21 +84,21 @@ const pruneClosingRounds = 10
 // deletes, under that scope's lock (pruneBlockBatch).
 func pruneScopeBlocks(ctx context.Context, pool *pgxpool.Pool, tenantID string, scopes []string) error {
 	for {
-		links, err := pruneScopeBatch(ctx, pool, tenantID, scopes, nil)
+		_, more, err := pruneScopeBatch(ctx, pool, tenantID, scopes, nil)
 		if err != nil {
 			return fmt.Errorf("store: prune context_dream_links: %w", err)
 		}
-		if links == 0 {
+		if !more {
 			break
 		}
 	}
 	for _, scope := range scopes {
 		for {
-			n, err := pruneScopeBatch(ctx, pool, tenantID, scopes, []string{scope})
+			_, more, err := pruneScopeBatch(ctx, pool, tenantID, scopes, []string{scope})
 			if err != nil {
 				return fmt.Errorf("store: prune context_blocks: %w", err)
 			}
-			if n == 0 {
+			if !more {
 				break
 			}
 		}
@@ -112,37 +108,51 @@ func pruneScopeBlocks(ctx context.Context, pool *pgxpool.Pool, tenantID string, 
 
 // pruneScopeBatch runs one batch of pruneScopeBlocks in its own transaction
 // (pruneBatchTx), again with the scopes of another tenant's children it met
-// (writeSupersedesSourceScopes). It returns the rows it deleted (0 ends the
-// pass).
-func pruneScopeBatch(ctx context.Context, pool *pgxpool.Pool, tenantID string, scopes, blockScopes []string) (int64, error) {
+// (writeSupersedesSourceScopes). It returns the rows it deleted and whether
+// the pass goes on: a batch that found fewer rows than pruneBatchSize drained
+// what was there when it looked, and ends the pass (issue #555). Before, the
+// pass ended only on a batch that found none — beside a writer that wrote
+// into the scope faster than a batch came round (a request writer of the
+// tenant that took no part in the delete: on two cores the CI's pair test
+// stood 10 min in one pass, deleting the 6 to 8 rows its writers wrote again)
+// it never ended. Since the key step runs before the passes, no request
+// write and no run write of the tenant comes after them; the closing rounds
+// (pruneTenantClose) take whatever still does.
+func pruneScopeBatch(ctx context.Context, pool *pgxpool.Pool, tenantID string, scopes, blockScopes []string) (int64, bool, error) {
 	var n int64
+	var more bool
 	err := writeSupersedesSourceScopes(ctx, pool, pgxdb.At("store: prune batch"), func(tx pgx.Tx, extra []string) error {
 		var err error
-		n, err = pruneBatchTx(ctx, tx, tenantID, scopes, blockScopes, extra)
+		n, more, err = pruneBatchTx(ctx, tx, tenantID, scopes, blockScopes, extra)
 		return err
 	})
-	return n, err
+	return n, more, err
 }
 
 // pruneBatchTx is one batch inside its transaction: the supersedes locks of
 // scopes and extra in one sorted pass, then up to pruneBatchSize of the
 // scopes' dream links; with blockScopes set and no link left, a block batch
-// of those scopes (pruneBlockBatch). It returns the rows it deleted.
-func pruneBatchTx(ctx context.Context, tx pgx.Tx, tenantID string, scopes, blockScopes, extra []string) (int64, error) {
+// of those scopes (pruneBlockBatch). It returns the rows it deleted and
+// whether a further batch may find more: a full batch of links or blocks, or
+// links met in a block round (their blocks come in the next).
+func pruneBatchTx(ctx context.Context, tx pgx.Tx, tenantID string, scopes, blockScopes, extra []string) (int64, bool, error) {
 	held := sortedScopes(append(slices.Clone(scopes), extra...))
 	for _, scope := range held {
 		if err := LockSupersedesScope(ctx, tx, scope); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 	}
 	tag, err := tx.Exec(ctx, pruneLinksSQL, scopes, pruneBatchSize, tenantID)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	if n := tag.RowsAffected(); n > 0 || len(blockScopes) == 0 {
-		return n, nil
+	if n := tag.RowsAffected(); len(blockScopes) == 0 {
+		return n, n >= pruneBatchSize, nil
+	} else if n > 0 {
+		return n, true, nil
 	}
-	return pruneBlockBatch(ctx, tx, tenantID, scopes, blockScopes, held)
+	n, err := pruneBlockBatch(ctx, tx, tenantID, scopes, blockScopes, held)
+	return n, n >= pruneBatchSize, err
 }
 
 // pruneBlockBatch deletes up to pruneBatchSize blocks of blockScopes and
@@ -231,43 +241,33 @@ func pruneDetachForeignChildren(ctx context.Context, tx pgx.Tx, closure, scopes,
 	return err
 }
 
-// markTenantOffboarding is the prune's first step (issue #547): the tenant's
-// status becomes 'offboarding', which ctx_auth refuses for every key, session
-// and OAuth token of the tenant from the next request on (the status gate of
-// migration 060), and which takes the tenant's scopes out of the background
-// runs at their next cycle (Scheduler.backgroundTenants). So no request that
-// starts after it writes into a scope the prune has passed; one that
-// authenticated before it is what the closing rounds (pruneTenantClose) are
-// for. The keys stay until the key step: the staged writes are deleted by the
-// ids that step returns.
-func markTenantOffboarding(ctx context.Context, pool *pgxpool.Pool, tenantID string) error {
-	if _, err := pool.Exec(ctx,
-		`UPDATE context_tenants SET status = 'offboarding', updated_at = now() WHERE id = $1::uuid AND status <> 'offboarding'`,
-		tenantID); err != nil {
-		return fmt.Errorf("store: prune tenant: mark offboarding: %w", err)
-	}
-	return nil
-}
-
 // pruneTenantClose is the prune's last step (issue #547): closing rounds over
 // all the tenant's scopes, each a transaction under their supersedes locks
-// (sorted), that delete what was written into them since their pass — the
-// dream links, the blocks, the blobs, sources and chat sessions, up to
-// pruneBatchSize each, and the secrets — and, in the round that finds
-// nothing, the tenant row (ON DELETE CASCADE takes its scope mappings), so no
-// row of a scope outlives a prune that reports success. A request that
-// authenticated before markTenantOffboarding and writes after its scope's
-// pass leaves such a row; its write held its key, so it committed before the
-// key step and every closing round after it sees the row. A request whose
-// write comes after the key step writes nothing (holdRequestKey).
+// (sorted), stamped as the key step is, that delete what was written into
+// them since their pass — the dream links, the blocks, the blobs, sources,
+// chat sessions and write log, up to pruneBatchSize each, and the sweeps
+// (pruneScopeSweeps) — and, in the round that finds nothing, the block
+// counters of the scopes and the queued reconciles of the tenant
+// (pruneTenantLast) and the tenant row (ON DELETE CASCADE takes its scope
+// mappings and grants), so no row of a scope outlives a prune that reports
+// success. Since the key step and the run gate come before the passes (issue
+// #555), only a writer that holds no gate still writes then.
 // More than pruneClosingRounds rounds with rows: an error, the tenant row
 // stays.
-func pruneTenantClose(ctx context.Context, pool *pgxpool.Pool, tenantID string, scopes []string) error {
+func pruneTenantClose(ctx context.Context, pool *pgxpool.Pool, tenantID string, scopes []string, stamp AuditStamp) error {
 	for round := 1; ; round++ {
 		var left int64
 		err := writeSupersedesSourceScopes(ctx, pool, pgxdb.At("store: prune closing round"), func(tx pgx.Tx, extra []string) error {
+			// Stamped (no lock): the round's configuration deletes and the
+			// tenant row's cascade write audit rows that name the offboarding.
+			if err := stampAudit(ctx, tx, stamp); err != nil {
+				return err
+			}
 			var err error
 			if left, err = pruneClosingRound(ctx, tx, tenantID, scopes, extra); err != nil || left > 0 {
+				return err
+			}
+			if err := pruneTenantLast(ctx, tx, tenantID, scopes); err != nil {
 				return err
 			}
 			tag, err := tx.Exec(ctx, `DELETE FROM context_tenants WHERE id = $1::uuid`, tenantID)
@@ -290,8 +290,12 @@ func pruneTenantClose(ctx context.Context, pool *pgxpool.Pool, tenantID string, 
 		if err != nil {
 			return fmt.Errorf("store: delete tenant: count what is left: %w", err)
 		}
-		if remaining == 0 && round == pruneClosingRounds {
-			continue // the last round drained a backlog: one more finds nothing and deletes the tenant
+		if remaining == 0 && round < 2*pruneClosingRounds {
+			// The round drained what was there (a backlog, or one more row of a
+			// writer that holds no gate): the next finds nothing and deletes
+			// the tenant. Bounded, so a writer that writes one row per round
+			// cannot keep the delete going.
+			continue
 		}
 		return fmt.Errorf("store: delete tenant: rows kept arriving in its scopes for %d closing rounds (the last deleted %d, %d are left now); the tenant stays offboarding, run the delete again", round, left, remaining)
 	}
@@ -305,7 +309,8 @@ const pruneRowsLeftSQL = `SELECT
 	+ (SELECT count(*) FROM context_blobs WHERE scope = ANY($1::text[]) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $2::uuid))
 	+ (SELECT count(*) FROM context_sources WHERE scope = ANY($1::text[]) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $2::uuid))
 	+ (SELECT count(*) FROM context_chat_sessions WHERE scope = ANY($1::text[]) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $2::uuid))
-	+ (SELECT count(*) FROM context_secrets WHERE scope = ANY($1::text[]) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $2::uuid))`
+	+ (SELECT count(*) FROM context_secrets WHERE scope = ANY($1::text[]) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $2::uuid))
+	+ (SELECT count(*) FROM context_write_log WHERE scope = ANY($1::text[]) AND scope IN (SELECT ts.scope FROM context_tenant_scopes ts WHERE ts.tenant_id = $2::uuid))`
 
 // pruneRowsLeft is what the closing rounds would still find (pruneRowsLeftSQL).
 func pruneRowsLeft(ctx context.Context, pool *pgxpool.Pool, tenantID string, scopes []string) (int64, error) {
@@ -321,7 +326,7 @@ func pruneClosingRound(ctx context.Context, tx pgx.Tx, tenantID string, scopes, 
 	if len(scopes) == 0 {
 		return 0, nil
 	}
-	left, err := pruneBatchTx(ctx, tx, tenantID, scopes, scopes, extra)
+	left, _, err := pruneBatchTx(ctx, tx, tenantID, scopes, scopes, extra)
 	if err != nil || left > 0 {
 		return left, err
 	}
@@ -332,11 +337,8 @@ func pruneClosingRound(ctx context.Context, tx pgx.Tx, tenantID string, scopes, 
 		}
 		left += tag.RowsAffected()
 	}
-	tag, err := tx.Exec(ctx, pruneSecretsSQL, scopes, tenantID)
-	if err != nil {
-		return 0, fmt.Errorf("context_secrets: %w", err)
-	}
-	return left + tag.RowsAffected(), nil
+	n, err := pruneSweep(ctx, tx, tenantID, scopes)
+	return left + n, err
 }
 
 // sortedScopes is scopes in the order every multi-scope holder takes their

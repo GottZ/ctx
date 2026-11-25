@@ -49,6 +49,11 @@ func TestTenantDeleteWaitsPastTheClientBudget(t *testing.T) {
 	if got := short.HTTPClient.Timeout; got != answerAfter/4 {
 		t.Errorf("the delete changed the shared client's budget to %v, want it untouched", got)
 	}
+	// The budget itself is none: a delete of the target size runs for
+	// minutes, longer than any fixed client budget a test could wait out.
+	if tenantDeleteCallBudget != 0 {
+		t.Errorf("tenant delete has a client budget of %v, want none", tenantDeleteCallBudget)
+	}
 }
 
 func TestTenantDeleteSaysTheDeleteGoesOnWhenTheRequestEnds(t *testing.T) {
