@@ -35,7 +35,9 @@ func TestSecondTenantDeleteLeavesTheNextOwnersRows(t *testing.T) {
 
 	// The second delete stands right before its first scope lock: it has
 	// read the tenant's scope names and holds nothing.
-	h := newPruneHold(func(sql string) bool { return strings.Contains(sql, "pg_advisory_xact_lock(hashtext('ctx:supersedes:'") })
+	h := newPruneHold(func(sql string) bool {
+		return strings.Contains(sql, "pg_advisory_xact_lock(hashtext('ctx:supersedes:'")
+	})
 	second := make(chan error, 1)
 	go func() { second <- store.PruneTenant(ctx, pruneHoldPool(t, f.dsn, h), tenantID, store.AuditStamp{}) }()
 	waitPruneHeld(t, h, second)

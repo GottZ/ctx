@@ -80,13 +80,17 @@ func TestBatchUpdateTargetMovedTwice(t *testing.T) {
 
 	h := newStagedHold(
 		// 0: the batch has read the target's scope and takes its first scope lock.
-		func(sql string) bool { return strings.Contains(sql, "pg_advisory_xact_lock(hashtext('ctx:supersedes:'") },
+		func(sql string) bool {
+			return strings.Contains(sql, "pg_advisory_xact_lock(hashtext('ctx:supersedes:'")
+		},
 		// 1: the lock pass's statement for the update item.
 		func(sql string) bool {
 			return strings.Contains(sql, "FROM context_blocks") && strings.Contains(sql, "FOR NO KEY UPDATE") && strings.Contains(sql, "id = $")
 		},
 		// 2: the diagnosis of its miss.
-		func(sql string) bool { return strings.Contains(sql, "SELECT scope, ") && strings.Contains(sql, "updated_at FROM context_blocks") },
+		func(sql string) bool {
+			return strings.Contains(sql, "SELECT scope, ") && strings.Contains(sql, "updated_at FROM context_blocks")
+		},
 	)
 	cfg, err := pgxpool.ParseConfig(f.dsn)
 	if err != nil {

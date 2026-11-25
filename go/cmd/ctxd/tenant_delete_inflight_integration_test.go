@@ -127,11 +127,11 @@ func (f *inflightFixture) tenant(t *testing.T, slug string) (tenantID, scope, ke
 }
 
 type inflightAnswer struct {
-	status      int
-	body        string
-	isError     bool
-	text, code  string
-	linesAbove  []string
+	status     int
+	body       string
+	isError    bool
+	text, code string
+	linesAbove []string
 }
 
 // send runs one request through the router; hold (may be nil) stops it as
@@ -209,7 +209,9 @@ func inflightCases() []inflightCase {
 	js := nulSweepJSON
 	return []inflightCase{
 		{name: "REST store", method: http.MethodPost, path: "/api/store",
-			body:    func(string) string { return js(map[string]any{"category": "learnings", "title": "late store", "content": "written after the delete"}) },
+			body: func(string) string {
+				return js(map[string]any{"category": "learnings", "title": "late store", "content": "written after the delete"})
+			},
 			refused: restUnauthorized},
 		{name: "REST store batch", method: http.MethodPost, path: "/api/store/batch",
 			body: func(string) string {
@@ -276,7 +278,9 @@ func TestTenantDeleteBesideAWriteInFlight(t *testing.T) {
 
 			hold := newInflightHold()
 			done := make(chan inflightAnswer, 1)
-			go func() { done <- f.send(t, key, c.method, c.path, c.body(scope), c.mcp, hold, fmt.Sprintf("0555-%02x-b", i)) }()
+			go func() {
+				done <- f.send(t, key, c.method, c.path, c.body(scope), c.mcp, hold, fmt.Sprintf("0555-%02x-b", i))
+			}()
 			select {
 			case <-hold.held:
 			case a := <-done:
@@ -434,7 +438,9 @@ func TestTenantDeleteBesideABatchBehindItsLastRound(t *testing.T) {
 			// at its first statement after that.
 			hold := newInflightHold()
 			done := make(chan inflightAnswer, 1)
-			go func() { done <- f.send(t, key, http.MethodPost, c.path, c.body, c.mcp, hold, fmt.Sprintf("0555-2%02x-b", i)) }()
+			go func() {
+				done <- f.send(t, key, http.MethodPost, c.path, c.body, c.mcp, hold, fmt.Sprintf("0555-2%02x-b", i))
+			}()
 			select {
 			case <-hold.held:
 			case a := <-done:

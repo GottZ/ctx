@@ -1950,7 +1950,7 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 		return
 	}
 	search := s.cfg.Snapshot().GuardSearch() //nolint:forbidigo // MT 06 background: the guard batch is ONE process-wide run over every tenant's blocks; how it searches is global-only (#381).
-	processed, err := guard.RunGuardBatch(ctx, s.pool, s.blocktypes.Snapshot(), guardBatchLimit, search)
+	processed, deferred, err := guard.RunGuardBatchDeferring(ctx, s.pool, s.blocktypes.Snapshot(), guardBatchLimit, search)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -1959,13 +1959,19 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 		return
 	}
 
+	// A run that deferred a verdict (its block's neighbour held by a purge, a
+	// prune, a supersedes write) leaves the guard pending (issue #555): the
+	// next tick of the guard ticker — guardInterval, the pause — runs it again
+	// and decides the block once the holder is gone, without waiting for the
+	// next block write. Beside a holder that keeps its rows the run comes back
+	// once per tick, not in a loop.
 	s.mu.Lock()
-	if processed == 0 {
+	if processed == 0 && deferred == 0 {
 		s.guardPending = false
 	}
 	s.mu.Unlock()
 
-	slog.Info("scheduler: guard batch complete", "processed", processed)
+	slog.Info("scheduler: guard batch complete", "processed", processed, "deferred", deferred)
 }
 
 // runDreamLoop runs dream cycles continuously in its own goroutine.
