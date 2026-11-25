@@ -237,7 +237,7 @@ const dailySynthesisHourUTC = 3
 func GenerateDailyReport(ctx context.Context, pool *pgxpool.Pool, r *Router, scope string) (string, error) {
 	now := time.Now().UTC()
 	return generateDailyReportWindow(ctx, pool, r, scope,
-		now.Add(-24*time.Hour), now, now.Format("2006-01-02"), true)
+		now.Add(-24*time.Hour), now, now.Format("2006-01-02"), true, false)
 }
 
 // GenerateDailyReportFor re-synthesizes the report titled day (backfill): the
@@ -250,8 +250,23 @@ func GenerateDailyReportFor(ctx context.Context, pool *pgxpool.Pool, r *Router, 
 	end := time.Date(day.Year(), day.Month(), day.Day(), dailySynthesisHourUTC, 0, 0, 0, time.UTC)
 	// includeGuardQueue=false: the guard queue is a STAND, not window activity —
 	// a backfilled yesterday-report must not carry today's queue.
+	// evictionGate=true: a window the write-log retention has reached is
+	// refused (*WriteLogEvictedError, fetchDailyDecisions).
 	return generateDailyReportWindow(ctx, pool, r, scope,
-		end.Add(-24*time.Hour), end, day.Format("2006-01-02"), false)
+		end.Add(-24*time.Hour), end, day.Format("2006-01-02"), false, true)
+}
+
+// WriteLogEvictedError refuses a report backfill whose window starts before
+// the write log's eviction boundary (store.WriteLogEvictedBefore, issue #277)
+// as the statement that counts the window's decisions read it (issue #536):
+// the write-log retention has deleted decisions of the window, and the
+// upsert would replace the day's report with one without them.
+type WriteLogEvictedError struct {
+	Boundary time.Time
+}
+
+func (e *WriteLogEvictedError) Error() string {
+	return "the write-log retention deleted the decisions before " + e.Boundary.UTC().Format(time.RFC3339)
 }
 
 // generateDailyReportWindow is the shared core: aggregate the [from, to)
@@ -260,9 +275,11 @@ func GenerateDailyReportFor(ctx context.Context, pool *pgxpool.Pool, r *Router, 
 // day (not derived from the window bounds — the rolling path's window ends
 // now, the backfill path's at 03:00).
 // includeGuardQueue gates the guard review-queue STAND section (live path
-// only — see GenerateDailyReportFor).
-func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Router, scope string, from, to time.Time, date string, includeGuardQueue bool) (string, error) {
-	decisions, err := fetchDailyDecisions(ctx, pool, scope, from, to)
+// only — see GenerateDailyReportFor). evictionGate refuses a window that
+// starts before the write log's eviction boundary (backfill only — see
+// fetchDailyDecisions).
+func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Router, scope string, from, to time.Time, date string, includeGuardQueue, evictionGate bool) (string, error) {
+	decisions, err := fetchDailyDecisions(ctx, pool, scope, from, to, evictionGate)
 	if err != nil {
 		return "", fmt.Errorf("dream: synthesize report: %w", err)
 	}
@@ -414,13 +431,26 @@ func generateDailyReportWindow(ctx context.Context, pool *pgxpool.Pool, r *Route
 
 // fetchDailyDecisions reports counts per decision label from context_write_log
 // for the supplied scope and [from, to) window, ordered by frequency descending.
-func fetchDailyDecisions(ctx context.Context, pool *pgxpool.Pool, scope string, from, to time.Time) ([]dailyDecisionStat, error) {
+//
+// With evictionGate (the backfill) the statement reads the write log's
+// eviction boundary (context_guard_state.write_log_evicted_before) in the
+// snapshot it counts the decisions in, and refuses a window that starts
+// before it (*WriteLogEvictedError, issue #536). The retention records the
+// horizon of a run before its first delete commits (store.EvictWriteLog), so
+// a snapshot that misses a deleted row of the window also holds a boundary
+// past the window's start. The backfill's check before (handler
+// pastWriteLogBoundary) reads the boundary in a statement of its own, and a
+// retention run between the two thinned a window that had passed it. Without
+// the gate (the rolling report) the statement does not read the boundary.
+func fetchDailyDecisions(ctx context.Context, pool *pgxpool.Pool, scope string, from, to time.Time, evictionGate bool) ([]dailyDecisionStat, error) {
+	if !evictionGate {
+		return scanDailyDecisions(pool.Query(ctx, dailyDecisionsSQL, scope, from, to))
+	}
 	rows, err := pool.Query(ctx,
-		`SELECT decision, COUNT(*)::int FROM context_write_log
-		 WHERE created_at >= $2 AND created_at < $3
-		   AND scope = $1
-		 GROUP BY decision
-		 ORDER BY COUNT(*) DESC`,
+		`SELECT b.evicted_before, d.decision, d.n
+		   FROM (SELECT (SELECT write_log_evicted_before FROM context_guard_state WHERE id = true) AS evicted_before) b
+		   LEFT JOIN (`+dailyDecisionsSQL+`) d ON true
+		  ORDER BY d.n DESC`,
 		scope, from, to,
 	)
 	if err != nil {
@@ -428,6 +458,46 @@ func fetchDailyDecisions(ctx context.Context, pool *pgxpool.Pool, scope string, 
 	}
 	defer rows.Close()
 
+	var out []dailyDecisionStat
+	var boundary *time.Time
+	for rows.Next() {
+		var decision *string
+		var n *int
+		if err := rows.Scan(&boundary, &decision, &n); err != nil {
+			return nil, fmt.Errorf("scan decision: %w", err)
+		}
+		if n == nil {
+			continue // the window holds no decision
+		}
+		s := dailyDecisionStat{Count: *n}
+		if decision != nil {
+			s.Decision = *decision
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if boundary != nil && from.Before(*boundary) {
+		return nil, &WriteLogEvictedError{Boundary: *boundary}
+	}
+	return out, nil
+}
+
+// dailyDecisionsSQL counts the decisions of the scope $1 in the window [$2,
+// $3) by label, the most frequent first.
+const dailyDecisionsSQL = `SELECT decision, COUNT(*)::int AS n FROM context_write_log
+		 WHERE created_at >= $2 AND created_at < $3
+		   AND scope = $1
+		 GROUP BY decision
+		 ORDER BY COUNT(*) DESC`
+
+// scanDailyDecisions reads the rows of dailyDecisionsSQL.
+func scanDailyDecisions(rows pgx.Rows, err error) ([]dailyDecisionStat, error) {
+	if err != nil {
+		return nil, fmt.Errorf("query decisions: %w", err)
+	}
+	defer rows.Close()
 	var out []dailyDecisionStat
 	for rows.Next() {
 		var s dailyDecisionStat

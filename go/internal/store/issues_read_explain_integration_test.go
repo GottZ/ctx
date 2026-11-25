@@ -210,6 +210,25 @@ func w6GenericExplain(t *testing.T, ctx context.Context, pool *pgxpool.Pool, lab
 // fails nor passes it.
 const w6BufferShare = 10
 
+// w6PageBuffers bounds the buffers of one page of 50 rows of a workflow list
+// (gates A and C, issue #536): the walk of its index counts a buffer per row
+// it fetches (listArmBound), plus a few for the descent.
+var w6PageBuffers = listArmBound(50) + 6
+
+// w6ListSettings are the session settings a gate EXPLAINs a workflow list
+// statement under: random_page_cost rpc and the SET LOCAL settings the store
+// sends the list's pages with (store.WorkflowListNoSortForTest).
+func w6ListSettings(t *testing.T, rpc string) map[string]string {
+	t.Helper()
+	settings := map[string]string{"random_page_cost": rpc}
+	if store.WorkflowListNoSortForTest != "" {
+		for k, v := range setLocals(t, store.WorkflowListNoSortForTest) {
+			settings[k] = v
+		}
+	}
+	return settings
+}
+
 // w6BuffersRe pulls the counts of one "Buffers: shared hit=H read=R …" line.
 var w6BuffersRe = regexp.MustCompile(`Buffers: shared(?: hit=([0-9]+))?(?: read=([0-9]+))?`)
 
@@ -266,25 +285,33 @@ func TestW6Explain_Integration(t *testing.T) {
 	w6Seed(t, pool)
 	ctx := context.Background()
 
-	// (A) status list → the NAMED board index, no Seq Scan on context_blocks. The
-	// W6 gate (design/03 §7-W6) is "Scan über den BENANNTEN Index + P95<100ms". At
-	// the 215k target scale the planner legitimately serves it as a Bitmap Index
-	// Scan on idx_blocks_workflow_board + a top-N heapsort bounded by the (scope,
-	// type, status) equality prefix (~3.3k rows) — index-backed, keyset-correct,
-	// <100ms. (The stricter Sort-free ordered range scan is a planner cost choice
-	// tied to key/heap correlation, not a W6 gate criterion; it is I-B's claim at
-	// its own smaller scale.)
+	// (A) status list → a page of the NAMED board index, no Seq Scan on
+	// context_blocks, judged by its buffers at both deployment values of
+	// random_page_cost (issue #536). The list sends its pages in a transaction
+	// with sorts off (store.WorkflowListNoSortForTest); the gate EXPLAINs the
+	// statement under those settings. Before, the gate accepted what the
+	// planner chose at 4 on this 215k store: a Bitmap Index Scan on
+	// idx_blocks_workflow_board and a top-N heapsort of every row of the
+	// status (~3.3k rows, 552 buffers for a page of 50) — the estimate of the
+	// (scope, type, status) rows, 27, is the product of three independent
+	// selectivities — whose cost follows the status, not the page.
 	t.Run("status_list_board_index", func(t *testing.T) {
-		plan, ms := w6Explain(t, pool, "status-list",
-			store.WorkflowStatusListSQL, w6Scope, "issue", "backlog", w6Top, w6TopID, nil, 50)
-		if !strings.Contains(plan, "idx_blocks_workflow_board") {
-			t.Errorf("plan does not name idx_blocks_workflow_board")
-		}
-		if strings.Contains(plan, "Seq Scan on context_blocks") {
-			t.Errorf("plan seq-scans context_blocks (index gate broken)")
-		}
-		if ms >= 100 {
-			t.Errorf("status-list exec %.2fms ≥ 100ms", ms)
+		for _, rpc := range testdb.RandomPageCosts {
+			p := testdb.WithSessionSettings(t, pool, w6ListSettings(t, rpc))
+			plan, ms := w6Explain(t, p, "status-list rpc "+rpc,
+				store.WorkflowStatusListSQL, w6Scope, "issue", "backlog", w6Top, w6TopID, nil, 50)
+			if !strings.Contains(plan, "idx_blocks_workflow_board") {
+				t.Errorf("rpc %s: plan does not name idx_blocks_workflow_board", rpc)
+			}
+			if strings.Contains(plan, "Seq Scan on context_blocks") {
+				t.Errorf("rpc %s: plan seq-scans context_blocks (index gate broken)", rpc)
+			}
+			if n, ok := w6RootBuffers(plan); !ok || n > w6PageBuffers {
+				t.Errorf("rpc %s: a page of 50 reads %d buffers (plan has a count: %v), want at most %d", rpc, n, ok, w6PageBuffers)
+			}
+			if ms >= 100 {
+				t.Errorf("rpc %s: status-list exec %.2fms ≥ 100ms", rpc, ms)
+			}
 		}
 	})
 
@@ -325,38 +352,37 @@ func TestW6Explain_Integration(t *testing.T) {
 		}
 	})
 
-	// (C) sort=created → index-backed, no Seq Scan (status-unfiltered AND filtered).
-	// The status-UNFILTERED created traversal rides idx_blocks_workflow_created
-	// (M086) — the created-ordered index. The status-FILTERED one legitimately
-	// rides idx_blocks_workflow_board instead: with a workflow_status equality the
-	// board index is the more selective access path, and created ordering comes via
-	// a bounded top-N sort. BOTH are named workflow indexes, no Seq Scan, <100ms —
-	// the W6 gate. (Correctness/losslessness is proven independently in
-	// TestW6CursorAndSemantics, regardless of the plan shape.)
+	// (C) sort=created → a page of a named workflow index, no Seq Scan
+	// (status-unfiltered AND filtered), judged by its buffers at both values
+	// of random_page_cost under the settings ListIssuesByCreated sends it
+	// with (issue #536; before, the bitmap form read every issue of the
+	// scope at 4). The status-UNFILTERED traversal rides
+	// idx_blocks_workflow_created (M086); the status-FILTERED one rides it or
+	// the more selective idx_blocks_workflow_board. (Correctness/losslessness
+	// is proven independently in TestW6CursorAndSemantics, regardless of the
+	// plan shape.)
 	t.Run("created_sort_index", func(t *testing.T) {
-		for _, tc := range []struct{ status, wantIndex string }{
-			{"", "idx_blocks_workflow_created"},
-			{"backlog", "idx_blocks_workflow_board"},
-		} {
-			label := "created(all)"
-			if tc.status != "" {
-				label = "created(" + tc.status + ")"
-			}
-			plan, ms := w6Explain(t, pool, label,
-				store.IssueCreatedListSQL, w6Scope, "issue", tc.status, w6Top, w6TopID, nil, 50)
-			// Index-backed via a NAMED workflow index (either the created index or,
-			// when status-selective, the board index — both are valid, no seq scan).
-			if !strings.Contains(plan, "idx_blocks_workflow_created") && !strings.Contains(plan, "idx_blocks_workflow_board") {
-				t.Errorf("%s: plan names no workflow index", label)
-			}
-			if !strings.Contains(plan, tc.wantIndex) {
-				t.Logf("%s: note — planner chose a different (still index-backed) path than the expected %s", label, tc.wantIndex)
-			}
-			if strings.Contains(plan, "Seq Scan on context_blocks") {
-				t.Errorf("%s: plan seq-scans context_blocks (index gate broken)", label)
-			}
-			if ms >= 100 {
-				t.Errorf("%s: exec %.2fms ≥ 100ms", label, ms)
+		for _, rpc := range testdb.RandomPageCosts {
+			p := testdb.WithSessionSettings(t, pool, w6ListSettings(t, rpc))
+			for _, status := range []string{"", "backlog"} {
+				label := "created(all) rpc " + rpc
+				if status != "" {
+					label = "created(" + status + ") rpc " + rpc
+				}
+				plan, ms := w6Explain(t, p, label,
+					store.IssueCreatedListSQL, w6Scope, "issue", status, w6Top, w6TopID, nil, 50)
+				if !strings.Contains(plan, "idx_blocks_workflow_created") && !strings.Contains(plan, "idx_blocks_workflow_board") {
+					t.Errorf("%s: plan names no workflow index", label)
+				}
+				if strings.Contains(plan, "Seq Scan on context_blocks") {
+					t.Errorf("%s: plan seq-scans context_blocks (index gate broken)", label)
+				}
+				if n, ok := w6RootBuffers(plan); !ok || n > w6PageBuffers {
+					t.Errorf("%s: a page of 50 reads %d buffers (plan has a count: %v), want at most %d", label, n, ok, w6PageBuffers)
+				}
+				if ms >= 100 {
+					t.Errorf("%s: exec %.2fms ≥ 100ms", label, ms)
+				}
 			}
 		}
 	})
@@ -444,8 +470,14 @@ func TestW6Explain_Integration(t *testing.T) {
 			{"created", store.IssueCreatedListSQL, "w6_f_created(text,text,text,timestamptz,uuid,text[],int)",
 				"('" + w6Scope + "','issue',''," + top, []any{w6Scope, "issue", "", w6Top, w6TopID, nil, 50}},
 		} {
-			custom, _ := w6Explain(t, pool, p.label+"-custom", p.sql, p.args...)
-			generic := w6GenericExplain(t, ctx, pool, p.label+"-generic", "(ANALYZE, BUFFERS) ", p.decl, p.sql, p.execArgs)
+			// The two lists run under the settings the store sends their
+			// pages with (w6ListSettings, issue #536); the search does not.
+			db := pool
+			if p.label != "q" {
+				db = testdb.WithSessionSettings(t, pool, w6ListSettings(t, testdb.DeploymentRandomPageCost))
+			}
+			custom, _ := w6Explain(t, db, p.label+"-custom", p.sql, p.args...)
+			generic := w6GenericExplain(t, ctx, db, p.label+"-generic", "(ANALYZE, BUFFERS) ", p.decl, p.sql, p.execArgs)
 			for form, plan := range map[string]string{"custom": custom, "generic": generic} {
 				n, ok := w6RootBuffers(plan)
 				t.Logf("%s (%s plan): %d shared buffers of %d table pages (bound %d)", p.label, form, n, relpages, relpages/w6BufferShare)

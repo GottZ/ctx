@@ -26,12 +26,16 @@ const WriteLogRetentionBatch = 10000
 // below, and a run with a longer horizon does not lower it. The report
 // backfill refuses a window that starts before it (WriteLogEvictedBefore).
 // The upsert writes the seed row back should it be missing; the statement
-// holds the row lock of the one row for itself only.
+// holds the row lock of the one row for itself only. The days are counted in
+// UTC (issue #536), as the backfill's horizon check counts them
+// (handler pastWriteLogHorizon): timestamptz minus an interval of days steps
+// over the calendar of the session's time zone, an hour off the UTC horizon
+// across a daylight-saving change.
 const writeLogHorizonSQL = `INSERT INTO context_guard_state (id, write_log_evicted_before)
-	VALUES (true, now() - make_interval(days => $1))
+	VALUES (true, (now() AT TIME ZONE 'UTC' - make_interval(days => $1)) AT TIME ZONE 'UTC')
 	ON CONFLICT (id) DO UPDATE
 	   SET write_log_evicted_before = GREATEST(context_guard_state.write_log_evicted_before, EXCLUDED.write_log_evicted_before)
-	RETURNING now() - make_interval(days => $1)`
+	RETURNING (now() AT TIME ZONE 'UTC' - make_interval(days => $1)) AT TIME ZONE 'UTC'`
 
 // writeLogEvictedBeforeSQL reads the eviction boundary; no row reads as none.
 const writeLogEvictedBeforeSQL = `SELECT (SELECT write_log_evicted_before FROM context_guard_state WHERE id = true)`

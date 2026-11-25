@@ -1507,18 +1507,28 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 	if idPrefixMatchesNothing(idOrPrefix) {
 		return "", nil, nil // no LIKE wildcard, no unsendable text (issue #547)
 	}
+	lo, hi, ok := idPrefixRange(idOrPrefix)
+	if !ok {
+		return "", nil, nil // no id's text starts with it
+	}
 
 	// Cap candidates at 11: anything ≥10 is too ambiguous to surface usefully,
 	// and the extra row tells the caller "≥10, narrow further" without paging.
-	// $1=prefix, $2=readScopes, $3=maxCandidates(LIMIT), $4=grantedBlockIDs.
+	// $1/$5 = the prefix's primary-key range (idPrefixRange), $2=readScopes,
+	// $3=maxCandidates(LIMIT), $4=grantedBlockIDs. An unnamed statement,
+	// planned with its range on every execution (QueryExecModeCacheDescribe):
+	// the generic plan a connection switched to from its sixth execution
+	// cannot tell a range of a few ids from a wide one and walked the
+	// reader's scopes on idx_blocks_scope_updated instead (1 079 buffers for
+	// a prefix of 13 characters and a reader of 100 000 blocks, 4 on the key).
 	const maxCandidates = 11
 	rows, err := pool.Query(ctx,
 		`SELECT id, title, category, tags, scope, updated_at
 		 FROM context_blocks
-		 WHERE id::text LIKE $1 || '%' AND NOT is_archived AND (scope = ANY($2::text[]) OR id = ANY($4::uuid[]))
+		 WHERE id >= $1::uuid AND id <= $5::uuid AND NOT is_archived AND (scope = ANY($2::text[]) OR id = ANY($4::uuid[]))
 		 ORDER BY updated_at DESC
 		 LIMIT $3`,
-		idOrPrefix, readScopes, maxCandidates, grantedBlockIDs,
+		pgx.QueryExecModeCacheDescribe, lo, readScopes, maxCandidates, grantedBlockIDs, hi,
 	)
 	if err != nil {
 		return "", nil, fmt.Errorf("store: resolve id prefix: %w", err)
@@ -1559,12 +1569,12 @@ func ResolveBlockID(ctx context.Context, pool *pgxpool.Pool, idOrPrefix string, 
 // site, never user input. The CASE guards the uuid cast so a malformed
 // value in metadata degrades to "not readable" instead of a 22P02. Blocks
 // whose metadata carries no guard_matched_id pass through untouched, and the
-// matched-block lookup is a primary-key probe (one row per returned block).
+// matched-block lookup is a primary-key probe (one row per returned block;
+// guardMatchedIDSQL, which the guard list reads the key with as well).
 func guardRedactedMetadataSQL(scopesParam string) string {
 	return `CASE WHEN context_blocks.metadata ? 'guard_matched_id' AND NOT EXISTS (
 			SELECT 1 FROM context_blocks mb
-			WHERE mb.id = CASE WHEN pg_input_is_valid(context_blocks.metadata->>'guard_matched_id', 'uuid')
-			                   THEN (context_blocks.metadata->>'guard_matched_id')::uuid END
+			WHERE mb.id = ` + guardMatchedIDSQL("context_blocks.metadata") + `
 			  AND mb.scope = ANY(` + scopesParam + `::text[]))
 		THEN context_blocks.metadata - 'guard_matched_id' ELSE context_blocks.metadata END AS metadata`
 }
@@ -3227,15 +3237,18 @@ func AttributeAccessBlob(ctx context.Context, pool *pgxpool.Pool, logID, blobID 
 // guardListOrderSQL is the guard list's order key: the guard's similarity,
 // read once per row. The value is metadata, and a row written before the
 // write path kept the guard's keys to the guard (stripGuardKeys, issue #238)
-// can hold any JSON a caller sent, so the cast sits behind pg_input_is_valid:
-// a value that is no number is NULL and sorts last, like a missing one,
-// instead of failing the statement — which the list answered with no rows for
-// every reader of the scope. The sort evaluates the key for every row of the
-// read scopes, not only for the rows it returns, so the key is read in a
-// sub-select whose inner select carries OFFSET 0: once per row, as the bare
-// cast before it read it, and not once for the test and once for the cast.
-const guardListOrderSQL = `(SELECT CASE WHEN pg_input_is_valid(s.v, 'numeric') THEN s.v::numeric END
-		  FROM (SELECT b.metadata->>'guard_similarity' AS v OFFSET 0) AS s)`
+// can hold any JSON a caller sent, so the cast reads a JSON number only
+// (jsonb_typeof, issue #536): any other value is NULL and sorts last, like a
+// missing one, instead of failing the statement — which the list answered
+// with no rows for every reader of the scope. The guard writes a float8, a
+// JSON number; a JSON number is never NaN or infinite, where a JSON string
+// such as "NaN", "Infinity" or "1e999" read as numeric text sorted above
+// every similarity the guard wrote. The sort evaluates the key for every row
+// of the read scopes, not only for the rows it returns, so the key is read in
+// a sub-select whose inner select carries OFFSET 0: once per row, and not
+// once for the test and once for the cast.
+const guardListOrderSQL = `(SELECT CASE WHEN jsonb_typeof(s.v) = 'number' THEN s.v::numeric END
+		  FROM (SELECT b.metadata->'guard_similarity' AS v OFFSET 0) AS s)`
 
 // GuardList returns flagged blocks for guard review. types is an optional
 // server-side type_name filter (bind parameter, WF-T10 line — never a client
@@ -3312,11 +3325,16 @@ func guardListQuery(readScopes []string, category, status string, types []string
 
 	whereClause := strings.Join(whereClauses, " AND ")
 
+	// The page is chosen first (the inner select: the flagged rows of the
+	// read scopes in the order of guardListOrderSQL, LIMIT), and only its rows
+	// look up their matched block, one primary-key probe each on the uuid the
+	// verdict names (guardMatchedIDSQL, issue #536). matched_id is that
+	// block's id as the list always answered it: the canonical text.
 	query := fmt.Sprintf(`SELECT b.id, b.title, b.category, b.scope, b.type_name, b.guard_status,
-		b.metadata->>'guard_similarity' AS similarity,
+		b.similarity,
 		CASE
 			WHEN mb.id IS NULL THEN NULL
-			WHEN mb.scope = ANY($%d) THEN b.metadata->>'guard_matched_id'
+			WHEN mb.scope = ANY($%d) THEN mb.id::text
 			ELSE NULL
 		END AS matched_id,
 		CASE
@@ -3324,13 +3342,20 @@ func guardListQuery(readScopes []string, category, status string, types []string
 			WHEN mb.scope = ANY($%d) THEN mb.title
 			ELSE '`+redact.Redacted+`'
 		END AS matched_title,
-		b.metadata->>'guard_checked_at' AS checked_at,
+		b.checked_at,
 		b.updated_at
-	FROM context_blocks b
-	LEFT JOIN context_blocks mb ON mb.id::text = b.metadata->>'guard_matched_id'
-	WHERE %s
-	ORDER BY `+guardListOrderSQL+` DESC NULLS LAST
-	LIMIT $%d`,
+	FROM (SELECT b.id, b.title, b.category, b.scope, b.type_name, b.guard_status,
+	             b.metadata->>'guard_similarity' AS similarity,
+	             b.metadata->>'guard_checked_at' AS checked_at,
+	             b.updated_at,
+	             `+guardMatchedIDSQL("b.metadata")+` AS matched,
+	             `+guardListOrderSQL+` AS ord
+	        FROM context_blocks b
+	       WHERE %s
+	       ORDER BY ord DESC NULLS LAST
+	       LIMIT $%d) b
+	LEFT JOIN context_blocks mb ON mb.id = b.matched
+	ORDER BY b.ord DESC NULLS LAST`,
 		scopeCheckIdx, scopeCheckIdx, whereClause, limitIdx,
 	)
 	return query, args

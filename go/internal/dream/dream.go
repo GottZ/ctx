@@ -1303,33 +1303,60 @@ type QueueStats struct {
 // operators anticipate GPU load instead of only seeing the current backlog.
 // A non-nil empty scopes (windowClosed) returns an all-zero QueueStats without
 // a query; nil keeps the unchanged query.
+//
+// The counts are one pass over the reader's eligible rows (queueDepthSQL),
+// read in a transaction of their own with queueDepthPlan.
 func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []string) (*QueueStats, error) {
 	var q QueueStats
 	if windowClosed(scopes) {
 		return &q, nil
 	}
-	err := pool.QueryRow(ctx,
-		`WITH eligible AS (
-			SELECT dream_cooldown_until AS cd, dream_checked_at AS chk, embedding IS NULL AS no_embed
-			FROM context_blocks
-			WHERE `+dreamEligibleWhere("$2")+`
-			  AND scope = ANY($1::text[])
-		)
-		SELECT
-			(SELECT count(*) FROM eligible WHERE NOT no_embed AND (cd IS NULL OR cd < now()))::int,
-			(SELECT count(*) FROM eligible WHERE NOT no_embed AND cd >= now())::int,
-			(SELECT count(*) FROM eligible WHERE NOT no_embed AND chk IS NULL)::int,
-			(SELECT count(*) FROM eligible WHERE no_embed)::int,
-			(SELECT count(*) FROM eligible WHERE NOT no_embed AND cd > now() AND cd <= now() + interval '1 hour')::int,
-			(SELECT count(*) FROM eligible WHERE NOT no_embed AND cd > now() AND cd <= now() + interval '6 hours')::int,
-			(SELECT min(cd) FROM eligible WHERE NOT no_embed AND cd > now())`,
-		scopes, linkable,
-	).Scan(&q.PickableNow, &q.InCooldown, &q.NeverDreamed, &q.AwaitingEmbed, &q.Incoming1h, &q.Incoming6h, &q.NextPendingAt)
+	err := pgxdb.WriteOpts(ctx, pool, queueDepthTxOptions, pgxdb.At("dream: queue depth"), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, queueDepthPlan); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, queueDepthSQL, scopes, linkable).Scan(
+			&q.PickableNow, &q.InCooldown, &q.NeverDreamed, &q.AwaitingEmbed, &q.Incoming1h, &q.Incoming6h, &q.NextPendingAt)
+	})
 	if err != nil {
 		return nil, err
 	}
 	return &q, nil
 }
+
+// queueDepthSQL counts the reader's eligible rows (dreamEligibleWhere, the
+// scopes $1, the linkable types $2) in one aggregate pass, a FILTER per
+// number (issue #536). Before, a CTE over the eligible rows that seven
+// sub-selects read: it is referenced more than once, so PostgreSQL wrote
+// every eligible row into a tuplestore and read it seven times (886-1 098 ms
+// at 1 000 000 rows on the production image, 309 ms for the same rows in one
+// pass). now() is the statement's, the same instant in every FILTER.
+var queueDepthSQL = `SELECT
+		count(*) FILTER (WHERE embedding IS NOT NULL AND (dream_cooldown_until IS NULL OR dream_cooldown_until < now()))::int,
+		count(*) FILTER (WHERE embedding IS NOT NULL AND dream_cooldown_until >= now())::int,
+		count(*) FILTER (WHERE embedding IS NOT NULL AND dream_checked_at IS NULL)::int,
+		count(*) FILTER (WHERE embedding IS NULL)::int,
+		count(*) FILTER (WHERE embedding IS NOT NULL AND dream_cooldown_until > now() AND dream_cooldown_until <= now() + interval '1 hour')::int,
+		count(*) FILTER (WHERE embedding IS NOT NULL AND dream_cooldown_until > now() AND dream_cooldown_until <= now() + interval '6 hours')::int,
+		min(dream_cooldown_until) FILTER (WHERE embedding IS NOT NULL AND dream_cooldown_until > now())
+	  FROM context_blocks
+	 WHERE ` + dreamEligibleWhere("$2") + `
+	   AND scope = ANY($1::text[])`
+
+// queueDepthPlan are the planner settings of queueDepthSQL, in its own
+// transaction (issue #536). enable_indexscan off: the statement reads every
+// eligible row of the reader, and a plain index scan is the one path that
+// walks an index over all of them, a heap fetch per row — the custom plan at
+// random_page_cost 4 walked idx_blocks_sensitivity, whose predicate (NOT
+// is_archived) is the statement's, over every live row of the table (22-32 s
+// at 10 000 000 rows); what stays is a bitmap scan of the reader's eligible
+// rows (idx_blocks_dream_eligible, migration 194) or of its scopes, or the
+// table, each reading a heap page once. jit off: from 4 000 000 rows on every
+// execution compiled 250-500 ms of JIT for a statement that only counts.
+const queueDepthPlan = "SET LOCAL enable_indexscan = off; SET LOCAL jit = off"
+
+// queueDepthTxOptions: a read-only transaction at READ COMMITTED.
+var queueDepthTxOptions = pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadOnly}
 
 // danglingLinkWhere matches, over context_dream_links aliased dl, a link whose
 // source or target block is archived (two primary-key probes per link).

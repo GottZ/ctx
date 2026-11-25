@@ -26,8 +26,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
 // Workflow list limit clamps (design/02 §3.3/§6.2: server-clamp ≤ 100/page).
@@ -96,7 +99,10 @@ type WorkflowListQuery struct {
 // the all-DESC index direction — no Sort, no bitmap. The first page passes the
 // +infinity / max-uuid sentinel so ALL rows qualify and the same single string
 // serves first and subsequent pages. Label AND post-filter on metadata->'labels'.
-// Exported so the I-B EXPLAIN gate (store_test package, which cannot be in-package
+// Its callers (ListWorkflowBlocks, BoardColumns) send it in a read-only
+// transaction with sorts off (readNoSortTx, issue #536): at random_page_cost
+// 4 the planner took a bitmap scan of the same index and a sort of every row of
+// the status where it estimated a few dozen. Exported so the I-B EXPLAIN gate (store_test package, which cannot be in-package
 // because testdb imports store) EXPLAINs THIS exact string — never a copy
 // (M072/M075 no-duplication line).
 const WorkflowStatusListSQL = `
@@ -149,17 +155,23 @@ func ListWorkflowBlocks(ctx context.Context, pool *pgxpool.Pool, q WorkflowListQ
 		return nil, nil, fmt.Errorf("workflow list: status-unfiltered mode requires the config status set")
 	}
 
+	// One read-only transaction with sorts off for every stream (readNoSortTx).
 	streams := make([][]WorkflowBlockRow, 0, len(statuses)*len(q.Scopes))
-	for _, status := range statuses {
-		for _, scope := range q.Scopes {
-			rows, err := listWorkflowScopeStatus(ctx, pool, q, scope, status, limit)
-			if err != nil {
-				return nil, nil, err
-			}
-			if len(rows) > 0 {
-				streams = append(streams, rows)
+	if err := readNoSortTx(ctx, pool, "workflow list", func(tx pgx.Tx) error {
+		for _, status := range statuses {
+			for _, scope := range q.Scopes {
+				rows, err := listWorkflowScopeStatus(ctx, tx, q, scope, status, limit)
+				if err != nil {
+					return err
+				}
+				if len(rows) > 0 {
+					streams = append(streams, rows)
+				}
 			}
 		}
+		return nil
+	}); err != nil {
+		return nil, nil, err
 	}
 	merged := kwayMergeWorkflow(streams, limit)
 	return merged, nextWorkflowCursor(merged, limit), nil
@@ -168,8 +180,8 @@ func ListWorkflowBlocks(ctx context.Context, pool *pgxpool.Pool, q WorkflowListQ
 // listWorkflowScopeStatus is ONE ordered index range scan over
 // idx_blocks_workflow_board for a single (scope, status), keyset-ordered
 // (updated_at DESC, id DESC) — no Sort (all leading index columns are scalar
-// equality; see WorkflowStatusListSQL).
-func listWorkflowScopeStatus(ctx context.Context, pool *pgxpool.Pool, q WorkflowListQuery, scope, status string, limit int) ([]WorkflowBlockRow, error) {
+// equality; see WorkflowStatusListSQL), on db, the transaction of readNoSortTx.
+func listWorkflowScopeStatus(ctx context.Context, db pgxdb.Querier, q WorkflowListQuery, scope, status string, limit int) ([]WorkflowBlockRow, error) {
 	// First page: +infinity / max-uuid sentinel so the tuple comparison admits
 	// every row while staying a clean ordered index range scan.
 	curUpdated := pgtype.Timestamptz{InfinityModifier: pgtype.Infinity, Valid: true}
@@ -183,7 +195,7 @@ func listWorkflowScopeStatus(ctx context.Context, pool *pgxpool.Pool, q Workflow
 		labelArg = q.Labels
 	}
 
-	rows, err := pool.Query(ctx, WorkflowStatusListSQL, scope, q.TypeName, status, curUpdated, curID, labelArg, limit)
+	rows, err := db.Query(ctx, WorkflowStatusListSQL, scope, q.TypeName, status, curUpdated, curID, labelArg, limit)
 	if err != nil {
 		return nil, fmt.Errorf("workflow list (scope=%q status=%q): query: %w", scope, status, err)
 	}

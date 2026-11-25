@@ -57,12 +57,23 @@ type IssueReadQuery struct {
 	Cursor *WorkflowCursor
 }
 
-// IssueSearchUpdatedSQL / IssueSearchCreatedSQL — the q (FTS) path. The FTS
-// predicate (ts_de OR ts_en) drives a BitmapOr over idx_context_ts_de +
-// idx_context_ts_en (the existing retrieval-core GIN indexes, M001/M044); scope,
-// type_name, status, the keyset boundary and the label set are rechecked on the
-// bitmap result, then a Top-N Sort orders the (selective) FTS set. Exported so
-// the W6 EXPLAIN gate EXPLAINs THESE exact strings (no SQL copy, M072/M075 line).
+// IssueSearchUpdatedSQL / IssueSearchCreatedSQL — the q (FTS) path. Two
+// plans answer it, and which one is right depends on the word: for a word
+// that is rare in the corpus the FTS predicate (ts_de OR ts_en) drives a
+// BitmapOr over idx_context_ts_de + idx_context_ts_en (the existing
+// retrieval-core GIN indexes, M001/M044), scope, type_name, status, the
+// keyset boundary and the label set are rechecked on the bitmap result, and a
+// Top-N Sort orders it; for a word that is common elsewhere the project's own
+// range, read newest first (idx_blocks_scope_updated), stops after the page,
+// where the bitmap holds every block of the corpus that carries the word.
+// Only a plan that sees the word can tell the two apart, so SearchIssues
+// sends the statement as an unnamed statement, planned with its parameters
+// on every execution (pgx.QueryExecModeCacheDescribe; issue #536): pgx's
+// statement cache switched it to the generic plan from the sixth execution
+// per connection, which takes the bitmap for every word — 7 029 buffers
+// instead of 6 for a common word in a project of 100 000 issues. Exported so
+// the W6 EXPLAIN gate EXPLAINs THESE exact strings (no SQL copy, M072/M075
+// line).
 //
 // The deny-list conjunct (C2-2 / OPS-W1 review A3) is what keeps the FTS bitmap
 // reachable: since migration 145 both GIN indexes are PARTIAL over
@@ -91,10 +102,20 @@ const IssueSearchUpdatedSQL = `
 // IssueSearchCreatedSQL is IssueSearchUpdatedSQL with the immutable (created_at,
 // id) keyset + ordering (the q + ?sort=created combination) — including its
 // deny-list conjunct, for the same reason and with the same no-op argument.
+// Its scope is stated as a range and leads the ORDER BY (the device of
+// statsSQL, #512; issue #536): with an equality the order reduced to
+// created_at DESC, id DESC, which idx_context_created delivers as well, and
+// the custom plan at random_page_cost 4 walked it from the newest block of
+// the corpus and filtered scope and word row by row — every block newer than
+// the project's issues (1 328 / 6 770 buffers behind 10 000 / 100 000 newer
+// blocks of another scope, 6–7 on the project's range). The range admits
+// exactly the scope's rows (scope is NOT NULL, a database's collation
+// deterministic); the project's range of idx_context_scope_active delivers
+// the order.
 const IssueSearchCreatedSQL = `
 	SELECT b.id::text, b.scope, b.type_name, b.title, b.workflow_status, b.updated_at, b.created_at
 	FROM context_blocks b
-	WHERE b.scope = $1::text
+	WHERE b.scope >= $1::text AND b.scope <= $1::text
 	  AND b.type_name = $2
 	  AND b.type_name NOT IN ` + hardFTSDenyValues + `
 	  AND NOT b.is_archived
@@ -102,7 +123,7 @@ const IssueSearchCreatedSQL = `
 	  AND (b.ts_de @@ plainto_tsquery('german', $4) OR b.ts_en @@ plainto_tsquery('english', $4))
 	  AND (b.created_at, b.id) < ($5::timestamptz, $6::uuid)
 	  AND ($7::text[] IS NULL OR b.metadata->'labels' ?& $7::text[])
-	ORDER BY b.created_at DESC, b.id DESC
+	ORDER BY b.scope, b.created_at DESC, b.id DESC
 	LIMIT $8`
 
 // IssueCreatedListSQL — the ?sort=created path (no q). An ORDERED range scan over
@@ -110,7 +131,10 @@ const IssueSearchCreatedSQL = `
 // type_name) + the partial predicate (workflow_status IS NOT NULL AND NOT
 // is_archived) select the index, the all-DESC keyset (created_at, id) < (cur)
 // walks it Sort-free. The status filter is an in-scan filter (created_at is not
-// status-keyed — one scan for all statuses). Exported for the EXPLAIN gate.
+// status-keyed — one scan for all statuses). ListIssuesByCreated sends it in a
+// read-only transaction with sorts off (readNoSortTx, issue #536): its custom
+// plan at random_page_cost 4 walked idx_context_created from the newest block
+// of the corpus instead. Exported for the EXPLAIN gate.
 const IssueCreatedListSQL = `
 	SELECT b.id::text, b.scope, b.type_name, b.title, b.workflow_status, b.updated_at, b.created_at
 	FROM context_blocks b
@@ -221,7 +245,9 @@ func SearchIssues(ctx context.Context, pool *pgxpool.Pool, q IssueReadQuery) ([]
 	if q.Sort == SortCreated {
 		sql = IssueSearchCreatedSQL
 	}
-	rows, err := pool.Query(ctx, sql, q.Scope, IssueTypeName, q.Status, q.Q, curTS, curID, labelArg(q.Labels), limit)
+	// A custom plan on every execution (IssueSearchUpdatedSQL): an unnamed
+	// statement, parsed and planned with its parameters each time.
+	rows, err := pool.Query(ctx, sql, pgx.QueryExecModeCacheDescribe, q.Scope, IssueTypeName, q.Status, q.Q, curTS, curID, labelArg(q.Labels), limit)
 	if err != nil {
 		return nil, nil, fmt.Errorf("issue search: query: %w", err)
 	}
@@ -241,12 +267,16 @@ func ListIssuesByCreated(ctx context.Context, pool *pgxpool.Pool, q IssueReadQue
 	}
 	limit := clampWorkflowLimit(q.Limit)
 	curTS, curID := firstPageKeyset(q.Cursor, SortCreated)
-	rows, err := pool.Query(ctx, IssueCreatedListSQL, q.Scope, IssueTypeName, q.Status, curTS, curID, labelArg(q.Labels), limit)
-	if err != nil {
-		return nil, nil, fmt.Errorf("issue created-list: query: %w", err)
-	}
-	raw, wire, err := scanIssueReadRows(rows)
-	if err != nil {
+	var raw []issueReadRow
+	var wire []WorkflowBlockRow
+	if err := readNoSortTx(ctx, pool, "issue created-list", func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, IssueCreatedListSQL, q.Scope, IssueTypeName, q.Status, curTS, curID, labelArg(q.Labels), limit)
+		if err != nil {
+			return fmt.Errorf("issue created-list: query: %w", err)
+		}
+		raw, wire, err = scanIssueReadRows(rows)
+		return err
+	}); err != nil {
 		return nil, nil, err
 	}
 	return wire, nextIssueCursor(raw, limit, SortCreated), nil
@@ -339,38 +369,45 @@ func BoardColumns(ctx context.Context, pool *pgxpool.Pool, scope string, statuse
 	limit = clampWorkflowLimit(limit)
 	top := pgtype.Timestamptz{InfinityModifier: pgtype.Infinity, Valid: true}
 	out := make([]IssueBoardColumn, 0, len(statuses))
-	for _, status := range statuses {
-		col := IssueBoardColumn{Status: status, Issues: []WorkflowBlockRow{}}
+	// One read-only transaction with sorts off for every column (readNoSortTx).
+	err := readNoSortTx(ctx, pool, "board", func(tx pgx.Tx) error {
+		for _, status := range statuses {
+			col := IssueBoardColumn{Status: status, Issues: []WorkflowBlockRow{}}
 
-		var count int
-		if err := pool.QueryRow(ctx, IssueBoardCountSQL, scope, IssueTypeName, status, labelArg(labels)).Scan(&count); err != nil {
-			return nil, fmt.Errorf("board count (status=%q): %w", status, err)
-		}
-		col.Count = count
-
-		rows, err := pool.Query(ctx, WorkflowStatusListSQL, scope, IssueTypeName, status, top, maxUUID, labelArg(labels), limit)
-		if err != nil {
-			return nil, fmt.Errorf("board page (status=%q): %w", status, err)
-		}
-		page := make([]WorkflowBlockRow, 0, limit)
-		for rows.Next() {
-			var r WorkflowBlockRow
-			if err := rows.Scan(&r.ID, &r.Scope, &r.TypeName, &r.Title, &r.WorkflowStatus, &r.UpdatedAt); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("board scan (status=%q): %w", status, err)
+			var count int
+			if err := tx.QueryRow(ctx, IssueBoardCountSQL, scope, IssueTypeName, status, labelArg(labels)).Scan(&count); err != nil {
+				return fmt.Errorf("board count (status=%q): %w", status, err)
 			}
-			page = append(page, r)
-		}
-		if err := rows.Err(); err != nil {
+			col.Count = count
+
+			rows, err := tx.Query(ctx, WorkflowStatusListSQL, scope, IssueTypeName, status, top, maxUUID, labelArg(labels), limit)
+			if err != nil {
+				return fmt.Errorf("board page (status=%q): %w", status, err)
+			}
+			page := make([]WorkflowBlockRow, 0, limit)
+			for rows.Next() {
+				var r WorkflowBlockRow
+				if err := rows.Scan(&r.ID, &r.Scope, &r.TypeName, &r.Title, &r.WorkflowStatus, &r.UpdatedAt); err != nil {
+					rows.Close()
+					return fmt.Errorf("board scan (status=%q): %w", status, err)
+				}
+				page = append(page, r)
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return fmt.Errorf("board rows (status=%q): %w", status, err)
+			}
 			rows.Close()
-			return nil, fmt.Errorf("board rows (status=%q): %w", status, err)
+			if len(page) > 0 {
+				col.Issues = page
+			}
+			col.Cursor = nextWorkflowCursor(page, limit)
+			out = append(out, col)
 		}
-		rows.Close()
-		if len(page) > 0 {
-			col.Issues = page
-		}
-		col.Cursor = nextWorkflowCursor(page, limit)
-		out = append(out, col)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }

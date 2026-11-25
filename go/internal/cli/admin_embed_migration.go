@@ -77,7 +77,10 @@ func embedBackfillReleaseCmd(getClient func() (*Client, error)) *cobra.Command {
 			if class != "" {
 				data["class"] = class
 			}
-			if limit > 0 {
+			// A limit the caller gave travels as given, so the server answers
+			// a negative one with its refusal instead of the CLI dropping it
+			// and the server paging by its maximum (issue #536).
+			if cmd.Flags().Changed("limit") {
 				data["limit"] = limit
 			}
 			if confirm >= 0 {

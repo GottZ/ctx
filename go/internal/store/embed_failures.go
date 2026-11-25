@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/GottZ/ctx/internal/httpx"
@@ -679,22 +680,18 @@ func ReleaseBackfillMemos(ctx context.Context, pool *pgxpool.Pool, r BackfillRel
 		res.AsOf = *r.AsOf
 		sel.memo += ` AND f.first_seen <= ` + sel.add(res.AsOf)
 	}
-	var asOf time.Time
-	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE `+sel.eligible+`),
-		       count(*) FILTER (WHERE NOT `+sel.eligible+`),
-		       min(`+sel.holdEnd+`) FILTER (WHERE NOT `+sel.eligible+`),
+	countSQL := `SELECT count(*) FILTER (WHERE ` + sel.eligible + `),
+		       count(*) FILTER (WHERE NOT ` + sel.eligible + `),
+		       min(` + sel.holdEnd + `) FILTER (WHERE NOT ` + sel.eligible + `),
 		       now()
-		  FROM `+sel.source(sel.memo, false), sel.args...).Scan(&res.Counted, &res.Held, &res.HeldUntil, &asOf); err != nil {
-		return res, fmt.Errorf("store: backfill release: count: %w", err)
-	}
+		  FROM ` + sel.source(sel.memo, false)
+	countArgs := slices.Clone(sel.args)
 	if res.DryRun {
-		res.AsOf = asOf
+		if err := pool.QueryRow(ctx, countSQL, countArgs...).Scan(&res.Counted, &res.Held, &res.HeldUntil, &res.AsOf); err != nil {
+			return res, fmt.Errorf("store: backfill release: count: %w", err)
+		}
 		res.Remaining = res.Counted
 		return res, nil
-	}
-	if res.Counted != *r.Confirm {
-		res.Remaining = res.Counted
-		return res, ErrBackfillReleaseConfirmMismatch
 	}
 	limit := r.Limit
 	if limit == 0 {
@@ -711,11 +708,30 @@ func ReleaseBackfillMemos(ctx context.Context, pool *pgxpool.Pool, r BackfillRel
 		page += `UPDATE context_embed_failures u SET next_attempt_at = now(), first_seen = now()
 		  FROM page WHERE u.block_id = page.block_id AND u.migration_id IS NULL`
 	}
-	tag, err := pool.Exec(ctx, page, sel.args...)
+	// The count and the page decide eligibility at ONE instant (issue #536):
+	// both run in one transaction, whose now() is the same for every statement
+	// in it. As two statements on the pool each read its own now(), and a memo
+	// whose hold ended between the two was counted as held and then released,
+	// so released could exceed the confirmed count.
+	err = pgxdb.Write(ctx, pool, pgxdb.At("store: backfill release"), func(tx pgx.Tx) error {
+		var asOf time.Time
+		if err := tx.QueryRow(ctx, countSQL, countArgs...).Scan(&res.Counted, &res.Held, &res.HeldUntil, &asOf); err != nil {
+			return fmt.Errorf("store: backfill release: count: %w", err)
+		}
+		if res.Counted != *r.Confirm {
+			res.Remaining = res.Counted
+			return ErrBackfillReleaseConfirmMismatch
+		}
+		tag, err := tx.Exec(ctx, page, sel.args...)
+		if err != nil {
+			return fmt.Errorf("store: backfill release: %w", err)
+		}
+		res.Released = tag.RowsAffected()
+		return nil
+	})
 	if err != nil {
-		return res, fmt.Errorf("store: backfill release: %w", err)
+		return res, err
 	}
-	res.Released = tag.RowsAffected()
 	res.Remaining = max(res.Counted-res.Released, 0)
 	return res, nil
 }

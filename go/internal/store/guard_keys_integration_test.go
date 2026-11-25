@@ -146,7 +146,9 @@ func TestGuardKeysGuardListReadsAnyStoredValue(t *testing.T) {
 	const scope = "gk-legacy"
 	ids := gkFlaggedPairs(t, pool, scope, "gk-legacy", 6)
 
-	// One value per flagged block; the first four are read as numbers.
+	// One value per flagged block; the first and the third are JSON numbers,
+	// the only values the list sorts by (issue #536: a JSON string such as
+	// "0.97" is not the guard's float8 and sorts last, like the rest).
 	values := []string{
 		`0.99`, `"0.97"`, `1e-3`, `"-5"`,
 		`"x"`, `""`, `{"v": 0.95}`, `[0.95]`, `true`, `null`, `"0.9x"`, `"  "`,
@@ -169,7 +171,7 @@ func TestGuardKeysGuardListReadsAnyStoredValue(t *testing.T) {
 	if len(items) != len(ids) {
 		t.Fatalf("GuardList: %d items, want %d", len(items), len(ids))
 	}
-	wantHead := []string{ids[0], ids[1], ids[2], ids[3]} // 0.99, 0.97, 0.001, -5
+	wantHead := []string{ids[0], ids[2]} // 0.99, 0.001
 	for i, want := range wantHead {
 		if items[i].ID != want {
 			got := make([]string, len(items))
