@@ -220,12 +220,13 @@ const maxDetectWordBytes = 32
 //     stop words — the rule before #210, which knew no Nordic word and no
 //     å æ ø.
 //
-// A quote ("…", „…“, “…”, «…», ‚…‘, '…') is what the question asks about, not
-// the language it is asked in: an English question is decided on the words
-// outside its quotes (Who directed "Das Boot"?), a German or Nordic one adds
-// the quoted words but not their English (Was bedeutet der Fehler "the server
-// is not responding"?), and a question with nothing outside its quotes is
-// read from them.
+// A quote ("…", „…“, “…”, «…», ‚…‘, '…', ´…´, ＂…＂, ″…″) is what the question
+// asks about, not the language it is asked in: an English question is decided
+// on the words outside its quotes (Who directed "Das Boot"?), a German or
+// Nordic one adds the quoted words but not their English (Was bedeutet der
+// Fehler "the server is not responding"?), and a question with nothing
+// outside its quotes is read from them. A quote mark inside a token that
+// reads as code before it (config["größe"]) opens no quote.
 //
 // It allocates nothing and takes time linear in the length of the input.
 func NeedsTranslation(query string) bool {
@@ -264,6 +265,7 @@ func scanTranslateEvidence(query string) (ev, quoted translateEvidence) {
 // walk stays linear.
 func scanWords(text string, ev, quoted *translateEvidence, unclosed *[2]bool) {
 	start := 0 // first byte of the current token
+	code := codePrefix{start: -1}
 	for i := 0; i < len(text); {
 		if text[i] == '`' {
 			if end := strings.IndexByte(text[i+1:], '`'); end >= 0 {
@@ -274,7 +276,7 @@ func scanWords(text string, ev, quoted *translateEvidence, unclosed *[2]bool) {
 			}
 		}
 		r, size := utf8.DecodeRuneInString(text[i:])
-		if k := quoteKind(r); quoted != nil && k >= 0 && !unclosed[k] && opensQuote(text, i, size) {
+		if k := quoteKind(r); quoted != nil && k >= 0 && !unclosed[k] && opensQuote(text, i, size) && !code.upTo(text, start, i) {
 			if end, endSize := closingQuote(text, i+size, k); end >= 0 {
 				ev.addToken(text[start:i])
 				scanWords(text[i+size:end], quoted, nil, nil)
@@ -293,15 +295,17 @@ func scanWords(text string, ev, quoted *translateEvidence, unclosed *[2]bool) {
 	ev.addToken(text[start:])
 }
 
-// quoteKind is 0 for a double quote mark (" „ “ ” « »), 1 for a single one
-// (' ‚ ‘ ’) and -1 for any other rune. A mark closes a quote opened by any
-// mark of its kind, so „…“, “…”, ”…”, «…», »…«, »…» and „…" (a typographic
-// opening, a keyboard closing) all read as quotes.
+// quoteKind is 0 for a double quote mark (" „ “ ” « » ＂ ″), 1 for a single
+// one (' ‚ ‘ ’ ´) and -1 for any other rune. A mark closes a quote opened by
+// any mark of its kind, so „…“, “…”, ”…”, «…», »…«, »…» and „…" (a
+// typographic opening, a keyboard closing) all read as quotes. The fullwidth
+// mark ＂, the double prime ″ and the acute accent ´ stand in for a quote
+// mark on some keyboards (#551); after a digit (27″, 5´) they open nothing.
 func quoteKind(r rune) int {
 	switch r {
-	case '"', '„', '“', '”', '«', '»':
+	case '"', '„', '“', '”', '«', '»', '＂', '″':
 		return 0
-	case '\'', '‚', '‘', '’':
+	case '\'', '‚', '‘', '’', '´':
 		return 1
 	}
 	return -1
@@ -320,17 +324,56 @@ func opensQuote(text string, i, size int) bool {
 // at or after from that can close a quote: one not followed by a letter or
 // digit (so the apostrophe of it's closes nothing, and "text " still closes).
 // -1 when there is none.
+//
+// A single mark after s, x, z or ß may be a possessive or genitive
+// apostrophe ('the users' data is not in the table', Hans' Notizen) rather
+// than the end of the quote (#551): it closes the quote unless another
+// closing mark follows before any mark that opens or stands alone, and then
+// the quote runs to that one. The look-ahead stops at the next mark of the
+// kind, so every byte is read by at most two searches and the walk stays
+// linear.
 func closingQuote(text string, from, kind int) (int, int) {
+	held, heldSize := -1, 0 // a possessive-shaped mark that may close the quote
 	for j := from; j < len(text); {
 		r, size := utf8.DecodeRuneInString(text[j:])
-		if quoteKind(r) == kind {
-			if next, _ := utf8.DecodeRuneInString(text[j+size:]); !isWordRune(next) {
+		if quoteKind(r) != kind {
+			j += size
+			continue
+		}
+		prev, _ := utf8.DecodeLastRuneInString(text[:j])
+		next, _ := utf8.DecodeRuneInString(text[j+size:])
+		switch {
+		case isWordRune(next) && isWordRune(prev):
+			// an apostrophe inside a word (Jörg's) closes nothing
+		case isWordRune(next) || !isWordRune(prev):
+			// a mark that opens a quote or stands alone ends the look-ahead
+			if held >= 0 {
+				return held, heldSize
+			}
+			if !isWordRune(next) {
 				return j, size
 			}
+		case kind == 1 && isPossessiveEnd(prev):
+			held, heldSize = j, size
+		default:
+			return j, size
 		}
 		j += size
 	}
+	if held >= 0 {
+		return held, heldSize
+	}
 	return -1, 0
+}
+
+// isPossessiveEnd reports whether a single quote mark after r can be a
+// possessive or genitive apostrophe (users', Hans', Max', Fritz', Grass').
+func isPossessiveEnd(r rune) bool {
+	switch r {
+	case 's', 'S', 'x', 'X', 'z', 'Z', 'ß':
+		return true
+	}
+	return false
 }
 
 // isCodeToken reports whether a white-space token is a path, an identifier,
@@ -340,10 +383,10 @@ func closingQuote(text string, from, kind int) (int, int) {
 func isCodeToken(tok string) bool {
 	prev := rune(-1)
 	for i, r := range tok {
-		switch r {
-		case '/', '\\', '_', '=', '<', '>', '{', '}', '[', ']', '$', '@', '#', '|':
+		switch {
+		case isCodeRune(r):
 			return true
-		case '.', ':':
+		case r == '.' || r == ':':
 			if next, _ := utf8.DecodeRuneInString(tok[i+1:]); isWordRune(prev) && isWordRune(next) {
 				return true
 			}
@@ -351,6 +394,42 @@ func isCodeToken(tok string) bool {
 		prev = r
 	}
 	return false
+}
+
+// isCodeRune reports whether r alone makes a token code.
+func isCodeRune(r rune) bool {
+	switch r {
+	case '/', '\\', '_', '=', '<', '>', '{', '}', '[', ']', '$', '@', '#', '|':
+		return true
+	}
+	return false
+}
+
+// codePrefix reads the text of a token in front of a quote mark for code
+// (the characters of isCodeToken), so a mark inside a path, an index or an
+// assignment — config["größe"], key="Größe" — opens no quote and the token
+// stays code as a whole (#551). It reads each byte of a token at most once
+// however many marks the token holds.
+type codePrefix struct {
+	start, end int  // the token being read and how far
+	prev       rune // the rune before end
+	sep        bool // prev is a dot or colon after a letter or digit
+	code       bool
+}
+
+// upTo reports whether text[start:i] reads as code.
+func (c *codePrefix) upTo(text string, start, i int) bool {
+	if c.start != start {
+		*c = codePrefix{start: start, end: start, prev: -1}
+	}
+	for c.end < i && !c.code {
+		r, size := utf8.DecodeRuneInString(text[c.end:])
+		c.code = isCodeRune(r) || c.sep && isWordRune(r)
+		c.sep = (r == '.' || r == ':') && isWordRune(c.prev)
+		c.prev = r
+		c.end += size
+	}
+	return c.code
 }
 
 func isWordRune(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }

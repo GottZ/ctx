@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/backends"
@@ -120,5 +121,87 @@ func TestTranslateQuery551KeepsNames(t *testing.T) {
 			t.Errorf("TranslateQuery(%q) with answer %q = %q, want the answer", c.query, c.answer, got)
 		}
 	}
+}
+
+// TestNeedsTranslation551SingleQuotePossessive (point 4): inside a single
+// quote, an apostrophe after s, x, z or ß followed by more text before the
+// next closing mark is a possessive, not the end of the quote. On 89d9e70c
+// the span closed at users', the rest counted as English outside the quote,
+// and the German question was not translated.
+func TestNeedsTranslation551SingleQuotePossessive(t *testing.T) {
+	checkNeedsTranslation(t, true,
+		"Was bedeutet der Fehler 'the users' data is not in the table'?",
+		"Was bedeutet der Fehler ‘the users’ data is not in the table’?",
+		"Was heißt 'the class' fields are not in the index' hier?",
+	)
+	checkNeedsTranslation(t, false,
+		"What does 'Wer rastet, der rostet' mean?",
+		"Who wrote 'Im Westen nichts Neues' and the users' guide?",
+	)
+	for _, q := range []string{
+		"Was bedeutet der Fehler 'the users' data is not in the table'?",
+		"Wie behebe ich 'the users' data is not in the table'",
+	} {
+		if ev, _ := scanTranslateEvidence(q); ev.english != 0 {
+			t.Errorf("scanTranslateEvidence(%q): english %d outside the quote, want 0", q, ev.english)
+		}
+	}
+	// A quote ending in s closes where the next quote opens.
+	if ev, _ := scanTranslateEvidence("Was heißt 'process' und 'thread' in the docs?"); ev.english != 1 {
+		t.Errorf("two quotes: evidence %+v outside the quotes, want english 1 (the)", ev)
+	}
+}
+
+// TestNeedsTranslation551QuoteInsideCodeToken (point 4): a quote mark inside
+// a token that already reads as code opens no quote, so the token stays code
+// as a whole. On 89d9e70c the quote split config["größe"] before the
+// code-token rule saw it, and größe counted as quoted evidence.
+func TestNeedsTranslation551QuoteInsideCodeToken(t *testing.T) {
+	checkNeedsTranslation(t, false,
+		`config["größe"]`,
+		`map[string]int{"größe": 1}`,
+		`row['übersicht']`,
+		`key="Größe"`,
+		`=SUMME(„Größe“)`,
+	)
+	checkNeedsTranslation(t, true,
+		`Was bedeutet "Größe"?`,
+		`("Größe der Datei")`,
+		`Wie lese ich config["größe"] aus?`,
+	)
+}
+
+// TestNeedsTranslation551QuoteReaderLinear (point 4): the possessive
+// look-ahead and the code read in front of a quote mark keep the walk linear
+// — about 1 MB each of possessive-shaped marks, quote marks inside a code
+// token, backtick spans between quotes, and quote marks after a dot.
+func TestNeedsTranslation551QuoteReaderLinear(t *testing.T) {
+	checkNeedsTranslation(t, false,
+		"'"+strings.Repeat("users' ", 1<<17),
+		strings.Repeat("'a s' ", 1<<17),
+		"x["+strings.Repeat(`"a"`, 1<<18),
+		"x="+strings.Repeat(`"`, 1<<20),
+		strings.Repeat("`a`\"b\"", 1<<17),
+		strings.Repeat("a.\"", 1<<18),
+		strings.Repeat("x['", 1<<18),
+	)
+}
+
+// TestNeedsTranslation551MoreQuoteMarks (point 4): an acute accent (´…´), a
+// fullwidth quotation mark (＂…＂) and a double prime (″…″) are quote marks.
+// On 89d9e70c each was read as text.
+func TestNeedsTranslation551MoreQuoteMarks(t *testing.T) {
+	checkNeedsTranslation(t, false,
+		"What does ´Das ist nicht mein Bier´ mean?",
+		"What does ＂Das ist nicht mein Bier＂ mean?",
+		"What does ″Das ist nicht mein Bier″ mean?",
+		// an inch or second mark after a digit opens nothing
+		"Is the 27″ screen in the box with the 24″ one?",
+	)
+	checkNeedsTranslation(t, true,
+		"Was bedeutet der Fehler ´the server is not responding´?",
+		"Was bedeutet der Fehler ＂the server is not responding＂?",
+		"Was bedeutet der Fehler ″the server is not responding″?",
+	)
 }
 
