@@ -145,14 +145,17 @@ func TestMCPToolsKeepTheDatabaseTextOutOfTheirAnswers(t *testing.T) {
 		if !isErr {
 			t.Errorf("%s answered without an error although every statement fails: %.200q", c.tool, text)
 		}
+		// The tool's own failure line, at ERROR: a WARN of an earlier read
+		// (the grant resolve of the read tools) names the cause too, and is
+		// not the line of the answer's fault.
 		var cause bool
 		for _, l := range logged {
-			if strings.Contains(l, "42P01") || strings.Contains(l, "does not exist") {
+			if strings.HasPrefix(l, "ERROR ") && (strings.Contains(l, "42P01") || strings.Contains(l, "does not exist")) {
 				cause = true
 			}
 		}
 		if !cause {
-			t.Errorf("%s: no line names the database's cause (%d lines: %v)", c.tool, len(logged), logged)
+			t.Errorf("%s: no ERROR line names the database's cause (%d lines: %v)", c.tool, len(logged), logged)
 		}
 	}
 }
