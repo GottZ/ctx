@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -88,10 +89,20 @@ func TestRules_AnEnglishPresentGivesItsClauseATenseOfItsOwn(t *testing.T) {
 		"Anna left on Monday; her successor starts on Friday.":                               "2026-11-16/past 2026-11-27/future",
 		"Billing goes live on Friday; the old system died on Tuesday.":                       "2026-11-27/future 2026-11-17/past",
 		"Will the service that froze on Tuesday be restarted on Thursday?":                   "2026-11-17/past 2026-11-26/future",
+		"The build broke on Monday; everyone meets on Friday.":                               "2026-11-16/past 2026-11-27/future",
 		// counter-cases: a clause without a verb of its own
-		"Builds were red on Thursday, check runs on Friday as well?": "2026-11-19/past 2026-11-20/past",
-		"The deploy failed on Monday, the rollback on Tuesday too?":  "2026-11-16/past 2026-11-17/past",
+		"Builds were red on Thursday, check runs on Friday as well?":               "2026-11-19/past 2026-11-20/past",
+		"Builds were red on Thursday, on Friday check runs as well?":               "2026-11-19/past 2026-11-20/past",
+		"The deploy failed on Monday, the rollback on Tuesday too?":                "2026-11-16/past 2026-11-17/past",
+		"The deploy failed on Monday, the web analytics dashboard on Tuesday too?": "2026-11-16/past 2026-11-17/past",
 	})
+	// A form on -ed with "get" behind it is the participle of its noun, no
+	// simple past that makes the question one: the clause of "get" keeps the
+	// coming Monday the base read.
+	q := "Tickets closed on Friday get reopened on Monday."
+	if got := fmt517(NormalizeTemporalRules(q, now517)); !strings.Contains(got, "2026-11-23/future") {
+		t.Errorf("%q: got %s, want the coming Monday 2026-11-23/future among its dates", q, got)
+	}
 }
 
 // TestRules_TonightInANameNamesNoDay (issue #532, review round): "tonight"
@@ -106,6 +117,7 @@ func TestRules_TonightInANameNamesNoDay(t *testing.T) {
 		"Who sings in the band Tonight Tonight?":       "nil",
 		"Wann spielt Tonight Alive morgen?":            "2026-11-23/future",
 		"Was lief am Montag in der Show Tonight Live?": "2026-11-16/past",
+		"Who sings in the band Tonight?":               "nil",
 		// counter-cases: tonight
 		"What's on Tonight?":                "2026-11-22/today",
 		"Is Tonight Alive playing tonight?": "2026-11-22/today",
