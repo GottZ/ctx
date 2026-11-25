@@ -211,12 +211,19 @@ func distinctScopes(scopes []string) []string {
 
 // fullGraphSeed reads FullGraph's flat seed: fullGraphSeedMergeSQL in a
 // read-only transaction with fullGraphSeedMergePlan for a reader of at most
-// fullGraphSeedMergeScopes scopes and no category filter, else
-// fullGraphSeedPlannedSQL, planned with its parameters on every execution
-// (CustomPlanMode).
+// fullGraphSeedMergeScopes scopes and no category filter while the index its
+// arms walk stands (fullGraphSeedIndexReady), else fullGraphSeedPlannedSQL,
+// planned with its parameters on every execution (CustomPlanMode).
 func fullGraphSeed(ctx context.Context, pool *pgxpool.Pool, p EgoParams, readScopes, grantedBlockIDs, visibleTypes []string) ([]GraphNode, error) {
 	scopes := distinctScopes(readScopes)
 	merge := len(scopes) <= fullGraphSeedMergeScopes && len(p.Categories) == 0
+	if merge {
+		ready, err := fullGraphSeedIndexReady(ctx, pool)
+		if err != nil {
+			return nil, err
+		}
+		merge = ready
+	}
 	mode := CustomPlanMode(pool)
 	if merge {
 		mode = fullGraphSeedMergeMode(pool)

@@ -195,6 +195,52 @@ func TestRangeReadsFullGraphSeedWalksTheScopeItReads(t *testing.T) {
 	}
 }
 
+// TestRangeReadsFullGraphSeedWithoutItsIndex (review of #536): without
+// idx_context_scope_active — a database the schema-contract check reports —
+// the seed of a reader of few scopes is read on the planned form. The merge
+// form's arms had no sort-free path but a walk of idx_context_created each,
+// and read the corpus behind an old read scope: 52 596 buffers against 16 at
+// 1 000 000 rows. Here: 300 old blocks behind 20 000 newer ones.
+func TestRangeReadsFullGraphSeedWithoutItsIndex(t *testing.T) {
+	db := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	for _, st := range []string{
+		`INSERT INTO context_blocks (category, title, content, scope, type_name, created_at, updated_at)
+		 SELECT 'learnings', 'ni old ' || i, 'body ' || i, 'ni-old', 'knowledge', timestamptz '2025-01-01' + make_interval(secs => i), timestamptz '2025-01-01'
+		   FROM generate_series(1, 300) i`,
+		`INSERT INTO context_blocks (category, title, content, scope, type_name, created_at, updated_at)
+		 SELECT 'learnings', 'ni new ' || i, 'body ' || i, 'ni-new', 'knowledge', timestamptz '2026-01-01' + make_interval(secs => i), timestamptz '2026-01-01'
+		   FROM generate_series(1, 20000) i`,
+		`DROP INDEX idx_context_scope_active`,
+		`VACUUM (ANALYZE) context_blocks`,
+	} {
+		if _, err := db.Exec(ctx, st); err != nil {
+			t.Fatalf("%v\n%s", err, st)
+		}
+	}
+	traced, tr := rrTraced(t, db)
+	planners := &rrPlanners{t: t}
+	tr.take()
+	res, err := store.FullGraph(ctx, traced, store.EgoParams{Limit: 1500, EdgeLimit: 1}, []string{"ni-old"}, nil, []string{"knowledge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Nodes) != 300 {
+		t.Fatalf("%d nodes, want 300", len(res.Nodes))
+	}
+	st := rrFind(t, tr.take(), func(sql string) bool { return strings.Contains(sql, "left(") && strings.Contains(sql, "context_blocks") })
+	if strings.Contains(st.sql, "UNION ALL") || st.mode != pgx.QueryExecModeCacheDescribe {
+		t.Fatalf("without idx_context_scope_active the seed sent the merge form (mode %v); want the planned form", st.mode)
+	}
+	for _, rpc := range testdb.RandomPageCosts {
+		got := planners.explain(db, rpc, false, st)
+		t.Logf("custom plan at random_page_cost %s: %d buffers; %s", rpc, got.buffers, got.indexes())
+		if got.buffers > 64 {
+			t.Errorf("custom plan at random_page_cost %s: %d buffers for 300 rows behind 20 000 newer ones", rpc, got.buffers)
+		}
+	}
+}
+
 // seedEnvInt reads a positive integer from the environment, else def.
 func seedEnvInt(name string, def int) int {
 	if v, err := strconv.Atoi(os.Getenv(name)); err == nil && v > 0 {
