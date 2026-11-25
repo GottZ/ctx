@@ -1305,7 +1305,13 @@ type QueueStats struct {
 // a query; nil keeps the unchanged query.
 //
 // The counts are one pass over the reader's eligible rows (queueDepthSQL),
-// read in a transaction of their own with queueDepthPlan.
+// read in a transaction of their own with queueDepthPlan, planned with the
+// reader's scopes on every execution (store.CustomPlanMode): the generic plan
+// a pooled connection switched to after five executions of larger readers
+// read the table for a reader of a few hundred blocks (37 508 buffers in a
+// parallel sequential scan against 43 on idx_blocks_dream_eligible, 900 000
+// rows, random_page_cost 1.1) — with plain index scans off it has nothing
+// but a scan of the table or a bitmap over scopes it cannot size.
 func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []string) (*QueueStats, error) {
 	var q QueueStats
 	if windowClosed(scopes) {
@@ -1315,7 +1321,7 @@ func QueueDepth(ctx context.Context, pool *pgxpool.Pool, scopes, linkable []stri
 		if _, err := tx.Exec(ctx, queueDepthPlan); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, queueDepthSQL, scopes, linkable).Scan(
+		return tx.QueryRow(ctx, queueDepthSQL, store.CustomPlanMode(pool), scopes, linkable).Scan(
 			&q.PickableNow, &q.InCooldown, &q.NeverDreamed, &q.AwaitingEmbed, &q.Incoming1h, &q.Incoming6h, &q.NextPendingAt)
 	})
 	if err != nil {

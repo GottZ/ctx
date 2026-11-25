@@ -109,8 +109,8 @@ func (q *qdTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndDa
 
 // TestRangeReadsQueueDepthReadsTheEligibleRowsOnce: the dream queue counts
 // are one aggregate pass, sent in a transaction with plain index scans and
-// JIT off, and answer the numbers of the statement before for every reader
-// below. Before, a CTE every one of seven sub-selects read (PostgreSQL
+// JIT off and planned with the reader's scopes on every execution, and
+// answer the numbers of the statement before for every reader below. Before, a CTE every one of seven sub-selects read (PostgreSQL
 // materializes it), on the pool, whose custom plan at random_page_cost 4
 // walked idx_blocks_sensitivity over every live row of the table (22-32 s at
 // 10 000 000 rows) and whose generic plan compiled JIT on every execution
@@ -211,6 +211,14 @@ func TestRangeReadsQueueDepthReadsTheEligibleRowsOnce(t *testing.T) {
 	tr.mu.Unlock()
 	if sql == "" {
 		t.Fatal("the counts' statement was not traced")
+	}
+	// Planned with the reader's scopes on every execution: an unnamed
+	// statement (store.CustomPlanMode), not one whose generic plan a pooled
+	// connection keeps after five executions of other readers.
+	if len(args) == 0 || args[0] != store.CustomPlanMode(pool) {
+		t.Errorf("the counts' statement was sent with %v, want the mode store.CustomPlanMode answers (%v)", args, store.CustomPlanMode(pool))
+	} else {
+		args = args[1:]
 	}
 	for _, rpc := range testdb.RandomPageCosts {
 		p := testdb.WithSessionSettings(t, pool, map[string]string{"random_page_cost": rpc, "enable_indexscan": "off", "jit": "off"})
