@@ -51,9 +51,11 @@ func TestRules_AHomographOfAnEnglishPastIsReadByItsPlace(t *testing.T) {
 // verb of its own only where they can be one — not in an English sentence
 // ("such", "sage", "check" are English words), not written with their
 // capital inside a sentence (a German noun: "Suche", "Check"), not in "sage
-// und schreibe", not where another verb of the clause is the finite one; an
-// English "check" or "bring" at the start of the question or before its
-// object is one.
+// und schreibe", not where another verb of the clause is the finite one, and
+// only with something that says so — an object, a pronoun, "bitte", a
+// particle at the end, a clause behind it ("Suche am Montag ebenfalls?" at
+// the start of a sentence is the noun); an English "check" or "bring" at the
+// start of the question or before its object is one.
 func TestRules_AnImperativeOpensItsClauseOnlyWhereItCanBeOne(t *testing.T) {
 	check517(t, now517, want517{
 		"We broke prod on Friday, such a mess on Monday too.":                 "2026-11-20/past 2026-11-16/past",
@@ -62,12 +64,17 @@ func TestRules_AnImperativeOpensItsClauseOnlyWhereItCanBeOne(t *testing.T) {
 		"Am Freitag ging alles schief, Suche am Montag auch kaputt?":          "2026-11-20/past 2026-11-16/past",
 		"Am Freitag gab es Ärger, sage und schreibe sieben Alerts am Montag?": "2026-11-20/past 2026-11-16/past",
 		"Check am Montag ergab nichts – was lief am Freitag schief?":          "2026-11-16/past 2026-11-20/past",
+		"Am Freitag fiel der Login aus. Suche am Montag ebenfalls?":           "2026-11-20/past 2026-11-16/past",
+		"am montag kam ein ticket rein, frage am dienstag dazu?":              "2026-11-16/past 2026-11-17/past",
+		"am freitag ging der build kaputt, check am montag auch rot?":         "2026-11-20/past 2026-11-16/past",
 		// counter-cases: an imperative where it can be one
 		"Schau dir am Freitag an, was am Montag schiefging.":              "2026-11-27/future 2026-11-16/past",
 		"Suche am Montag die Mail heraus, die am Freitag kam.":            "2026-11-23/future 2026-11-20/past",
 		"Der Build brach am Montag, schau dir das am Donnerstag an.":      "2026-11-16/past 2026-11-26/future",
 		"The build broke on Monday, check the logs on Thursday.":          "2026-11-16/past 2026-11-26/future",
 		"Check on Friday whether the job that failed on Monday was rerun": "2026-11-27/future 2026-11-16/past",
+		"Am Montag kam die Lieferung, prüf am Freitag den Bestand.":       "2026-11-16/past 2026-11-27/future",
+		"Am Montag brach der Build. Frag am Freitag nach, warum.":         "2026-11-16/past 2026-11-27/future",
 	})
 }
 

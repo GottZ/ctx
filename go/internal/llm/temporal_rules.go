@@ -2410,12 +2410,49 @@ func (c clauseWords) imperativeAt(s, e int) bool {
 	if lang == langEnglish {
 		return englishImperatives[w] && (s == 0 || s+1 < e && imperativeObjects[c.words[s+1]])
 	}
+	return c.germanImperativeAt(s, e)
+}
+
+// imperativeSigns are the words that make a German form of imperatives the
+// imperative where its case does not tell it from a noun (at the start of a
+// sentence, in a question written in lower case): its object, a pronoun or
+// an article ("Suche am Montag die Mail heraus", "Schau dir …"), or "bitte",
+// "mal", "doch"; imperativeParticles the separable particles a request
+// leaves at the end of its clause ("Trag am Freitag ein, …", "Frag am Montag
+// nach, …"), issue #532.
+var (
+	imperativeSigns = toWordSet("mir", "mich", "dir", "dich", "uns", "euch", "ihm", "ihn", "ihnen", "es", "sie",
+		"der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem", "einer", "eines",
+		"mein", "meine", "meinen", "meinem", "meiner", "dein", "deine", "deinen", "deinem", "deiner",
+		"unser", "unsere", "unseren", "unserem", "unserer", "euer", "eure", "euren", "eurem", "seine", "seinen",
+		"seinem", "ihre", "ihren", "ihrem", "bitte", "mal", "doch")
+	imperativeParticles = toWordSet("an", "nach", "ein", "aus", "mit", "zurück", "heraus", "raus", "herein", "rein",
+		"zusammen", "vor", "fest", "durch", "auf", "ab", "zu", "weg", "hoch", "runter", "sicher")
+)
+
+// germanImperativeAt is imperativeAt in a clause that is not English: a
+// form there is the imperative where no other verb of the clause is the
+// finite one ("Check am Montag ergab nichts"; a word written with its
+// capital is a noun, "Bestand", not "bestand") and where something says so —
+// a word of imperativeSigns, a particle of imperativeParticles at the end of
+// the clause, or a clause behind it in its sentence opened by a conjunction
+// or an interrogative ("Prüf am Freitag, ob …"). Without one the form is a
+// noun as often ("Am Freitag fiel der Login aus. Suche am Montag
+// ebenfalls?"), issue #532.
+func (c clauseWords) germanImperativeAt(s, e int) bool {
+	scanned(e - s)
+	sign := false
 	for i := s + 1; i < e; i++ {
-		if x := c.words[i]; germanFiniteVerb(x) || strongPastWord(x) {
+		x := c.words[i]
+		if (germanFiniteVerb(x) || strongPastWord(x)) && !c.written[i] {
 			return false
 		}
+		sign = sign || imperativeSigns[x]
 	}
-	return true
+	if sign || imperativeParticles[c.words[e-1]] {
+		return true
+	}
+	return e < len(c.words) && !c.sentence[e] && (germanSubordinators[c.words[e]] || germanInterrogatives[c.words[e]])
 }
 
 // perfektAux are the finite forms of "haben" and "sein", and the past
