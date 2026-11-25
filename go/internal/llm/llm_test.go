@@ -424,10 +424,16 @@ func TestValidateTranslation(t *testing.T) {
 			true,
 		},
 		{
-			"unicode rejected",
+			"letters beyond ASCII accepted",
 			"Schöne Übersetzung",
 			"Schoene Uebersetzung",
-			false, // ö and ü not in safePattern
+			true, // #551: letters of any script pass; symbols, control and format characters do not
+		},
+		{
+			"symbol beyond ASCII rejected",
+			"Schöne Übersetzung ✓",
+			"Schoene Uebersetzung",
+			false,
 		},
 		{
 			"question mark and exclamation allowed",

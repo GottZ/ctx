@@ -130,8 +130,21 @@ Sicherheitskopie=Backup, Wiederherstellung=Recovery, Zugriffsschluessel=API Key`
 var promptTranslate = prompts.Register(
 	"llm.translationSystemPrompt", "2026-11-24", "github.com/GottZ/ctx/internal/llm")
 
-// safePattern allows only alphanumeric, spaces, hyphens, periods, commas, parentheses.
-var safePattern = regexp.MustCompile(`^[a-zA-Z0-9\s\-.,()!?]+$`)
+// safePattern is the character allowlist of a translation: letters of any
+// script with their combining marks (#551: Ålesund, Müller, Søren — names the
+// model keeps; before, an answer with one was dropped and the call paid for
+// nothing), ASCII digits, ASCII white space, and - . , ( ) ! ?. The model's
+// answer replaces the question in every retrieval arm, and the prompt asks for
+// one line without special characters, so an answer that obeyed instructions
+// in the question, explains itself or keeps code fails here: any other ASCII
+// punctuation (SQL meta characters, markdown, paths, key:value, quotes),
+// control and format characters (NUL, ESC, bidi overrides, zero-width
+// characters, soft hyphen), line and paragraph separators, non-ASCII spaces,
+// symbols and emoji, other digits, private-use code points and invalid UTF-8.
+// It came over from the n8n workflow (a6aa70e2), where the translation was
+// spliced into SQL; the query path has been parameterised since, so the
+// allowlist is the shape gate for the answer and a second line of defence.
+var safePattern = regexp.MustCompile(`^[\p{L}\p{M}0-9\s\-.,()!?]+$`)
 
 // sqlMetaChars are characters stripped from translations to prevent injection.
 var sqlStripper = strings.NewReplacer(
