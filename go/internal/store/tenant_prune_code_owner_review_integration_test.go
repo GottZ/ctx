@@ -259,3 +259,66 @@ func TestTenantPruneBoundHoldsAfterTheTwentiethRound(t *testing.T) {
 		t.Errorf("the delete ran %d closing rounds, want 21", w.round)
 	}
 }
+
+// An operator sets the tenant's status back to active while its delete runs
+// (tenant-update): a server run holds the tenant's gate again and writes.
+// The delete's closing round waits for that write — it takes the gate as the
+// first step did — and then does not finish over a tenant whose door is open
+// again: the tenant row stays, and the next delete takes the run's row.
+// Before, the delete answered success beside the open write, which then
+// committed into a scope no tenant owned.
+func TestTenantDeleteDoesNotFinishOverAStatusSetBack(t *testing.T) {
+	f := newP547Fixture(t)
+	ctx := context.Background()
+	tenantID, scopes, _ := pruneWritersTenant(t, f, "setback", 1)
+	f.block(t, scopes[0], "setback seed")
+
+	h := keyStepHold()
+	done := make(chan error, 1)
+	go func() { done <- store.PruneTenant(ctx, pruneHoldPool(t, f.dsn, h), tenantID, store.AuditStamp{}) }()
+	waitPruneHeld(t, h, done)
+	if _, err := store.UpdateTenant(ctx, f.pool, tenantID, "active", ""); err != nil {
+		t.Fatal(err)
+	}
+	// A run's write: the gate first, then a row in the tenant's scope.
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := store.HoldRunTenant(ctx, tx, tenantID); err != nil {
+		t.Fatalf("the run's gate after the status was set back: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO context_blocks (category, title, content, scope) VALUES ('learnings', 'setback run write', 'c', $1)`, scopes[0]); err != nil {
+		t.Fatal(err)
+	}
+	close(h.release)
+	select {
+	case err := <-done:
+		_ = tx.Commit(ctx)
+		blocks, _, _, tenant := pruneLeftovers(t, f.pool, tenantID, scopes)
+		t.Fatalf("the delete ended (%v) beside an open run write of the tenant; after the write committed: %d block(s) in %s, tenant row %d", err, blocks, scopes[0], tenant)
+	case <-time.After(2 * time.Second):
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("the run's commit: %v", err)
+	}
+	var perr error
+	select {
+	case perr = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the delete did not end after the run's write committed")
+	}
+	_, _, _, tenant := pruneLeftovers(t, f.pool, tenantID, scopes)
+	t.Logf("delete over a status set back: %v; tenant row %d", perr, tenant)
+	if !errors.Is(perr, store.ErrTenantPruneIncomplete) || tenant != 1 {
+		t.Fatalf("delete: %v, tenant row %d; want ErrTenantPruneIncomplete and the tenant kept", perr, tenant)
+	}
+	if err := store.PruneTenant(ctx, f.pool, tenantID, store.AuditStamp{}); err != nil {
+		t.Fatalf("the next delete: %v", err)
+	}
+	blocks, _, _, tenant := pruneLeftovers(t, f.pool, tenantID, scopes)
+	if blocks != 0 || tenant != 0 {
+		t.Errorf("after the next delete: %d blocks, tenant row %d", blocks, tenant)
+	}
+}

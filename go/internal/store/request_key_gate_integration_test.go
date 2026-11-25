@@ -310,7 +310,15 @@ func TestTenantPruneEndsBesideAWriterWithoutAGate(t *testing.T) {
 			}
 		}()
 	}
-	time.Sleep(100 * time.Millisecond)
+	// The delete starts beside writers that write: without one write through
+	// it would run alone and prove nothing.
+	for wait := time.Now(); written.Load() == 0; time.Sleep(5 * time.Millisecond) {
+		if time.Since(wait) > 10*time.Second {
+			close(stop)
+			wg.Wait()
+			t.Fatal("no writer without a gate got a write through within 10 s")
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	start := time.Now()
@@ -586,8 +594,12 @@ func TestKeyStepWaitsForOneWriteOfALongRequest(t *testing.T) {
 	if at.IsZero() {
 		t.Fatalf("the long request was never refused (%d chunks written)", written.Load())
 	}
-	// At most the chunk in flight when the key step asked for the gate.
-	if n := afterStart.Load(); n > 1 {
+	// At most the chunk in flight when the key step asked for the gate —
+	// and one more: the tracer notes the ask before pgx sends it, and on two
+	// cores a chunk committed and the next took its gate in between (6 of
+	// 130 runs in the review). The bound still tells a key step that waits
+	// for the request's 200 chunks from one that waits for a write.
+	if n := afterStart.Load(); n > 2 {
 		t.Fatalf("%d chunks of the long request committed after the key step asked for the gate — it waited for more than the write in flight", n)
 	}
 	if blocks, links, other, tenant := pruneLeftovers(t, f.pool, tenantID, scopes); blocks+links+other+tenant != 0 {

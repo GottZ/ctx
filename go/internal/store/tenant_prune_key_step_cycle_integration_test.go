@@ -128,7 +128,10 @@ func TestTenantDeleteKeyStepBesideABookedUpdate(t *testing.T) {
 			// 5. The first writer goes on and waits for Y.
 			release(hf)
 			if !waitLockWaiters(f.pool, 2) {
-				t.Logf("the first writer did not wait for Y (it may have gone through)")
+				// Without that wait the schedule is not the one this test
+				// is about: both writers and the delete go through with no
+				// chain between them.
+				t.Fatalf("the first writer did not wait for Y: the schedule has no lock chain to test")
 			}
 			// 6. The late writer books.
 			began := time.Now()
@@ -166,6 +169,11 @@ func TestTenantDeleteKeyStepBesideABookedUpdate(t *testing.T) {
 			}
 			if perr != nil {
 				t.Errorf("%s: the delete beside the two writers: %v", name, perr)
+			}
+			// Neither writer is refused in this schedule: both hold their
+			// gate before the key step asks, so it waits for both.
+			if lerr != nil || ferr != nil {
+				t.Errorf("%s: a writer that held its gate before the key step failed — booked update: %v; single store: %v", name, lerr, ferr)
 			}
 			if blocks+links+other+tenant != 0 {
 				t.Errorf("%s: rows left after the delete", name)

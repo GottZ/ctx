@@ -258,6 +258,17 @@ func pruneTenantClose(ctx context.Context, pool *pgxpool.Pool, tenantID string, 
 	for round := 1; ; round++ {
 		var left int64
 		err := writeSupersedesSourceScopes(ctx, pool, pgxdb.At("store: prune closing round"), func(tx pgx.Tx, extra []string) error {
+			// The run tenant's gate first, exclusively, as the delete's first
+			// step took it (markTenantOffboarding): a run's write that holds
+			// it commits before this round reads, and one that asks after it
+			// finds the tenant row gone or the round's rows deleted. The
+			// first step alone left a gap: a status set back to active while
+			// the delete ran (tenant-update) let a run hold the gate again,
+			// and its write committed after the delete had answered success.
+			// A gate is every writer's first lock, so this adds no order.
+			if _, err := tx.Exec(ctx, runTenantExclusiveSQL, tenantID); err != nil {
+				return fmt.Errorf("run tenant gate: %w", err)
+			}
 			// Stamped (no lock): the round's configuration deletes and the
 			// tenant row's cascade write audit rows that name the offboarding.
 			if err := stampAudit(ctx, tx, stamp); err != nil {
@@ -319,15 +330,22 @@ const pruneLateScopesSQL = `SELECT count(*)::int FROM context_tenant_scopes WHER
 // it, and the count is a statement of its own: it sees every assign that
 // committed before the lock was granted, and none can come after. The delete
 // fails then and the tenant stays offboarding; the next delete reads the
-// scope in its list.
+// scope in its list. A status that is no longer offboarding under that lock
+// fails the delete as well (see there).
 func pruneNoLateScope(ctx context.Context, tx pgx.Tx, tenantID string, scopes []string) error {
-	var one int
-	if err := tx.QueryRow(ctx, `SELECT 1 FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, tenantID).Scan(&one); err != nil {
+	var status string
+	if err := tx.QueryRow(ctx, `SELECT status FROM context_tenants WHERE id = $1::uuid FOR UPDATE`, tenantID).Scan(&status); err != nil {
 		if pgxdb.AbsentOrMalformed(err) {
 			// Another delete of the tenant came first.
 			return ErrTenantNotFound
 		}
 		return err
+	}
+	if status != tenantStatusOffboarding {
+		// An operator set the status back while the delete ran: the tenant's
+		// door is open again (its runs write, a new key authenticates), and
+		// a delete that went on would not be the one that closed it.
+		return fmt.Errorf("the tenant's status was set to %q while its delete ran; run the delete again", status)
 	}
 	var late int
 	if err := tx.QueryRow(ctx, pruneLateScopesSQL, tenantID, scopes).Scan(&late); err != nil {

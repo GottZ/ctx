@@ -103,6 +103,7 @@ func TestRequestKeyGateThroughput(t *testing.T) {
 						continue
 					}
 					title := fmt.Sprintf("tput %d %d %d", writers, w, i)
+					var err error // each worker's own: the outer one is shared
 					if budgeted {
 						_, err = store.UpsertBlocks(wctx, pool, []store.BatchUpsert{{Category: "learnings", Title: title, Content: "c " + title, Scope: scopes[0], ScopeExplicit: true}},
 							ar.ApiKeyID, f.set, &store.WriteBudget{APIKeyID: ar.ApiKeyID, Limit: 1 << 30})
