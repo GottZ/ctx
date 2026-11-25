@@ -14,6 +14,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -26,7 +28,8 @@ import (
 
 // requestKeyWriters runs writers of the key key in flight, until stop is
 // closed: a single store, a block batch over two of the scopes (with the
-// write budget, as the batch surfaces call it), and a blob, each once per
+// write budget, as the batch surfaces call it), a block batch without one
+// (as the confirm of a staged batch calls it), and a blob, each once per
 // millisecond. A write that fails with anything but ErrRequestKeyGone is an
 // error of the test.
 type requestKeyWriters struct {
@@ -79,6 +82,12 @@ func (w *requestKeyWriters) start(t *testing.T, f *p547Fixture, key string, scop
 		}, ar.ApiKeyID, f.set, budget)
 		return err
 	})
+	loop("block batch without a budget", func(i int) error { // the confirm of a staged batch books nothing
+		_, err := store.UpsertBlocks(rctx, f.pool, []store.BatchUpsert{
+			{Category: "learnings", Title: fmt.Sprintf("rk unbudgeted %d", i), Content: "a request's block", Scope: scopes[(i+2)%len(scopes)], ScopeExplicit: true},
+		}, ar.ApiKeyID, f.set, nil)
+		return err
+	})
 	loop("blob", func(i int) error {
 		_, err := store.UpsertBlob(rctx, f.pool, "files", fmt.Sprintf("rk blob %d", i), "f.txt", "text/plain",
 			scopes[i%len(scopes)], []byte("a request's file"), nil, nil, "")
@@ -88,23 +97,28 @@ func (w *requestKeyWriters) start(t *testing.T, f *p547Fixture, key string, scop
 
 // TestTenantPruneBesideRequestsInFlight: a tenant-delete beside requests of
 // the tenant's key that authenticated before it and write once per
-// millisecond over the whole delete, 50 runs: every run answers success and
+// millisecond over the whole delete (10 runs; 50 with CTX_P555_RUNS=50): every run answers success and
 // leaves no row in the tenant's scopes, and every write the writers made
 // either went through (and was deleted with the tenant) or answered
 // ErrRequestKeyGone.
 func TestTenantPruneBesideRequestsInFlight(t *testing.T) {
 	f := newP547Fixture(t)
 	ctx := context.Background()
-	const runs = 50
+	// 10 runs in the suite; the evidence run of issue #555 took 50
+	// (CTX_P555_RUNS=50).
+	runs, seed := envInt("CTX_P555_RUNS", 10), envInt("CTX_P555_SEED", 300)
 	var written, refused int64
+	var took time.Duration
 	for run := range runs {
 		tenantID, scopes, key := pruneWritersTenant(t, f, fmt.Sprintf("rk%02d", run), 3)
-		pruneWritersSeed(t, f, scopes, 300)
+		pruneWritersSeed(t, f, scopes, seed)
 		stop := make(chan struct{})
 		w := &requestKeyWriters{}
 		w.start(t, f, key, scopes, stop)
 		time.Sleep(20 * time.Millisecond)
+		start := time.Now()
 		perr := store.PruneTenant(ctx, f.pool, tenantID, store.AuditStamp{})
+		took += time.Since(start)
 		time.Sleep(20 * time.Millisecond) // writes after the delete answered
 		close(stop)
 		w.wg.Wait()
@@ -125,24 +139,35 @@ func TestTenantPruneBesideRequestsInFlight(t *testing.T) {
 		written += w.written.Load()
 		refused += w.refused.Load()
 	}
-	t.Logf("%d runs: %d writes went through (and went with their tenant), %d were refused with ErrRequestKeyGone", runs, written, refused)
+	t.Logf("%d runs of %d seeded blocks over 3 scopes: the deletes took %s in all; %d writes went through (and went with their tenant), %d were refused with ErrRequestKeyGone",
+		runs, seed, took.Round(time.Millisecond), written, refused)
+}
+
+func envInt(name string, def int) int {
+	if n, err := strconv.Atoi(os.Getenv(name)); err == nil && n > 0 {
+		return n
+	}
+	return def
 }
 
 // TestRequestKeyHoldLockPairs: the key share every request write now takes
-// first, against the paths it meets (issue #555): 200 rounds per pair, both
-// sides started together, no lock cycle (40P01) and no other fault on either
-// side.
+// first, against the paths it meets (issue #555): 20 rounds per pair (200
+// with CTX_P555_PAIR_ROUNDS=200), both sides started together, no lock cycle
+// (40P01) and no other fault on either side.
 //
-//   - writers of two keys of a tenant (a block batch of one key, a single
-//     store of the other on the same identities) × the tenant-delete, whose
-//     key step deletes both keys one after the other;
+//   - writers of two keys of a tenant (a block batch and a booked update of
+//     one key; a single store and a supersedes declaration of the other, on
+//     the same identities and scope) × the tenant-delete, whose key step
+//     deletes both keys one after the other;
 //   - a writer × AssignTenantScope of its tenant (the tenant row FOR UPDATE);
 //   - a block batch × a scope move of one of its scopes' blocks (both
 //     requests of the same key).
 func TestRequestKeyHoldLockPairs(t *testing.T) {
 	f := newP547Fixture(t)
 	ctx := context.Background()
-	const rounds = 200
+	// 20 rounds per pair in the suite (the first pair takes about 5 s a
+	// round); the evidence run of issue #555 took 200 (CTX_P555_PAIR_ROUNDS=200).
+	rounds := envInt("CTX_P555_PAIR_ROUNDS", 20)
 	deadlock := func(err error) bool { return err != nil && pgxdb.SerializationConflict(err) }
 	authed := func(t *testing.T, key string) (context.Context, string) {
 		ar, err := auth.Authenticate(ctx, f.pool, key)
@@ -172,9 +197,10 @@ func TestRequestKeyHoldLockPairs(t *testing.T) {
 				t.Fatal(err)
 			}
 			c1, id1 := authed(t, key1)
-			c2, _ := authed(t, key2)
-			f.block(t, scopes[0], "kp seed a")
+			c2, id2 := authed(t, key2)
+			target := f.block(t, scopes[0], "kp seed a")
 			f.block(t, scopes[1], "kp seed b")
+			same0 := f.block(t, scopes[0], "kp same 0")
 			// Both writers loop over the whole delete, on the same identities:
 			// a batch of the first key (it takes the scope locks), a single
 			// store of the second (no scope lock), so the delete's key step
@@ -212,6 +238,28 @@ func TestRequestKeyHoldLockPairs(t *testing.T) {
 			})
 			loop("single store", func(i int) error {
 				_, err := store.UpsertBlock(c2, f.pool, "learnings", fmt.Sprintf("kp same %d", i%4), fmt.Sprintf("single %d", i), nil, nil, scopes[0], true, store.SensitivityWrite{}, "")
+				return err
+			})
+			// A booked update of the first key on a block the second key's
+			// single store writes too: its booking takes the key's key share
+			// after the row unless it holds the key first.
+			loop("booked update", func(i int) error {
+				content := fmt.Sprintf("updated %d", i)
+				_, _, err := store.UpdateBlockBooked(c1, f.pool, same0, store.UpdateBlockData{Content: &content}, scopes, &store.WriteBudget{APIKeyID: id1})
+				if errors.Is(err, store.ErrBlockNotFound) {
+					return nil // the delete's block pass took it: an answer, not a fault
+				}
+				return err
+			})
+			// A declaration of the second key: it takes the scope lock the
+			// batch of the first key takes (a writer that held that lock and
+			// then waited for its key would meet it in a cycle).
+			loop("declaration", func(i int) error {
+				_, err := store.UpsertBlockSupersedes(c2, f.pool, "learnings", "kp declaring", fmt.Sprintf("declaration %d", i), nil, nil, scopes[0], true,
+					store.SensitivityWrite{}, "", store.SupersedesDeclaration{TargetID: target, APIKeyID: id2, Types: f.set})
+				if errors.Is(err, store.ErrSupersedesTarget) {
+					return nil // the delete's block pass took the target: an answer, not a fault
+				}
 				return err
 			})
 			perr := store.PruneTenant(ctx, f.pool, tenantID, store.AuditStamp{})

@@ -52,5 +52,8 @@ func TestNULGuardJoinCopyProbe(t *testing.T) {
 		escaped, s2 := measure(build(true))
 		t.Logf("round %d: a %d MB JSON body: guard + replay allocated %.1f MB without the escape text (status %d), %.1f MB with it (status %d)",
 			round, size>>20, float64(plain)/(1<<20), s1, float64(escaped)/(1<<20), s2)
+		if escaped > plain+plain/4 {
+			t.Errorf("a body that only quotes the escape cost %.1f MB against %.1f MB without it: copied once more", float64(escaped)/(1<<20), float64(plain)/(1<<20))
+		}
 	}
 }

@@ -2301,6 +2301,17 @@ func runBlockUpdate(ctx context.Context, pool *pgxpool.Pool, b *Block, u blockUp
 		write = writeSupersedesSource // lockSupersedesSource may ask for a re-run
 	}
 	if err := write(ctx, pool, pgxdb.At("store: update block"), func(tx pgx.Tx) error {
+		// A booked update's booking takes its key's key share through the
+		// foreign key, after the row; taken first instead (issue #555,
+		// holdRequestKey), no lock cycle runs through the tenant-delete's
+		// key step: holding the row and then waiting for the key behind
+		// that step, it would wait for a step that waits for a writer of
+		// another key of the tenant, which may wait for this row.
+		if budget != nil {
+			if err := holdRequestKey(ctx, tx); err != nil {
+				return err
+			}
+		}
 		var held updateHold
 		if scopeMove {
 			var err error
