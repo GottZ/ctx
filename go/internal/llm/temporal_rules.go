@@ -1622,12 +1622,18 @@ func (c clauseWords) verbLastPastAt(i, e int) bool {
 		return false
 	}
 	w := c.words[i]
+	return strongPastWord(w) || weakPastShape(w)
+}
+
+// strongPastWord reports whether w is a form of strongPastForms as the whole
+// word or behind a prefix of pastPrefixPat ("hing", "auftraten", "ergab").
+func strongPastWord(w string) bool {
 	for _, f := range strongPastForms {
 		if rest, ok := strings.CutSuffix(w, f); ok && (rest == "" || pastPrefixPat.MatchString(rest)) {
 			return true
 		}
 	}
-	return weakPastShape(w)
+	return false
 }
 
 // pastPrefixPat are the prefixes a strong simple past takes in a verb-last
@@ -2147,7 +2153,7 @@ var (
 // Montag zu deployen"). A clause with none of them ("Am Montag,", "On
 // Monday,") takes the tense of the question.
 func (c clauseWords) hasOwnVerb(s, e int) bool {
-	if clauseOpeners[c.words[s]] || hortatives[c.words[s]] || imperatives[c.words[s]] {
+	if clauseOpeners[c.words[s]] || hortatives[c.words[s]] || c.imperativeAt(s, e) {
 		return true
 	}
 	for i := s; i < e; i++ {
@@ -2245,6 +2251,47 @@ var imperatives = toWordSet("schau", "schaue", "guck", "sieh", "schick", "schick
 	"erinnere", "erinner", "melde", "meld", "kümmere", "kümmer", "bring", "bringe", "leg", "lege", "lies", "nimm",
 	"denk", "denke", "merk", "merke", "teste", "hilf", "zeig", "zeige", "hol", "hole", "such", "suche", "notier",
 	"notiere", "informier", "informiere", "kontrollier", "kontrolliere", "stell", "stelle", "setz", "setze", "trag", "trage")
+
+// englishImperatives are the words of imperatives that are the English
+// imperative of the same verb as well; imperativeObjects the words that
+// make one of them an imperative in an English sentence, its object ("check
+// the logs on Monday", "bring them on Friday"), issue #532.
+var (
+	englishImperatives = toWordSet("bring", "check")
+	imperativeObjects  = toWordSet("the", "a", "an", "this", "that", "these", "those", "my", "our", "your", "their",
+		"his", "her", "its", "it", "them", "me", "us", "him", "everything", "all")
+)
+
+// imperativeAt reports whether word s of c, the first word of the clause [s,
+// e), is an imperative of imperatives where it can be one (issue #532): the
+// forms are German, and most are an English word as well ("such", "sage",
+// "check", "hole", "leg", "lies", "sag") or, written with their capital, a
+// German noun ("Suche", "Frage", "Schau", "Stelle", "Trage", "Rufe"). So a
+// form counts in a sentence that is not English, not written with its
+// capital inside a sentence ("…, Suche am Montag auch kaputt?"), not in "sage
+// und schreibe", and not where another verb of its clause is the finite one
+// ("Check am Montag ergab nichts"); in an English sentence only "bring" and
+// "check" do, at the start of the question or before their object ("Check
+// on Friday whether …", "…, check the logs on Monday").
+func (c clauseWords) imperativeAt(s, e int) bool {
+	w := c.words[s]
+	if !imperatives[w] || s > 0 && !c.sentence[s] && c.written[s] {
+		return false
+	}
+	if w == "sage" && s+2 < e && c.words[s+1] == "und" && c.words[s+2] == "schreibe" {
+		return false
+	}
+	if ss, se := c.sentenceOf(s); c.sentenceLanguage(ss, se) == langEnglish {
+		return englishImperatives[w] && (s == 0 || s+1 < e && imperativeObjects[c.words[s+1]])
+	}
+	scanned(e - s)
+	for i := s + 1; i < e; i++ {
+		if x := c.words[i]; germanFiniteVerb(x) || strongPastWord(x) {
+			return false
+		}
+	}
+	return true
+}
 
 // perfektAux are the finite forms of "haben" and "sein", and the past
 // subjunctive of both ("hätte gemacht", "wäre gegangen"), that make the

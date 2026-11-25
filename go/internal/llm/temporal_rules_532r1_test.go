@@ -39,3 +39,28 @@ func TestRules_AHomographOfAnEnglishPastIsReadByItsPlace(t *testing.T) {
 		"We chose the new region on Friday, right?":               "2026-11-20/past",
 	})
 }
+
+// TestRules_AnImperativeOpensItsClauseOnlyWhereItCanBeOne (issue #532,
+// review round): the German imperatives of a request give their clause a
+// verb of its own only where they can be one — not in an English sentence
+// ("such", "sage", "check" are English words), not written with their
+// capital inside a sentence (a German noun: "Suche", "Check"), not in "sage
+// und schreibe", not where another verb of the clause is the finite one; an
+// English "check" or "bring" at the start of the question or before its
+// object is one.
+func TestRules_AnImperativeOpensItsClauseOnlyWhereItCanBeOne(t *testing.T) {
+	check517(t, now517, want517{
+		"We broke prod on Friday, such a mess on Monday too.":                 "2026-11-20/past 2026-11-16/past",
+		"The build broke on Friday, check on Monday too?":                     "2026-11-20/past 2026-11-16/past",
+		"Prod went down on Friday, sage advice on Monday?":                    "2026-11-20/past 2026-11-16/past",
+		"Am Freitag ging alles schief, Suche am Montag auch kaputt?":          "2026-11-20/past 2026-11-16/past",
+		"Am Freitag gab es Ärger, sage und schreibe sieben Alerts am Montag?": "2026-11-20/past 2026-11-16/past",
+		"Check am Montag ergab nichts – was lief am Freitag schief?":          "2026-11-16/past 2026-11-20/past",
+		// counter-cases: an imperative where it can be one
+		"Schau dir am Freitag an, was am Montag schiefging.":              "2026-11-27/future 2026-11-16/past",
+		"Suche am Montag die Mail heraus, die am Freitag kam.":            "2026-11-23/future 2026-11-20/past",
+		"Der Build brach am Montag, schau dir das am Donnerstag an.":      "2026-11-16/past 2026-11-26/future",
+		"The build broke on Monday, check the logs on Thursday.":          "2026-11-16/past 2026-11-26/future",
+		"Check on Friday whether the job that failed on Monday was rerun": "2026-11-27/future 2026-11-16/past",
+	})
+}
