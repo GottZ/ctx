@@ -72,9 +72,37 @@ func TestTenantDeleteSaysTheDeleteGoesOnWhenTheRequestEnds(t *testing.T) {
 		t.Fatal("a request that ended without an answer reported success")
 	}
 	t.Logf("error: %v", err)
-	for _, want := range []string{"the delete goes on at the server", "offboarding", "run the delete again"} {
+	for _, want := range []string{"the delete may still be running on the server", "offboarding", "run the delete again"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error of a request that ended before the delete's answer does not say %q: %v", want, err)
 		}
+	}
+}
+
+// A request the server never saw (the connection refused) says nothing about
+// a delete going on; a reverse proxy's 504 (its read timeout ran out while
+// the server worked) does.
+func TestTenantDeleteHintOnlyWhereTheDeleteMayRun(t *testing.T) {
+	gone := httptest.NewServer(http.NotFoundHandler())
+	url := gone.URL
+	gone.Close() // nothing listens there any more
+	refused := NewClientWithTimeout(Config{BaseURL: url, Key: "k"}, 5*time.Second, maxResponseSize)
+	err := runTenantDelete(func() (*Client, error) { return refused, nil }, "01a2105d-0000-7000-8000-000000000555")
+	if err == nil || strings.Contains(err.Error(), "may still be running") {
+		t.Errorf("a refused connection: %v — want an error without the hint (the server never saw the request)", err)
+	}
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusGatewayTimeout)
+		_, _ = w.Write([]byte("<html><body>504 Gateway Time-out</body></html>"))
+	}))
+	defer proxy.Close()
+	c := NewClientWithTimeout(Config{BaseURL: proxy.URL, Key: "k"}, 5*time.Second, maxResponseSize)
+	err = runTenantDelete(func() (*Client, error) { return c, nil }, "01a2105d-0000-7000-8000-000000000555")
+	t.Logf("504: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "may still be running") || !strings.Contains(err.Error(), "504") {
+		t.Errorf("a proxy's 504: %v — want the status and the hint", err)
 	}
 }

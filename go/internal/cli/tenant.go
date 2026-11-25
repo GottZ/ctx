@@ -22,7 +22,10 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -233,10 +236,23 @@ func tenantUpdateCmd(getClient func() (*Client, error)) *cobra.Command {
 // and the answer of the delete was lost. A variable for tests.
 var tenantDeleteCallBudget time.Duration
 
-// tenantDeleteLeftMsg is what the CLI adds when the request ended before the
-// answer: the delete is not stopped by that.
-const tenantDeleteLeftMsg = "the delete goes on at the server: the tenant stays offboarding (its keys, sessions and OAuth tokens are refused) " +
-	"until it ends, and `ctx tenant get <id>` answers not found once it has — run the delete again to see how it ended"
+// tenantDeleteLeftMsg is what the CLI adds when the request ended after it
+// was sent and before the answer, or a proxy gave up waiting for it: a delete
+// that has begun is not stopped by that.
+const tenantDeleteLeftMsg = "the delete may still be running on the server: once begun it runs to its end, and the tenant stays offboarding " +
+	"(its keys, sessions and OAuth tokens are refused) until then; `ctx tenant get <id>` answers not found once it has ended — run the delete again to see how it ended"
+
+// requestNotSent reports whether err ended a request before it reached the
+// server: a connection that could not be made (refused, no route, a name
+// that does not resolve) or a base URL the client cannot use.
+func requestNotSent(err error) bool {
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return true
+	}
+	var dns *net.DNSError
+	return errors.As(err, &dns) || strings.Contains(err.Error(), "CTX_BASE_URL is not a usable URL")
+}
 
 func tenantDeleteCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
@@ -260,9 +276,16 @@ func tenantDeleteCmd(getClient func() (*Client, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := c.Post("manage", map[string]any{"action": "tenant-delete", "id": args[0]})
-			if err != nil {
+			resp, status, err := c.Do(http.MethodPost, "/api/manage", map[string]any{"action": "tenant-delete", "id": args[0]})
+			switch {
+			case err != nil && requestNotSent(err):
+				return err // the server never saw it: nothing runs
+			case err != nil:
 				return fmt.Errorf("%w — %s", err, tenantDeleteLeftMsg)
+			case status == http.StatusBadGateway || status == http.StatusGatewayTimeout:
+				// A reverse proxy's answer: it gave up on the server (its
+				// read timeout), the server did not.
+				return fmt.Errorf("the proxy in front of the server answered %d before the delete did — %s", status, tenantDeleteLeftMsg)
 			}
 			if err := checkEnvelope(resp, envelopeRequired); err != nil {
 				return err

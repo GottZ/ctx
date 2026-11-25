@@ -293,7 +293,7 @@ func pruneTenantClose(ctx context.Context, pool *pgxpool.Pool, tenantID string, 
 		if remaining == 0 && round == pruneClosingRounds {
 			continue // the last round drained a backlog: one more finds nothing and deletes the tenant
 		}
-		return fmt.Errorf("store: delete tenant: rows kept arriving in its scopes for %d closing rounds, %d are left; the tenant stays offboarding, run the delete again", round, remaining)
+		return fmt.Errorf("store: delete tenant: rows kept arriving in its scopes for %d closing rounds (the last deleted %d, %d are left now); the tenant stays offboarding, run the delete again", round, left, remaining)
 	}
 }
 
