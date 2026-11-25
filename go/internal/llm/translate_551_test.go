@@ -44,7 +44,10 @@ func TestNeedsTranslation551GermanFrames(t *testing.T) {
 		"Rechnung Oktober",
 		"Ummeldung Formular",
 		"Erreichbarkeit Hotline",
-		"Mitgliedschaft kuendigen",
+		"Mitgliedschaft Verein",
+		"Rechnung bezahlen bitte",
+		"Rechnung an Vermieter",
+		"Kraftfahrzeughaftpflichtversicherung Vergleich",
 		"Gesundheitsamt Bescheinigungen",
 	)
 }
@@ -75,6 +78,15 @@ func TestNeedsTranslation551EnglishControls(t *testing.T) {
 		"Die cast car models",
 		// a domain term with a noun ending counts once
 		"the Einstellung tab",
+		// a capitalised word with a noun ending beside unlisted lower-case
+		// words and no other sign: a name or a loanword
+		"Achtung Baby album review",
+		"Tanjung Priok port congestion",
+		"Nibelungen saga summary",
+		"Gleichschaltung history",
+		"Keelung port schedule",
+		"sprung floor tiles",
+		`invoice "Rechnung"`,
 	)
 }
 
@@ -102,7 +114,7 @@ func TestGermanListsCarryNoEnglishWord(t *testing.T) {
 				t.Errorf("%s carries %q, an English word", name, w)
 			}
 		}
-		if germanNounEnding([]byte(w), utf8.RuneCountInString(w)) {
+		if germanNounEnding([]byte(w), w, utf8.RuneCountInString(w)) {
 			t.Errorf("%q reads as a German noun ending", w)
 		}
 	}
@@ -123,6 +135,7 @@ func TestValidateTranslation551Letters(t *testing.T) {
 		"Mu\u0308ller notes",
 		"Straße names",
 		"Δ of the release",
+		"हिन्दी notes",
 	} {
 		if !validateTranslation(answer, original) {
 			t.Errorf("validateTranslation(%q) = false, want true", answer)
@@ -149,6 +162,12 @@ func TestValidateTranslation551StillRejected(t *testing.T) {
 		{"Zp paragraph separator", "backup\u2029status"},
 		{"Zs no-break space", "backup\u00a0status"},
 		{"Zs ideographic space", "backup\u3000status"},
+		{"variation selector", "café\ufe0f menu"},
+		{"keycap sequence", "1\ufe0f\u20e3 backup"},
+		{"Mongolian free variation selector", "back\u180bup"},
+		{"combining grapheme joiner", "back\u034fup"},
+		{"Hangul filler", "backup\u3164status"},
+		{"Khmer inherent vowel", "back\u17b4up"},
 		{"Co private use", "backup \ue000"},
 		{"invalid UTF-8", "backup \xff status"},
 		{"Sm plus", "backup + status"},
@@ -228,10 +247,14 @@ func TestNeedsTranslation551SingleQuotePossessive(t *testing.T) {
 		"Was bedeutet der Fehler 'the users' data is not in the table'?",
 		"Was bedeutet der Fehler ‘the users’ data is not in the table’?",
 		"Was heißt 'the class' fields are not in the index' hier?",
+		"Was bedeutet der Fehler 'the box' lid is not on the table'?",
+		"Was heißt 'the users' rights are not in the groups'?",
 	)
 	checkNeedsTranslation(t, false,
 		"What does 'Wer rastet, der rostet' mean?",
 		"Who wrote 'Im Westen nichts Neues' and the users' guide?",
+		// a double quote mark is never a possessive
+		`Was bedeutet "the users" data is not in the table"?`,
 	)
 	for _, q := range []string{
 		"Was bedeutet der Fehler 'the users' data is not in the table'?",
@@ -259,11 +282,14 @@ func TestNeedsTranslation551QuoteInsideCodeToken(t *testing.T) {
 		`key="Größe"`,
 		`=SUMME(„Größe“)`,
 		`obj.attr("Größe")`,
+		`src/"größe"`,
 	)
 	checkNeedsTranslation(t, true,
 		`Was bedeutet "Größe"?`,
 		`("Größe der Datei")`,
 		`Wie lese ich config["größe"] aus?`,
+		// the next token is read on its own
+		`Wieso config["x"] "the file is not there"`,
 	)
 }
 
@@ -301,37 +327,31 @@ func TestNeedsTranslation551MoreQuoteMarks(t *testing.T) {
 	)
 }
 
-// TestNeedsTranslation551WordSlash (point 6): a single slash between two
-// capitalised words is how German writes two nouns as alternatives
-// (Größe/Gewicht) — words, not a path. On 89d9e70c the token was code and
-// the question was sent as written. Paths stay code: lower-case segments, a
-// leading slash, more than one slash, a dot or another code character.
-func TestNeedsTranslation551WordSlash(t *testing.T) {
-	checkNeedsTranslation(t, true,
-		"Größe/Gewicht Paket",
-		"Prüfung/Abnahme Termin",
-		"Datenbank/Konfiguration",
-	)
+// TestNeedsTranslation551SlashStaysCode (point 6): a slash between two
+// capitalised words stays code. A German keyword query such as
+// Größe/Gewicht Paket is sent as written; reading such a token as words
+// would also translate a capitalised path and would read an English pair a
+// German question asks about as English (measured by the review of #551).
+func TestNeedsTranslation551SlashStaysCode(t *testing.T) {
 	checkNeedsTranslation(t, false,
+		"Größe/Gewicht Paket",
+		"cd Dokumente/Übersicht",
+		"git add Dokumente/Prüfung",
 		"docs/übersicht",
-		"/Größe/Gewicht",
-		"Größe/Gewicht/Höhe",
-		"Größe/gewicht",
-		"notes/Übersicht",
-		"Übersicht/Datei.md",
-		"Größe/Gewicht_neu",
-		"Ä/",
-		"/Ä",
-		strings.Repeat("Größe/", 1<<17)+"Gewicht",
+		strings.Repeat("Größe/Gewicht ", 1<<16),
 	)
-	checkNeedsTranslation(t, true, strings.Repeat("Größe/Gewicht ", 1<<16))
+	checkNeedsTranslation(t, true,
+		"Wie benutze ich Has/Have richtig?",
+		"Wie schreibe ich When/Where korrekt",
+	)
 }
 
-// TestTranslateQuery551WordSlashAnswers (point 6): what the step returns for
-// a word-slash question, by the answer's form. An answer that keeps the
-// slash fails validateTranslation and the question goes on as written (as
-// before #210); an answer that rewords it replaces the question.
-func TestTranslateQuery551WordSlashAnswers(t *testing.T) {
+// TestTranslateQuery551SlashAnswers (point 6): what the step would return
+// for a slash question, by the answer's form — the measurement behind the
+// decision above. An answer that keeps the slash fails validateTranslation
+// and the question goes on as written, so the call buys something only when
+// the model rewords the slash.
+func TestTranslateQuery551SlashAnswers(t *testing.T) {
 	const q = "Größe/Gewicht Paket"
 	for _, c := range []struct {
 		answer, want string

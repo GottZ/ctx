@@ -224,13 +224,24 @@ var promptTranslate = prompts.Register(
 // one line without special characters, so an answer that obeyed instructions
 // in the question, explains itself or keeps code fails here: any other ASCII
 // punctuation (SQL meta characters, markdown, paths, key:value, quotes),
-// control and format characters (NUL, ESC, bidi overrides, zero-width
-// characters, soft hyphen), line and paragraph separators, non-ASCII spaces,
-// symbols and emoji, other digits, private-use code points and invalid UTF-8.
+// control and format characters (NUL, ESC, bidi overrides, zero-width space
+// and joiners, soft hyphen), line and paragraph separators, non-ASCII spaces,
+// symbols and emoji, other digits, private-use code points and invalid UTF-8,
+// and (by isInvisible, after the pattern) the letters and marks that render
+// as nothing.
 // It came over from the n8n workflow (a6aa70e2), where the translation was
 // spliced into SQL; the query path has been parameterised since, so the
 // allowlist is the shape gate for the answer and a second line of defence.
 var safePattern = regexp.MustCompile(`^[\p{L}\p{M}0-9\s\-.,()!?]+$`)
+
+// isInvisible reports whether r is a default-ignorable letter or mark that
+// renders as nothing: a variation selector, a Mongolian free variation
+// selector, the combining grapheme joiner, a Hangul filler or a Khmer
+// inherent vowel. safePattern lets letters and marks through; these are
+// refused like the format characters (#551).
+func isInvisible(r rune) bool {
+	return unicode.In(r, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point)
+}
 
 // sqlMetaChars are characters stripped from translations to prevent injection.
 var sqlStripper = strings.NewReplacer(
@@ -284,6 +295,11 @@ type translateEvidence struct {
 	signal int
 	// english counts English function words.
 	english int
+	// capEnding counts the capitalised words whose only sign is a German noun
+	// ending, and plain the lower-case words of three letters or more on no
+	// list and without either sign (see NeedsTranslation).
+	capEnding int
+	plain     int
 }
 
 // maxDetectWordBytes bounds the lower-cased copy of one word; every listed
@@ -296,19 +312,20 @@ const maxDetectWordBytes = 32
 //
 // Read over the words outside code — a `backtick span`, and any token with a
 // path, identifier or URL character (/ \ _ = < > { } [ ] $ @ # | or a dot or
-// colon between two letters or digits; a single slash between two
-// capitalised words, Größe/Gewicht, is no code) carries no language; a word
-// in capitals (IT, US, ER) is an abbreviation and no English or Nordic word:
+// colon between two letters or digits) carries no language; a word in
+// capitals (IT, US, ER) is an abbreviation and no English or Nordic word:
 //   - a question with English function words is translated only when its
 //     non-English evidence outnumbers them, a weak word counting half
 //     (2·strong + weak > 2·english; see translateEvidence): "what was the die
 //     roll" and a name such as Müller stay English, "Gibt es Änderungen in
 //     the schema?" stays German;
 //   - a question without English function words is translated on one word
-//     with ä ö ü ß å æ ø, one word with a German noun ending (Rechnung), one
-//     German question word (wann, wieso), one domain term, one Nordic
-//     function word, or two stop words — the rule before #210, which knew no
-//     Nordic word and no å æ ø, with the words #551 added.
+//     with ä ö ü ß å æ ø, one word with a German noun ending (Rechnung; a
+//     capitalised one not beside lower-case words on no list unless another
+//     sign stands with it), one German question word (wann, wieso), one
+//     domain term, one Nordic function word, or two stop words — the rule
+//     before #210, which knew no Nordic word and no å æ ø, with the words
+//     #551 added.
 //
 // A quote ("…", „…“, “…”, «…», ‚…‘, '…', ´…´, ＂…＂, ″…″) is what the question
 // asks about, not the language it is asked in: an English question is decided
@@ -329,11 +346,20 @@ func NeedsTranslation(query string) bool {
 		ev.weak += quoted.weak
 		ev.stops += quoted.stops
 		ev.signal += quoted.signal
+		ev.capEnding += quoted.capEnding
 	}
 	if ev.english > 0 {
 		return 2*ev.strong+ev.weak > 2*ev.english
 	}
-	return ev.signal > 0 || ev.stops >= 2
+	signal := ev.signal
+	if ev.plain > 0 && ev.strong == 0 && ev.stops == 0 {
+		// a capitalised word with a noun ending beside unlisted lower-case
+		// words and no other sign is a name or a loanword in an English query
+		// (Achtung Baby album review, Tanjung Priok port congestion); German
+		// keyword queries capitalise their nouns (Rechnung Oktober)
+		signal -= ev.capEnding
+	}
+	return signal > 0 || ev.stops >= 2
 }
 
 // scanTranslateEvidence walks the query once and returns the evidence of the
@@ -419,9 +445,11 @@ func opensQuote(text string, i, size int) bool {
 // apostrophe ('the users' data is not in the table', Hans' Notizen) rather
 // than the end of the quote (#551): it closes the quote unless another
 // closing mark follows before any mark that opens or stands alone, and then
-// the quote runs to that one. The look-ahead stops at the next mark of the
-// kind, so every byte is read by at most two searches and the walk stays
-// linear.
+// the quote runs to that one. A possessive outside a quote that ends in s
+// can so pull the words between into it ('Was ist das' says the users'
+// manual reads one quote up to users'). The look-ahead stops at the next
+// mark of the kind, so every byte is read by at most two searches and the
+// walk stays linear.
 func closingQuote(text string, from, kind int) (int, int) {
 	held, heldSize := -1, 0 // a possessive-shaped mark that may close the quote
 	for j := from; j < len(text); {
@@ -469,15 +497,14 @@ func isPossessiveEnd(r rune) bool {
 // isCodeToken reports whether a white-space token is a path, an identifier,
 // a URL, an option or an expression rather than a word of a sentence: it
 // carries one of / \ _ = < > { } [ ] $ @ # |, or a dot or colon between two
-// letters or digits (error.log, v2.14, API:n). A single slash between two
-// capitalised words (Größe/Gewicht, Prüfung/Abnahme) is how German writes two
-// nouns as alternatives and no code (#551); a path has lower-case segments,
-// a leading slash, a second slash or a dot.
+// letters or digits (error.log, v2.14, API:n). A slash between two
+// capitalised words (Größe/Gewicht) stays code too (#551): a capitalised path
+// (cd Dokumente/Übersicht) and a German question about an English pair
+// (Has/Have) have the same shape.
 func isCodeToken(tok string) bool {
 	prev := rune(-1)
 	for i, r := range tok {
 		switch {
-		case r == '/' && isWordSlash(tok, i):
 		case isCodeRune(r):
 			return true
 		case r == '.' || r == ':':
@@ -499,34 +526,11 @@ func isCodeRune(r rune) bool {
 	return false
 }
 
-// isWordSlash reports whether the slash at tok[i] is the only one of the token
-// and stands between two capitalised words: the run of letters before it and
-// the one after it each begin with an upper-case letter.
-func isWordSlash(tok string, i int) bool {
-	next, _ := utf8.DecodeRuneInString(tok[i+1:])
-	if !unicode.IsUpper(next) || strings.IndexByte(tok[i+1:], '/') >= 0 {
-		return false
-	}
-	first := rune(-1) // the first letter of the run before the slash
-	for j := i; j > 0; {
-		r, size := utf8.DecodeLastRuneInString(tok[:j])
-		if !unicode.IsLetter(r) && !unicode.Is(unicode.Mn, r) {
-			break
-		}
-		if unicode.IsLetter(r) {
-			first = r
-		}
-		j -= size
-	}
-	return unicode.IsUpper(first)
-}
-
 // codePrefix reads the text of a token in front of a quote mark for code
 // (the characters of isCodeToken), so a mark inside a path, an index or an
 // assignment — config["größe"], key="Größe" — opens no quote and the token
 // stays code as a whole (#551). It reads each byte of a token at most once
-// however many marks the token holds; a slash counts as code here, whatever
-// follows it.
+// however many marks the token holds.
 type codePrefix struct {
 	start, end int  // the token being read and how far
 	prev       rune // the rune before end
@@ -596,51 +600,70 @@ func (ev *translateEvidence) addToken(tok string) {
 		return
 	}
 	var w detectWord
-	for _, r := range tok {
+	start := 0 // first byte of the word being read
+	for i, r := range tok {
 		switch {
 		case unicode.IsLetter(r):
+			if w.runes == 0 {
+				start = i
+			}
 			w.add(r)
 		case w.runes > 0 && unicode.Is(unicode.Mn, r):
 			if r == '̈' || r == '̊' {
 				w.letters = true
 			}
 		case w.runes > 0:
-			ev.addWord(&w)
+			ev.addWord(&w, tok[start:i])
 			w = detectWord{}
 		}
 	}
 	if w.runes > 0 {
-		ev.addWord(&w)
+		ev.addWord(&w, tok[start:])
 	}
 }
 
-// addWord counts one word: by the list it is on (the first that has it), and
-// by its letters or, on no list and without those letters, by a German noun
-// ending.
-func (ev *translateEvidence) addWord(w *detectWord) {
+// addWord counts one word (raw is its text as written): by the list it is on
+// (the first that has it), and by its letters or, on no list and without
+// those letters, by a German noun ending.
+func (ev *translateEvidence) addWord(w *detectWord, raw string) {
 	listed := false
+	lw := []byte(nil) // the lower-cased word, when it fits the buffer
 	if !w.long {
-		listed = ev.addListed(w.buf[:w.n], w.runes >= 2 && !w.lower)
+		lw = w.buf[:w.n]
+		listed = ev.addListed(lw, w.runes >= 2 && !w.lower)
 	}
-	if w.letters || !listed && !w.long && germanNounEnding(w.buf[:w.n], w.runes) {
+	ending := !listed && !w.letters && germanNounEnding(lw, raw, w.runes)
+	switch {
+	case w.letters || ending:
 		ev.signal++
 		if w.capital {
 			ev.weak++
 		} else {
 			ev.strong++
 		}
+		if ending && w.capital {
+			ev.capEnding++
+		}
+	case !listed && !w.capital && w.lower && w.runes >= 3:
+		ev.plain++
 	}
 }
 
-// germanNounEnding reports whether a lower-cased word of runes letters ends
-// like a German noun (germanNounSuffixes) and is no English word with that
-// ending.
-func germanNounEnding(lw []byte, runes int) bool {
-	if runes < minGermanNounRunes || has(englishSuffixWords, lw) {
+// germanNounEnding reports whether a word of runes letters ends like a German
+// noun (germanNounSuffixes) and is no English word with that ending. lw is the
+// lower-cased word, nil for a word longer than the buffer (a compound such as
+// Kraftfahrzeughaftpflichtversicherung), whose ending is read from raw.
+func germanNounEnding(lw []byte, raw string, runes int) bool {
+	if runes < minGermanNounRunes || lw != nil && has(englishSuffixWords, lw) {
 		return false
 	}
 	for _, suffix := range germanNounSuffixes {
-		if len(lw) >= len(suffix) && string(lw[len(lw)-len(suffix):]) == suffix {
+		switch {
+		case lw != nil:
+			if len(lw) >= len(suffix) && string(lw[len(lw)-len(suffix):]) == suffix {
+				return true
+			}
+		case len(raw) >= len(suffix) && strings.EqualFold(raw[len(raw)-len(suffix):], suffix):
 			return true
 		}
 	}
@@ -739,8 +762,9 @@ func validateTranslation(translated, original string) bool {
 		return false
 	}
 
-	// Only safe characters.
-	if !safePattern.MatchString(translated) {
+	// Only safe characters, and none of the invisible letters and marks the
+	// pattern's \p{L}\p{M} would let through.
+	if !safePattern.MatchString(translated) || strings.IndexFunc(translated, isInvisible) >= 0 {
 		return false
 	}
 
