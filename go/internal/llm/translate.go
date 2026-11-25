@@ -251,20 +251,29 @@ func isInvisible(r rune) bool {
 }
 
 // nonASCIIFromOriginal reports whether every rune of translated beyond ASCII
-// occurs in original, in either case.
+// is one original wrote beyond ASCII, in either case. The question's runes
+// are collected once, and only when the answer has one to look up, so the
+// check is linear in both texts (an answer of one repeated letter against a
+// long question was quadratic: review of PR #556).
 func nonASCIIFromOriginal(translated, original string) bool {
+	var wrote map[rune]struct{}
 	for _, r := range translated {
 		if r < utf8.RuneSelf {
 			continue
 		}
-		lr, found := unicode.ToLower(r), false
-		for _, o := range original {
-			if o == r || unicode.ToLower(o) == lr {
-				found = true
-				break
+		if wrote == nil {
+			wrote = make(map[rune]struct{})
+			for _, o := range original {
+				if o >= utf8.RuneSelf {
+					wrote[o] = struct{}{}
+					wrote[unicode.ToLower(o)] = struct{}{}
+				}
 			}
 		}
-		if !found {
+		if _, ok := wrote[r]; ok {
+			continue
+		}
+		if _, ok := wrote[unicode.ToLower(r)]; !ok {
 			return false
 		}
 	}

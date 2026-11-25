@@ -157,6 +157,8 @@ func TestValidateTranslation551OwnLetters(t *testing.T) {
 		{"a combining mark the question did not write", "How do I reset the passwo\u0301rd"},
 		{"the question's letter in a decomposed spelling", "Password reset for Mu\u0308ller"},
 		{"a name the question did not write", "Password reset for Ålesund"},
+		{"a letter that folds to an ASCII letter of the question", "How do \u0130 reset the password"},
+		{"the Kelvin sign for the question's k", "How do I reset the \u212Aey"},
 	} {
 		if validateTranslation(c.answer, original) {
 			t.Errorf("%s: validateTranslation(%q) = true, want false", c.class, c.answer)
