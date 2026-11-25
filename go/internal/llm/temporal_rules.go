@@ -1935,8 +1935,28 @@ func (c clauseWords) englishPresentIn(s, e, lang int) bool {
 	scanned(e - s)
 	for k := s; k < e; k++ {
 		if c.englishPresentAt(s, k, e) {
+			return !c.ellipticTail(k+1, e)
+		}
+	}
+	return false
+}
+
+// ellipsisTails are the words that, behind the date of a clause, make it
+// one that repeats what the clause before it says ("…, the error rates on
+// Monday too?", "…, the test runs on Monday all green?"): a plural noun
+// there has the shape of a present (englishPresentAt), issue #532.
+var ellipsisTails = toWordSet("too", "also", "either", "as", "all", "still")
+
+// ellipticTail reports whether a word of ellipsisTails follows the first
+// date word of the words [s, e) of c.
+func (c clauseWords) ellipticTail(s, e int) bool {
+	date := false
+	for i := s; i < e; i++ {
+		w := c.words[i]
+		if date && ellipsisTails[w] {
 			return true
 		}
+		date = date || dateWord(w) || dayKeywords[w]
 	}
 	return false
 }

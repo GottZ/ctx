@@ -109,6 +109,8 @@ func TestRules_AnEnglishPresentGivesItsClauseATenseOfItsOwn(t *testing.T) {
 		"Builds were red on Thursday, on Friday check runs on staging too?":        "2026-11-19/past 2026-11-20/past",
 		"The deploy failed on Monday, the rollback on Tuesday too?":                "2026-11-16/past 2026-11-17/past",
 		"The deploy failed on Monday, the web analytics dashboard on Tuesday too?": "2026-11-16/past 2026-11-17/past",
+		"We deployed on Friday, the test runs on Monday all green?":                "2026-11-20/past 2026-11-16/past",
+		"Latency spiked on Friday, the error rates on Monday too?":                 "2026-11-20/past 2026-11-16/past",
 	})
 	// A form on -ed with "get" behind it is the participle of its noun, no
 	// simple past that makes the question one: the clause of "get" keeps the
