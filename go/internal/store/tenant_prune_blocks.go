@@ -317,8 +317,10 @@ func pruneTenantClose(ctx context.Context, pool *pgxpool.Pool, tenantID string, 
 }
 
 // pruneLateScopesSQL counts the scopes of the tenant $1 that are not among the
-// names $2 the prune read at its start.
-const pruneLateScopesSQL = `SELECT count(*)::int FROM context_tenant_scopes WHERE tenant_id = $1::uuid AND scope <> ALL($2::text[])`
+// names $2 the prune read at its start. A tenant that owned none then has a
+// nil list, which pgx sends as NULL: "scope <> ALL(NULL)" is unknown for every
+// row and counted none, so NULL reads as the empty list.
+const pruneLateScopesSQL = `SELECT count(*)::int FROM context_tenant_scopes WHERE tenant_id = $1::uuid AND scope <> ALL(COALESCE($2::text[], '{}'))`
 
 // pruneNoLateScope keeps the tenant row's delete from cascading away the
 // mapping of a scope the prune never worked on (issue #555): its rows would

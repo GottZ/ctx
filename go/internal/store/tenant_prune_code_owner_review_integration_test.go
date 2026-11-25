@@ -322,3 +322,44 @@ func TestTenantDeleteDoesNotFinishOverAStatusSetBack(t *testing.T) {
 		t.Errorf("after the next delete: %d blocks, tenant row %d", blocks, tenant)
 	}
 }
+
+// The same for a tenant that owned no scope when its delete began: the list
+// the delete read is empty (nil in Go, which must not reach the count as SQL
+// NULL — "scope <> ALL(NULL)" is unknown for every row and counted none).
+func TestTenantDeleteStopsAtAScopeOfATenantThatOwnedNone(t *testing.T) {
+	f := newP547Fixture(t)
+	ctx := context.Background()
+	tn, err := store.CreateTenant(ctx, f.pool, "nonescope", "nonescope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newPruneHold(func(sql string) bool {
+		return strings.Contains(sql, "DELETE FROM context_projects WHERE tenant_id")
+	})
+	done := make(chan error, 1)
+	go func() { done <- store.PruneTenant(ctx, pruneHoldPool(t, f.dsn, h), tn.ID, store.AuditStamp{}) }()
+	waitPruneHeld(t, h, done)
+	const late = "nonescope-late"
+	if _, err := f.pool.Exec(ctx, `INSERT INTO context_tenant_scopes (scope, tenant_id) VALUES ($1, $2::uuid)`, late, tn.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.block(t, late, "a block in the only scope, which the delete never read")
+	close(h.release)
+	var perr error
+	select {
+	case perr = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the delete did not end")
+	}
+	blocks, _, _, tenant := pruneLeftovers(t, f.pool, tn.ID, []string{late})
+	t.Logf("delete of a tenant without a scope beside a scope that joined: %v; blocks in %s: %d; tenant row: %d", perr, late, blocks, tenant)
+	if !errors.Is(perr, store.ErrTenantPruneIncomplete) || tenant != 1 {
+		t.Fatalf("delete: %v, tenant row %d (%d block(s) in %s); want ErrTenantPruneIncomplete and the tenant kept", perr, tenant, blocks, late)
+	}
+	if err := store.PruneTenant(ctx, f.pool, tn.ID, store.AuditStamp{}); err != nil {
+		t.Fatalf("the next delete: %v", err)
+	}
+	if blocks, _, _, tenant := pruneLeftovers(t, f.pool, tn.ID, []string{late}); blocks != 0 || tenant != 0 {
+		t.Errorf("after the next delete: %d blocks, tenant row %d", blocks, tenant)
+	}
+}
