@@ -3760,13 +3760,21 @@ var (
 // ("gestern Abend", "heute Morgen", "morgen früh", "yesterday evening",
 // "tomorrow morning" — "heute morgen" is this morning: "heute" and "morgen"
 // side by side in one clause name one day), "last night" and "letzte Nacht"
-// without an article before them or "of" behind them (yesterday at the hour
-// of the night), and "tonight" (today at that hour). The answer is the day at
-// the part's hour, and every weekday of the question that names a day as the
-// weekday rules read it, in the order of the question: the day keyword
-// answers before the weekday rules and does not drop their dates. A part of
-// the day joined by a hyphen ("Abend-Bericht") is a word of its own, and one
-// matchTimeOfDay reads right behind "heute" or "today" stays its.
+// without an article before them or "of" behind them (yesterday's night),
+// and "tonight" (today). The answer is the keyword's day, and every weekday of
+// the question that names a day as the weekday rules read it, in the order of
+// the question: the day keyword answers before the weekday rules and does not
+// drop their dates. A part of the day joined by a hyphen ("Abend-Bericht") is
+// a word of its own, and one matchTimeOfDay reads right behind "heute" or
+// "today" stays its.
+//
+// The part's hour is set on a day that lies behind (dayKeywordHour): the
+// linear gravity of the query (handler applyTemporalGravity) takes the hour as
+// the instant of its target and filters a date to come by that instant, so an
+// hour on today or a day ahead moved the gravity off that day's content
+// without a time of day onto the next day's (gravity-hour probe of issue
+// #532); behind the target it keeps the content of that day before the hour,
+// which a target at midnight leaves out.
 func matchDayKeywordPart(query string, now time.Time) *TemporalResult {
 	lower := strings.ToLower(query)
 	if !strings.Contains(lower, "night") && !strings.Contains(lower, "nacht") && !strings.Contains(lower, "heute") &&
@@ -3812,7 +3820,7 @@ func (c clauseWords) dayKeywordPartAt(i int, now time.Time) (TemporalDate, bool)
 	w := c.words[i]
 	hour := func(h int) *int { return &h }
 	if w == "tonight" || w == "tonight's" {
-		return TemporalDate{Ref: w, Date: fmtDate(now), Dir: "today", Hour: hour(dayPartHours["night"])}, true
+		return TemporalDate{Ref: w, Date: fmtDate(now), Dir: "today"}, true
 	}
 	if i+1 >= len(c.words) || c.starts[i+1] || c.joinedNext[i] || i+1 < len(c.words)-1 && c.joinedNext[i+1] {
 		return TemporalDate{}, false
@@ -3829,7 +3837,11 @@ func (c clauseWords) dayKeywordPartAt(i int, now time.Time) (TemporalDate, bool)
 	if !ok || !part || (w == "heute" || w == "today") && timeOfDayWords[next] {
 		return TemporalDate{}, false
 	}
-	return TemporalDate{Ref: w + " " + next, Date: fmtDate(truncDate(kw.resolve(now))), Dir: kw.dir, Hour: hour(h)}, true
+	d := TemporalDate{Ref: w + " " + next, Date: fmtDate(truncDate(kw.resolve(now))), Dir: kw.dir}
+	if kw.dir == "past" {
+		d.Hour = hour(h)
+	}
+	return d, true
 }
 
 func matchAnnualHoliday(query string, now time.Time) *TemporalResult {

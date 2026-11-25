@@ -97,28 +97,30 @@ func TestRules_LetsOpensAClauseOfAProposal(t *testing.T) {
 
 // TestRules_ADayKeywordWithAPartOfTheDay (issue #532, point 2): a word of a
 // part of the day right behind a day keyword in its clause gives the
-// keyword's day at the part's hour ("gestern Abend", "morgen früh",
-// "yesterday evening"); "heute morgen" is this morning; "last night" and
-// "letzte Nacht" without an article before them are yesterday's night,
-// "tonight" today's; every weekday of the question stays a date, in the
-// order of the question, and the weights are those of a day keyword.
+// keyword's day ("gestern Abend", "morgen früh", "yesterday evening"), with
+// the part's hour where the day lies behind (dayKeywordPartAt: the gravity
+// reads an hour on today or a day ahead as moving the target off that day);
+// "heute morgen" is this morning; "last night" and "letzte Nacht" without an
+// article before them are yesterday's night, "tonight" today; every weekday
+// of the question stays a date, in the order of the question, and the
+// weights are those of a day keyword.
 func TestRules_ADayKeywordWithAPartOfTheDay(t *testing.T) {
 	check517(t, now517, want517{
 		"Was ist gestern Abend schiefgegangen?":                             "2026-11-21/past@19",
 		"Wer hatte gestern Nacht Rufbereitschaft?":                          "2026-11-21/past@23",
-		"Was ist heute Morgen passiert?":                                    "2026-11-22/today@8",
-		"was haben wir heute morgen deployed?":                              "2026-11-22/today@8",
-		"Was steht morgen früh an?":                                         "2026-11-23/future@8",
-		"Wer übernimmt morgen Abend?":                                       "2026-11-23/future@19",
+		"Was ist heute Morgen passiert?":                                    "2026-11-22/today",
+		"was haben wir heute morgen deployed?":                              "2026-11-22/today",
+		"Was steht morgen früh an?":                                         "2026-11-23/future",
+		"Wer übernimmt morgen Abend?":                                       "2026-11-23/future",
 		"Was war vorgestern Nachmittag?":                                    "2026-11-20/past@15",
 		"What broke yesterday evening?":                                     "2026-11-21/past@19",
-		"What is planned for tomorrow morning?":                             "2026-11-23/future@8",
+		"What is planned for tomorrow morning?":                             "2026-11-23/future",
 		"What happened last night?":                                         "2026-11-21/past@23",
 		"Gab es letzte Nacht Alarme?":                                       "2026-11-21/past@23",
-		"Anything on tonight?":                                              "2026-11-22/today@23",
-		"Was ist heute Abend?":                                              "2026-11-22/today@19",
+		"Anything on tonight?":                                              "2026-11-22/today",
+		"Was ist heute Abend?":                                              "2026-11-22/today",
 		"Was lief gestern Abend schief, nachdem am Freitag deployed wurde?": "2026-11-21/past@19 2026-11-20/past",
-		"Was ist am Freitag passiert und was steht morgen früh an?":         "2026-11-20/past 2026-11-23/future@8",
+		"Was ist am Freitag passiert und was steht morgen früh an?":         "2026-11-20/past 2026-11-23/future",
 		// counter-cases: no day keyword with a part of the day
 		"Montag morgen ist Release, ist alles bereit?":    "2026-11-23/future@8",
 		"Wir müssen morgen früher anfangen, oder?":        "2026-11-23/future",
