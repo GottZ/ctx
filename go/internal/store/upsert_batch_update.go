@@ -198,7 +198,11 @@ func lockBatchUpdate(ctx context.Context, tx pgx.Tx, u *blockUpdate, held []stri
 // answer), a block another transaction moved out of the scopes the batch
 // locked for it (a scopesToLockError naming the scope it is in now: the batch
 // runs again and locks that scope too, in order), or a confirmed card's block
-// at another updated_at (ErrBlockChanged).
+// at another updated_at (ErrBlockChanged). A live, writable block found in a
+// scope the batch holds came there between the lock and this read — moved
+// twice, the second move into a held scope committing in between (issue
+// #555): the batch runs again too (a scopesToLockError naming no new scope),
+// and finds it where it is.
 func batchUpdateMiss(ctx context.Context, tx pgx.Tx, u *blockUpdate, held []string) error {
 	var scope string
 	var notDerived bool
@@ -219,7 +223,7 @@ func batchUpdateMiss(ctx context.Context, tx pgx.Tx, u *blockUpdate, held []stri
 	case u.data.ExpectUpdatedAt != nil && !updatedAt.Equal(*u.data.ExpectUpdatedAt):
 		return ErrBlockChanged
 	}
-	return ErrBlockNotFound
+	return &scopesToLockError{}
 }
 
 // writeBatchUpdate writes an update item whose row the lock pass holds,
