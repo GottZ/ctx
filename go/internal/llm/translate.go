@@ -20,9 +20,11 @@ import (
 // The words after the first block came with #551 (German questions with fewer
 // than two of the first block were sent as written): German function words and
 // frequent verb forms, in ASCII spelling (a word with ä ö ü ß counts on its
-// letters already). Every one was checked against English: none is a word form
-// of the en_US hunspell dictionary (all affix forms, names included) or an
-// English abbreviation or chat form; the ones that are — du es mich mir dir
+// letters already). Every one was checked against English: none is an English
+// abbreviation or chat form, and none a word form of the en_US hunspell
+// dictionary the list was built with (all affix forms, names included; another
+// version of it carries eure, manche, morgen, dort and hab, as names — two of
+// them in one English question are needed to mistake it); the ones that are — du es mich mir dir
 // seine seiner allen am um im ins ans bis hinter ob falls halt eben oft nun nix
 // darin bin war hast will mag weiss tun tut mal sei — stay off the list
 // (germanListHomographs in the tests).
@@ -105,11 +107,16 @@ var germanNounSuffixes = []string{"ung", "ungen", "keit", "keiten", "heit", "hei
 // keeps young, sprung, strung and unsung out.
 const minGermanNounRunes = 7
 
-// englishSuffixWords are the word forms of the en_US hunspell dictionary of
-// minGermanNounRunes letters or more that end in one of germanNounSuffixes —
-// the English words (and names) the ending rule would otherwise read as
-// German.
+// englishSuffixWords are English words and names of minGermanNounRunes letters
+// or more that end in one of germanNounSuffixes, which the ending rule would
+// otherwise read as German: the word forms of two versions of the en_US
+// hunspell dictionary. The list is not closed — a name on -ung no dictionary
+// carries (Pingtung, Tanjung) is read as German when it stands capitalised
+// without an unlisted lower-case word beside it (see NeedsTranslation).
 var englishSuffixWords = map[string]struct{}{
+	"balmung": {}, "bremsstrahlung": {}, "chilung": {}, "highstrung": {}, "keelung": {},
+	"kwangtung": {}, "liaotung": {}, "sanchung": {}, "underhung": {}, "underslung": {},
+	"unslung": {}, "unsprung": {}, "volsung": {},
 	"aqualung": {}, "bandung": {}, "fahrenheit": {}, "gesundheit": {}, "hamhung": {},
 	"hamstrung": {}, "hertzsprung": {}, "kaohsiung": {}, "nibelung": {}, "overhung": {},
 	"overstrung": {}, "restrung": {}, "samsung": {}, "shantung": {}, "taichung": {},
@@ -243,6 +250,27 @@ func isInvisible(r rune) bool {
 	return unicode.In(r, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point)
 }
 
+// nonASCIIFromOriginal reports whether every rune of translated beyond ASCII
+// occurs in original, in either case.
+func nonASCIIFromOriginal(translated, original string) bool {
+	for _, r := range translated {
+		if r < utf8.RuneSelf {
+			continue
+		}
+		lr, found := unicode.ToLower(r), false
+		for _, o := range original {
+			if o == r || unicode.ToLower(o) == lr {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 // sqlMetaChars are characters stripped from translations to prevent injection.
 var sqlStripper = strings.NewReplacer(
 	"'", "",
@@ -339,8 +367,14 @@ const maxDetectWordBytes = 32
 func NeedsTranslation(query string) bool {
 	ev, quoted := scanTranslateEvidence(query)
 	switch {
-	case ev == (translateEvidence{}):
+	case ev == (translateEvidence{plain: ev.plain}):
+		// nothing outside the quotes but unlisted lower-case words (translate
+		// "what is the Zugriff policy?"): read from the quotes, their English
+		// function words included; the unlisted words still stand for the veto
+		// below (invoice "Rechnung")
+		plain := ev.plain
 		ev = quoted
+		ev.plain += plain
 	case ev.english == 0:
 		ev.strong += quoted.strong
 		ev.weak += quoted.weak
@@ -765,6 +799,14 @@ func validateTranslation(translated, original string) bool {
 	// Only safe characters, and none of the invisible letters and marks the
 	// pattern's \p{L}\p{M} would let through.
 	if !safePattern.MatchString(translated) || strings.IndexFunc(translated, isInvisible) >= 0 {
+		return false
+	}
+
+	// A letter or mark beyond ASCII is one the question wrote itself: a name
+	// the answer keeps (Ålesund, Müller). An answer that brings its own — a
+	// sentence in another script, a look-alike letter in an ASCII word — is
+	// no English translation of the question, and the question stays.
+	if !nonASCIIFromOriginal(translated, original) {
 		return false
 	}
 

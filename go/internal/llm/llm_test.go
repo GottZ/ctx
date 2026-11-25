@@ -424,10 +424,16 @@ func TestValidateTranslation(t *testing.T) {
 			true,
 		},
 		{
-			"letters beyond ASCII accepted",
+			"letters beyond ASCII the question wrote accepted",
+			"Schöne Übersetzung",
+			"schöne übersetzung bitte",
+			true, // #551: a letter of the question passes; symbols, control and format characters do not
+		},
+		{
+			"letters beyond ASCII the question did not write rejected",
 			"Schöne Übersetzung",
 			"Schoene Uebersetzung",
-			true, // #551: letters of any script pass; symbols, control and format characters do not
+			false,
 		},
 		{
 			"symbol beyond ASCII rejected",

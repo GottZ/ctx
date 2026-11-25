@@ -121,25 +121,49 @@ func TestGermanListsCarryNoEnglishWord(t *testing.T) {
 }
 
 // TestValidateTranslation551Letters (point 2): a translation that keeps a
-// letter beyond ASCII — a place or person name, an accent, a decomposed
-// umlaut — passes. On 89d9e70c each was dropped and the original question
-// went on to retrieval.
+// letter beyond ASCII the question wrote — a place or person name, an accent
+// — passes. On 89d9e70c each was dropped and the original question went on
+// to retrieval.
 func TestValidateTranslation551Letters(t *testing.T) {
-	const original = "eine Frage, die lang genug für jede Antwort hier ist"
-	for _, answer := range []string{
-		"Trip planning in Ålesund",
-		"Call with Jürgen Müller about the contract",
-		"Søren Kierkegaard quotes",
-		"Ærø ferry times",
-		"café opening hours",
-		"Mu\u0308ller notes",
-		"Straße names",
-		"Δ of the release",
-		"हिन्दी notes",
+	for _, c := range []struct{ original, answer string }{
+		{"Reiseplanung für Ålesund im Sommer", "Trip planning for Ålesund in summer"},
+		{"Gespräch mit Jürgen Müller über den Vertrag", "Call with Jürgen Müller about the contract"},
+		{"Zitate von Søren Kierkegaard gesucht", "Søren Kierkegaard quotes"},
+		{"Wann fährt die Fähre nach Ærø?", "When does the ferry to Ærø leave?"},
+		{"Öffnungszeiten vom Café am Markt", "café opening hours at the market"},
+		{"Notizen zum Treffen mit MÜLLER gestern", "Notes on the meeting with Müller yesterday"},
+		{"Wie heißt die Straße beim Bahnhof?", "What is the Straße at the station called?"},
+		{"Was ist das Δ zum letzten Release?", "What is the Δ to the last release?"},
 	} {
-		if !validateTranslation(answer, original) {
-			t.Errorf("validateTranslation(%q) = false, want true", answer)
+		if !validateTranslation(c.answer, c.original) {
+			t.Errorf("validateTranslation(%q, %q) = false, want true", c.answer, c.original)
 		}
+	}
+}
+
+// TestValidateTranslation551OwnLetters (review of PR #556): a letter or mark
+// beyond ASCII that the question did not write is not a name the answer
+// kept. An answer in another script, a look-alike letter inside an ASCII
+// word, a pile of combining marks or a decomposed spelling of the question's
+// own letter leaves the question as it was — what the ASCII-only pattern did
+// for each of them before #551.
+func TestValidateTranslation551OwnLetters(t *testing.T) {
+	const original = "Wie setze ich das Passwort für Müller zurück?"
+	for _, c := range []struct{ class, answer string }{
+		{"a sentence in Cyrillic", "Как сбросить пароль"},
+		{"a sentence in Chinese", "如何重置密码"},
+		{"a look-alike letter in an ASCII word", "How do I reset the p\u0430ssword"},
+		{"an accent the question did not write", "How do I reset the pässword for Mueller"},
+		{"a combining mark the question did not write", "How do I reset the passwo\u0301rd"},
+		{"the question's letter in a decomposed spelling", "Password reset for Mu\u0308ller"},
+		{"a name the question did not write", "Password reset for Ålesund"},
+	} {
+		if validateTranslation(c.answer, original) {
+			t.Errorf("%s: validateTranslation(%q) = true, want false", c.class, c.answer)
+		}
+	}
+	if !validateTranslation("How do I reset the password for Müller?", original) {
+		t.Errorf("the question's own letter in the answer is refused")
 	}
 }
 
@@ -365,6 +389,38 @@ func TestTranslateQuery551SlashAnswers(t *testing.T) {
 	} {
 		if got := translateAnswer(t, q, c.answer); got != c.want {
 			t.Errorf("answer %q: TranslateQuery = %q, want %q", c.answer, got, c.want)
+		}
+	}
+}
+
+// TestNeedsTranslation556Review pins what the review of PR #556 found
+// unpinned or wrong.
+func TestNeedsTranslation556Review(t *testing.T) {
+	for _, c := range []struct {
+		query string
+		want  bool
+	}{
+		// An unlisted lower-case word before an English quote: the quote is
+		// read with its English function words, as on 89d9e70c.
+		{`translate "what is the Zugriff policy?"`, false},
+		{`explain "where is the Müller office"`, false},
+		{`quote "the best café in Malmö"`, false},
+		{`check "is the Müller account active"`, false},
+		{`translate "jeg er sulten"`, true},
+		{`invoice "Rechnung"`, false},
+		// English words and names on -ung the ending rule read as German.
+		{"unsprung mass reduction", false},
+		{"underslung trailer axle kit", false},
+		{"highstrung horse training", false},
+		{"Keelung harbour tour", false},
+		// The veto of a capitalised noun ending needs a query without any
+		// stop word: one weak stop word beside it keeps the ending's signal.
+		{"Rechnung den kunden schicken", true},
+		// ß ends a word a possessive mark may follow, inside single quotes.
+		{"Was bedeutet der Satz 'the Strauß' waltz is not in the list of the works'?", true},
+	} {
+		if got := NeedsTranslation(c.query); got != c.want {
+			t.Errorf("NeedsTranslation(%q) = %v, want %v", c.query, got, c.want)
 		}
 	}
 }
