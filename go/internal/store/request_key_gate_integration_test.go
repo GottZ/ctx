@@ -606,3 +606,108 @@ func (g gateAskTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.T
 }
 
 func (gateAskTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// passTracer counts, on the delete's pool, the block picks of its passes
+// (prunePickSQL) before its last pass statement (the projects) and marks when
+// its first data pass statement (the dream links of the first batch) begins.
+type passTracer struct {
+	mu        sync.Mutex
+	picks     int
+	drains    int
+	closing   bool
+	firstPass atomic.Int64
+}
+
+func (p *passTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	switch {
+	case strings.Contains(d.SQL, "DELETE FROM context_projects WHERE tenant_id"):
+		p.closing = true
+	case p.closing:
+	case strings.Contains(d.SQL, "DELETE FROM context_dream_links WHERE ctid IN"):
+		p.firstPass.CompareAndSwap(0, time.Now().UnixNano())
+	case strings.HasPrefix(d.SQL, "SELECT id::text FROM context_blocks WHERE scope = ANY"):
+		p.picks++
+	case strings.HasPrefix(d.SQL, "DELETE FROM context_blobs WHERE ctid IN"):
+		p.drains++
+	}
+	return ctx
+}
+
+func (*passTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// TestTenantPruneOrderAndPassEnds: the key step comes before the data passes,
+// so no request write of the tenant commits once the first pass statement has
+// begun (eight writers of the tenant's key write in a loop across the whole
+// delete); and a pass ends on the batch that drains what is there — one block
+// pick per scope and one blob drain for a tenant with fewer rows than a batch,
+// where a pass that ended only on a batch that found nothing took two.
+func TestTenantPruneOrderAndPassEnds(t *testing.T) {
+	f := newP547Fixture(t)
+	ctx := context.Background()
+	tenantID, scopes, raw := pruneWritersTenant(t, f, "gord", 3)
+	for i, s := range scopes {
+		f.block(t, s, fmt.Sprintf("gord seed %d", i))
+		if _, err := store.UpsertBlob(ctx, f.pool, "files", fmt.Sprintf("gord blob %d", i), "f.txt", "text/plain", s, []byte("x"), nil, nil, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rctx, ar := gateAuth(t, f.pool, raw)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var lastCommit atomic.Int64
+	for g := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, err := store.UpsertBlocks(rctx, f.pool, []store.BatchUpsert{{Category: "learnings", Title: fmt.Sprintf("gord %d %d", g, i), Content: "x", Scope: scopes[i%3], ScopeExplicit: true}}, ar.ApiKeyID, f.set, nil)
+				if err == nil {
+					now := time.Now().UnixNano()
+					for {
+						old := lastCommit.Load()
+						if now <= old || lastCommit.CompareAndSwap(old, now) {
+							break
+						}
+					}
+				} else if errors.Is(err, store.ErrRequestKeyGone) {
+					return
+				}
+			}
+		}()
+	}
+	time.Sleep(100 * time.Millisecond)
+	pt := &passTracer{}
+	cfg, err := pgxpool.ParseConfig(f.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = pt
+	dpool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(dpool.Close)
+	perr := store.PruneTenant(ctx, dpool, tenantID, store.AuditStamp{})
+	close(stop)
+	wg.Wait()
+	if perr != nil {
+		t.Fatalf("tenant-delete: %v", perr)
+	}
+	if fp, lc := pt.firstPass.Load(), lastCommit.Load(); fp == 0 || lc >= fp {
+		t.Fatalf("a request write of the tenant committed %s after the first pass statement began — the key step did not come first",
+			time.Duration(lc-fp))
+	}
+	if pt.picks != len(scopes) || pt.drains != 1 {
+		t.Fatalf("the passes ran %d block picks over %d scopes and %d blob drains — want one each: a pass ends on the batch that drains what is there", pt.picks, len(scopes), pt.drains)
+	}
+	if blocks, links, other, tenant := pruneLeftovers(t, f.pool, tenantID, scopes); blocks+links+other+tenant != 0 {
+		t.Fatalf("%d blocks, %d links, %d other rows, tenant %d left", blocks, links, other, tenant)
+	}
+}
