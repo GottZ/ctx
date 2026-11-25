@@ -42,8 +42,12 @@ func TestRebuildOfADeletedTenantWritesNothing(t *testing.T) {
 	if !errors.Is(err, store.ErrRunTenantGone) {
 		t.Fatalf("a rebuild for the deleted tenant: %v, want ErrRunTenantGone", err)
 	}
-	var meta int
-	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM graph_overview_meta WHERE scope = $1`, scope).Scan(&meta); err != nil || meta != 0 {
-		t.Fatalf("%d meta rows of the deleted tenant's scope (%v), want 0", meta, err)
+	if _, err := overview.StartRun(ctx, pool, overview.RunStart{Tenant: tn.ID, ScopeSet: []string{scope}, Resolution: 1.0}); !errors.Is(err, store.ErrRunTenantGone) {
+		t.Fatalf("a run journal row for the deleted tenant: %v, want ErrRunTenantGone", err)
+	}
+	var meta, runs int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM graph_overview_meta WHERE scope = $1)::int,
+		(SELECT count(*) FROM graph_overview_run WHERE $1 = ANY(scope_set))::int`, scope).Scan(&meta, &runs); err != nil || meta != 0 || runs != 0 {
+		t.Fatalf("%d meta rows and %d run journal rows of the deleted tenant's scope (%v), want 0", meta, runs, err)
 	}
 }

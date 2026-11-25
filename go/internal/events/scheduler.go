@@ -1469,6 +1469,8 @@ func (s *Scheduler) renderRootMap(ctx context.Context, bt backgroundTenant) {
 		effectiveHomeScope(cfgT.Scheduler.HomeScope, bt.owned),
 		store.IntersectWindow(cfgT.Scheduler.ReadScopes, bt.owned))
 	switch {
+	case errors.Is(err, store.ErrRunTenantGone):
+		slog.Info("scheduler: root map skipped — its tenant is being deleted", "tenant_scope", bt.scope)
 	case err != nil:
 		slog.Warn("scheduler: root map failed", "error", err, "tenant_scope", bt.scope)
 	case res.Written:
@@ -1582,6 +1584,7 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// keinen Lauf verhindern — es wird laut geloggt, und FinishRun laeuft mit
 	// leerer runID ins no-op.
 	runID, jerr := overview.StartRun(ctx, s.pool, overview.RunStart{
+		Tenant:     bt.id,
 		ScopeSet:   bt.owned,
 		Engine:     cfg.GraphOverview.Engine,
 		Resolution: cfg.GraphOverview.Resolution,
@@ -1596,6 +1599,12 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 			cfg.GraphOverview.MaxNodes, cfg.GraphOverview.MaxNodesCtx),
 		ParentRSSKb: overview.ReadVmHWMkB(),
 	})
+	if errors.Is(jerr, store.ErrRunTenantGone) {
+		// The tenant's delete has begun (issue #555): no journal row, no
+		// rebuild; the next cycle leaves the tenant out.
+		slog.Info("scheduler: overview rebuild skipped — its tenant is being deleted", "tenant_scope", bt.scope)
+		return
+	}
 	if jerr != nil {
 		slog.Error("scheduler: overview run journal not opened", "error", jerr,
 			"tenant_scope", bt.scope, "scope_filter", bt.owned)
@@ -1636,6 +1645,15 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		SuperMinResolution: cfg.RootMap.SuperMinResolution,
 		SuperMaxNodes:      cfg.RootMap.SuperMaxNodes,
 	})
+	if errors.Is(err, store.ErrRunTenantGone) {
+		// The tenant's delete began while the rebuild ran (issue #555): its
+		// persist wrote nothing, and the next cycle leaves the tenant out.
+		// (Through the worker process the error arrives as text and is
+		// logged below.)
+		slog.Info("scheduler: overview rebuild skipped — its tenant is being deleted", "tenant_scope", bt.scope)
+		s.closeOverviewRun(ctx, runID, overview.RunResult{Outcome: "failed", SkipReason: "tenant-deleted", Stats: stats})
+		return
+	}
 	if err != nil {
 		// W-A: distinguish the two failure shapes the map has to tell apart.
 		// A rebuild_timeout SIGKILLs the worker child (overview_worker.go:
