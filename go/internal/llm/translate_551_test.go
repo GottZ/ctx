@@ -33,6 +33,7 @@ func TestNeedsTranslation551GermanFrames(t *testing.T) {
 		`Wann erscheint "connection refused"?`,
 		// stop words that were not on the list
 		"Was passiert beim Neustart",
+		"Absturz beim Neustart der Dienste",
 		"heute Abend noch deployen",
 		"Hab ich schon gemacht",
 		"Kommt drauf an, sagt der Kollege",
@@ -72,6 +73,8 @@ func TestNeedsTranslation551EnglishControls(t *testing.T) {
 		"young people meeting",
 		"was it fast",
 		"Die cast car models",
+		// a domain term with a noun ending counts once
+		"the Einstellung tab",
 	)
 }
 
@@ -239,8 +242,8 @@ func TestNeedsTranslation551SingleQuotePossessive(t *testing.T) {
 		}
 	}
 	// A quote ending in s closes where the next quote opens.
-	if ev, _ := scanTranslateEvidence("Was heißt 'process' und 'thread' in the docs?"); ev.english != 1 {
-		t.Errorf("two quotes: evidence %+v outside the quotes, want english 1 (the)", ev)
+	if ev, _ := scanTranslateEvidence("Was heißt 'process' und 'thread' in the docs?"); ev.english != 1 || ev.strong != 2 {
+		t.Errorf("two quotes: evidence %+v outside the quotes, want english 1 (the) and strong 2 (heißt, und)", ev)
 	}
 }
 
@@ -255,6 +258,7 @@ func TestNeedsTranslation551QuoteInsideCodeToken(t *testing.T) {
 		`row['übersicht']`,
 		`key="Größe"`,
 		`=SUMME(„Größe“)`,
+		`obj.attr("Größe")`,
 	)
 	checkNeedsTranslation(t, true,
 		`Was bedeutet "Größe"?`,
@@ -313,6 +317,7 @@ func TestNeedsTranslation551WordSlash(t *testing.T) {
 		"/Größe/Gewicht",
 		"Größe/Gewicht/Höhe",
 		"Größe/gewicht",
+		"notes/Übersicht",
 		"Übersicht/Datei.md",
 		"Größe/Gewicht_neu",
 		"Ä/",
