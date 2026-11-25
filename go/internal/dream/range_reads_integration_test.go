@@ -122,7 +122,8 @@ func TestRangeReadsQueueDepthReadsTheEligibleRowsOnce(t *testing.T) {
 		SELECT 'learnings', 'qd ' || i, 'qd body ' || i, (ARRAY['qd-a','qd-b','qd-c','qd-o'])[1 + (i % 4)],
 		       (ARRAY['knowledge','issue','checkpoint','reference'])[1 + ((i / 4) % 4)], i % 13 = 0,
 		       CASE WHEN i % 3 = 0 THEN NULL ELSE now() - interval '2 days' END,
-		       CASE WHEN i % 3 = 1 THEN now() + make_interval(mins => i % 600) WHEN i % 3 = 2 THEN now() - interval '1 day' END,
+		       CASE WHEN i % 3 = 1 THEN now() + make_interval(mins => i % 600) WHEN i % 6 = 2 THEN now() - interval '1 day'
+		            WHEN i % 6 = 5 THEN now() - interval '1 hour' END,
 		       'internal'
 		  FROM generate_series(1, 20000) i`); err != nil {
 		t.Fatal(err)
