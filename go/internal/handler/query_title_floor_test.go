@@ -400,3 +400,37 @@ func TestFloorTitleMatchKeepsTheOwnScore(t *testing.T) {
 		t.Error("a block already first was not placed and carries no own score")
 	}
 }
+
+// Issue #528, review round 1 (L2): a leading phrase ends at a word boundary —
+// a question whose first word only begins like the phrase's last word ("show
+// meNotes", "zeig mirNotes") is no phrase, and its rest names nothing.
+func TestFloorTitleMatchPhraseEndsAtAWordBoundary(t *testing.T) {
+	in := titleFloorList("a", "b", "c", "Notes")
+	for _, p := range titlePhrases {
+		q := strings.TrimSuffix(p, " ") + "Notes"
+		if out := floorTitleMatch(in, q, nil); titleFloorIDs(out) != titleFloorIDs(in) {
+			t.Errorf("%q: order %s, want it unchanged", q, titleFloorIDs(out))
+		}
+		if out := floorTitleMatch(in, p+"Notes", nil); out[0].Title != "Notes" {
+			t.Errorf("%q: first %q, want Notes", p+"Notes", out[0].Title)
+		}
+	}
+}
+
+// Issue #528, review round 1 (L2): only a quotation mark encloses a title — a
+// title that begins and ends with the same letter keeps both.
+func TestFoldTitleKeepsAnEnclosingLetter(t *testing.T) {
+	for in, want := range map[string]string{
+		"Level":      "level",
+		"Level?":     "level",
+		"abba":       "abba",
+		"'Level'":    "level",
+		"`Level`":    "level",
+		"1 to 1":     "1 to 1",
+		"(Level)":    "(level)",
+	} {
+		if got := foldTitle(in); got != want {
+			t.Errorf("foldTitle(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

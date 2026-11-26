@@ -336,3 +336,65 @@ func TestQueryRejectionOfAGravityLiftedAnswer(t *testing.T) {
 		t.Errorf("retrieval-only label %q, want low_confidence", got)
 	}
 }
+
+// L2: the reranker runs behind the gravity and keeps the fusion score the
+// gravity recorded — not the gravity's boosted score, rounded — so the label
+// reads the fusion with the reranker on as with it off.
+func TestQueryLabelGravityThenReranker(t *testing.T) {
+	e := operationsEnv(t)
+	ref := e.ask(t, e.handler(t, nil), operationsQuestion, false)
+	fusion := map[string]float64{}
+	fusionMax := 0.0
+	for _, s := range ref.Sources {
+		if s.RRFScoreOriginal == nil {
+			t.Fatalf("precondition: source %s carries no fusion score behind the gravity", s.ID)
+		}
+		fusion[s.ID] = *s.RRFScoreOriginal
+		fusionMax = max(fusionMax, *s.RRFScoreOriginal)
+	}
+	if !(ref.maxScore() > fusionMax) {
+		t.Fatalf("precondition: the gravity lifted no score (%v, fusion %v)", ref.maxScore(), fusionMax)
+	}
+	rerankOn := func(c *config.Config) {
+		c.Rerank = config.RerankConfig{Enabled: true, MaxDocs: 50, BlendWeight: 0.5, Timeout: 5 * time.Second}
+	}
+	rr := e.ask(t, e.handler(t, rerankOn), operationsQuestion, false)
+	for _, s := range rr.Sources {
+		if f, ok := fusion[s.ID]; ok && (s.RRFScoreOriginal == nil || *s.RRFScoreOriginal != f) {
+			t.Errorf("reranked source %s: rrf_score_original %v, want the fusion score %v", s.ID, ptrVal(s.RRFScoreOriginal), f)
+		}
+	}
+	// A threshold between the fusion's maximum and the gravity's: low on both
+	// paths, with the reranker as without it.
+	thr := (fusionMax + ref.maxScore()) / 2
+	h := e.handler(t, withThreshold(thr, rerankOn))
+	for _, syn := range []bool{false, true} {
+		if got := e.ask(t, h, operationsQuestion, syn).Confidence; got != "low_confidence" {
+			t.Errorf("reranker on, synthesize=%v: label %q, want low_confidence (fusion maximum %v below %v)", syn, got, fusionMax, thr)
+		}
+	}
+}
+
+// L2: the retrieval-only label counts the sources at or above
+// query.score_threshold only, like the synthesis — a source exactly at the
+// score threshold counts, none below it does.
+func TestQueryRetrievalOnlyLabelScoreThreshold(t *testing.T) {
+	e := operationsEnv(t)
+	ref := e.ask(t, e.handler(t, nil), "Operations log rotation", false)
+	top := ref.maxScore()
+	if top <= 0 {
+		t.Fatalf("precondition: no source")
+	}
+	at := func(scoreThr float64) func(*config.Config) {
+		return func(c *config.Config) {
+			c.Query.ScoreThreshold = scoreThr
+			c.Query.ConfidentThreshold = top / 2
+		}
+	}
+	if got := e.ask(t, e.handler(t, at(top)), "Operations log rotation", false).Confidence; got != "confident" {
+		t.Errorf("score threshold at the top score: label %q, want confident (the top source counts)", got)
+	}
+	if got := e.ask(t, e.handler(t, at(top*1.0001)), "Operations log rotation", false).Confidence; got == "confident" {
+		t.Errorf("score threshold above every score: label %q, want no source to count", got)
+	}
+}
