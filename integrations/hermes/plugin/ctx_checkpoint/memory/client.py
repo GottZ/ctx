@@ -158,6 +158,17 @@ def response_code(data: Any) -> str:
     return ""
 
 
+def is_failure_envelope(data: Any) -> bool:
+    """Is a returned answer a failure envelope? ``success: false``, a non-empty ``error`` without
+    ``success: true`` (a proxy in front of ctx may answer so; ctx does not), or no object at all.
+    The client redacts such an answer as a failure (``CtxClient._request``) and the chain writer
+    counts it as an error answer of the server entry (GottZ/ctx#289: one reading for both)."""
+    if not isinstance(data, dict):
+        return True
+    success = data.get("success")
+    return success is False or (success is not True and bool(data.get("error")))
+
+
 def _parse_error_body(body: str) -> tuple:
     """(code, error-text) from an error response body; tolerant of non-JSON."""
     try:
@@ -291,8 +302,7 @@ class CtxClient:
                 # without a success field) is never rewritten — a short key would corrupt
                 # payloads; an ``error`` value next to it is redacted on its own.
                 # Closed-vocabulary codes never contain a key and stay verbatim.
-                success = parsed.get("success")
-                if success is False or (success is not True and parsed.get("error")):
+                if is_failure_envelope(parsed):
                     code = parsed.get("code")
                     parsed = redact_deep(parsed, self._key)
                     if isinstance(code, str) and code in REJECT_CODES:

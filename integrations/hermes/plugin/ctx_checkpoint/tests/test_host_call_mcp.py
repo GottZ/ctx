@@ -322,12 +322,49 @@ def test_without_the_grant_or_without_call_mcp_or_on_a_refused_grant_the_calls_a
     no_grant = _run_scenario(_isolated_hermes_home, granted=False, call_mcp=recorder)
     assert asked == []
     refused = _run_scenario(_isolated_hermes_home, granted=True, call_mcp=refusing)
-    # Refused once (before any transport work); every later call goes through the dispatch.
-    assert asked == [("refused", "ctx", "search")]
+    # Refused once per checkpoint (before any transport work); every later call of that checkpoint
+    # goes through the dispatch (#289: the next checkpoint asks again).
+    assert asked == [("refused", "ctx", "search"), ("refused", "ctx", "search")]
 
     assert "abandoned" in before["error"] and "[timeout]" in before["error"]
     for other in (no_grant, refused):
         assert other == before
+
+
+def test_a_grant_hermes_refused_is_used_again_by_the_next_checkpoint(_isolated_hermes_home, registered):
+    """A5 (#289): Hermes refused the grant during one checkpoint (its own read of config.yaml did not
+    list the entry, e.g. the operator was changing it). The client kept that refusal until the
+    provider connected again, so a grant restored meanwhile went unused; it holds for the checkpoint
+    that received it now, and the next checkpoint goes through call_mcp again."""
+    _write_config(_isolated_hermes_home, granted=True)
+    double = DispatchDouble()
+    hermes_grants = {"ctx": False}
+    asked: list[str] = []
+
+    def call_mcp(server, tool, arguments=None, timeout=30):
+        asked.append(tool)
+        if not hermes_grants[server]:
+            raise PermissionError(f"Plugin 'ctx_checkpoint' is not allowed to call MCP server {server!r}")
+        return _envelope(double.dispatch(mcp_tool_name(server, tool), dict(arguments or {})))
+
+    dispatched: list[str] = []
+
+    def dispatch(name, args, **kwargs):
+        dispatched.append(name.rsplit("__", 1)[-1])
+        return double.dispatch(name, args, **kwargs)
+
+    provider = CtxCheckpointMemoryProvider(dispatch=dispatch, call_mcp=call_mcp)
+    provider.initialize("session-regrant", platform="cli", hermes_home=str(_isolated_hermes_home))
+    assert "ctx checkpoint head:" in provider.on_pre_compress(_turns("first"), require_checkpoint=True)
+    assert asked == ["search"] and "store" in dispatched  # refused once, the rest through the dispatch
+
+    hermes_grants["ctx"] = True
+    asked.clear()
+    dispatched.clear()
+    assert "ctx checkpoint head:" in provider.on_pre_compress(_turns("second"), require_checkpoint=True)
+
+    assert dispatched == []
+    assert asked and "store" in asked
 
 
 # -- with the grant: the bounded calls through call_mcp ----------------------------------------

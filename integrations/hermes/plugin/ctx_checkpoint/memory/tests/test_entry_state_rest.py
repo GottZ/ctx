@@ -96,6 +96,9 @@ class _RestCtx:
         self.stores = 0
         self.raise_next: BaseException | None = None
         self.unreadable_next = False
+        # An answer a proxy in front of ctx may give (ctx never does): HTTP 200, ``{"error": ...}``
+        # without ``success``.
+        self.error_envelope_next: dict | None = None
 
     def __call__(self, request, *, timeout: float):
         path = request.full_url.split("ctx.invalid", 1)[1]
@@ -110,6 +113,9 @@ class _RestCtx:
         if self.unreadable_next:
             self.unreadable_next = False
             return _Answer("<html>bad gateway</html>")
+        if self.error_envelope_next is not None:
+            body, self.error_envelope_next = self.error_envelope_next, None
+            return _Answer(json.dumps(body))
         self.stores += 1
         ts = "2026-11-24T00:00:00Z"
         block = {"id": f"019f7000-0000-7000-8000-{self.stores:012d}", "created_at": ts, "updated_at": ts}
@@ -174,3 +180,46 @@ def test_rest_an_answer_the_client_cannot_read_is_an_error_answer(rest_ctx, tmp_
     assert state.errors_in_row == 1
     assert state.writes_in_window(clock["now"]) == 1
     assert (state.in_flight, state.writes_in_flight, state.planned_runs) == (0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "body, slot_kept",
+    [
+        ({"error": "upstream refused the request"}, 1),
+        ({"error": "Rate limit exceeded: max 100 writes per 60 seconds", "code": "rate_limit"}, 0),
+    ],
+)
+def test_rest_an_error_envelope_without_success_is_an_error_answer(rest_ctx, tmp_path, clock, body, slot_kept):
+    """A9 (#289): ``{"error": ...}`` without ``success`` is a failure envelope for the client (it
+    redacts it as one) and counted as an answer in the writer: it ended the entry's run of error
+    answers and booked a slot. Both read it through one function now: an error answer, and the write
+    keeps its slot unless the envelope names ctx's write limit."""
+    one = _rest_provider(tmp_path, clock, "one")
+    rest_ctx.error_envelope_next = body
+    with pytest.raises(_cp.CtxCheckpointError, match="rejected"):
+        one.on_pre_compress(_turns("a"), require_checkpoint=True)
+    state = one._chain().entry
+    assert state.errors_in_row == 1
+    assert state.answers == 2  # the two head searches; the store's envelope is no answer
+    assert state.writes_in_window(clock["now"]) == slot_kept
+    assert (state.in_flight, state.writes_in_flight, state.planned_runs) == (0, 0, 0)
+
+
+def test_rest_the_client_and_the_writer_read_failure_envelopes_alike():
+    from ctx_plugin import client as client_mod
+
+    cases = [
+        ({"success": True, "block": {"id": "x"}}, False),
+        ({"block": {"id": "x"}}, False),
+        ({"action": "noop", "existing_id": "x"}, False),
+        ({"success": True, "error": "a note next to a success"}, False),
+        ({"error": ""}, False),
+        ({"error": None, "results": []}, False),
+        ({"success": False}, True),
+        ({"success": False, "error": "no"}, True),
+        ({"error": "no"}, True),
+        ({"error": {"message": "no"}}, True),
+        ("not an object", True),
+        (None, True),
+    ]
+    assert [client_mod.is_failure_envelope(data) for data, _ in cases] == [failed for _, failed in cases]

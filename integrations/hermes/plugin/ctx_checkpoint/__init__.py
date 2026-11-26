@@ -945,8 +945,12 @@ class CtxCheckpointMemoryProvider(CtxMemoryProvider):
         """The engine's checkpoint, plus its outcome in ``ctx_state/`` and, on a failure or a
         compaction without a checkpoint, the reason for the user (Hermes passes only a generic
         text up)."""
-        # #299: the operator's grant as it stands now decides the path of this checkpoint's calls.
+        # #299: the operator's grant as it stands now decides the path of this checkpoint's calls;
+        # #289: so does Hermes' own reading of it — a refusal held for the checkpoint that got it.
         self._mcp_granted = self._read_mcp_grant()
+        forget = getattr(self._client, "forget_host_refusal", None)
+        if callable(forget):
+            forget()
         try:
             receipt_text = super().on_pre_compress(
                 messages, require_checkpoint=require_checkpoint, tool_evidence=tool_evidence, **kwargs
