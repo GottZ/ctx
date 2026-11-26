@@ -215,6 +215,7 @@ func TestFloorTitleMatchTwinsQuotedOrBehindAPhrase(t *testing.T) {
 		{"ASCII pair around the lower twin", "Notes v1", "Notes v1?", "\"Notes v1?\"", "b11"},
 		{"pair, then the question's own mark", "Notes v1?", "Notes v1", "„Notes v1“?", "b11"},
 		{"single marks", "Notes v1", "Notes v1?", "'Notes v1?'", "b11"},
+		{"full-width marks", "Notes v1", "Notes v1?", "\uff02Notes v1?\uff02", "b11"},
 		{"pair around the higher twin", "Notes v1?", "Notes v1", "„Notes v1?“", "b01"},
 		{"phrase before the lower twin", "Notes v1", "Notes v1?", "zeig mir Notes v1?", "b11"},
 		{"phrase and pair", "Notes v1", "Notes v1?", "Was steht in „Notes v1?“", "b11"},
