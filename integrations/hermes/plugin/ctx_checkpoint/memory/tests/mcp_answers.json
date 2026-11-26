@@ -40,6 +40,17 @@
     "row_keys": ["id", "title", "category", "type"],
     "types_refused": "block type \"checkpoint\" is not retrieval-visible"
   },
+  "session_digest": {
+    "about": [
+      "The block type the plugin names on its session digests and facts (GottZ/ctx#289, migration 196) and the refusal",
+      "of a ctx server that does not know a type: the whole text of the MCP store error ({type} is the name sent) and the",
+      "code of the REST answer (HTTP 422). The plugin then stores the block without the type and sends none to that",
+      "server entry again (memory/checkpoint.py store_typed)."
+    ],
+    "type": "session-digest",
+    "unknown_type": "type: unknown block type \"{type}\" (see manage type-list)",
+    "rest_code": "unknown_type"
+  },
   "origin": {
     "about": [
       "The untrusted_origin record (GottZ/ctx#280, #295): a block re-typed out of a type marked untrusted names that type.",

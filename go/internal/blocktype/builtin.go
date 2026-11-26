@@ -110,6 +110,25 @@ var catalogPatterns = []string{
 	"gib mir einen überblick",
 }
 
+// sessionDigestDamping is MEASURED (issue #289, M196), and so is the absence of
+// intent patterns. Sweep: factor {0.3, 0.45, 0.6, 0.8, 1.0} x patterns {none, the
+// ten audit-trail words, eight session phrases} on a corpus written through the
+// store handlers (320 knowledge blocks, 128 digests, 192 facts on 32 topics,
+// vectors through the query handler's backfill) with two pre-hashed classes of
+// 128 questions each, read through the plugin's recall (MCP query, synthesize
+// false). Class A (a knowledge block is the answer): no factor of 0.8 or below
+// without patterns let a digest or a fact take its target's place in the first
+// five; 1.0 did twice, and with either pattern list a digest took it twice at
+// EVERY factor — a lifted type leaves the damping entirely, and a question that
+// mentions "the last session" is often asked for a knowledge block. Class B (only
+// a digest or a fact answers): Hit@10 0.00 / 0.10 / 0.33 / 0.73 / 0.91 over the
+// five factors without patterns. 0.8 is the highest factor with no displacement.
+// Three class-A targets moved out of the first five in every cell, also at 0.3
+// with no digest or fact above them: the arms of ctx_rrf rank over every visible
+// block before the type factor applies, so a damped block still takes a rank
+// and an arm window slot (a property of every damped type, not of this factor).
+const sessionDigestDamping = 0.8
+
 // toolEvidenceDamping is sharper than auditTrailDamping: the tool-index
 // population grows with every compaction and is near-duplicate BY
 // CONSTRUCTION. toolOverviewDamping is milder because the overview axis is
@@ -120,10 +139,10 @@ const (
 	toolOverviewDamping = 0.35
 )
 
-// builtinPolicies returns fresh copies of the eleven builtin type policies (the
+// builtinPolicies returns fresh copies of the twelve builtin type policies (the
 // four M035 enum classes + the issue/comment workflow types, Welle I-C +
 // checkpoint, M107 + the two tool-evidence axes, M136 + the two derived
-// knowledge layers, M143). Fresh
+// knowledge layers, M143 + session-digest, M196). Fresh
 // slices per call: Policies end up in immutable
 // Sets — shared backing arrays between generations would let one Set's
 // consumer observe another's mutation.
@@ -440,6 +459,56 @@ func builtinPolicies() []Policy {
 			Parent:   ParentPolicy{Mode: ParentModeNone},
 			Write:    WritePolicy{InternalOnly: true},
 			Classify: ClassifyRules{Priority: 16, TitlePatterns: []string{"katalog #"}},
+		},
+		// ── Agent session material a client files (issue #289 point 4, M196) ──
+		// session-digest: the Hermes plugin ctx_checkpoint's session digests
+		// (category agent-briefing) and the facts it extracts at a compaction
+		// (category learnings). Both are text an agent session produced from
+		// its transcript — the user's words, tool output, fetched pages — so
+		// retrieval.untrusted=true: the recall frames it as observation data.
+		// Without the type the classifier filed a digest as audit-trail and a
+		// fact as knowledge or audit-trail, both trusted.
+		//
+		// CLAIMABLE (no write section, write.internal_only=false): the plugin
+		// sets type=session-digest on both writes. That is the difference to
+		// insight, the other untrusted type an agent's session feeds, which only
+		// the server writes; and to the tool types, which describe captured tool
+		// output and which the plugin's recall leaves out by default.
+		//
+		// Damped at the measured 0.8 without intent patterns (see
+		// sessionDigestDamping): recall is the point of the type, so it is
+		// visible, and a block a person wrote keeps its place against it. A
+		// digest moves from audit-trail's 0.6 with the ten audit-trail patterns
+		// to 0.8 without a lift; a fact from full-pass to 0.8. Out of guard,
+		// dream, digest and overview like tool-overview: the plugin deduplicates
+		// its facts itself (fact ledger, the chain head's fact hashes) and
+		// writes one digest per segment, and agent-produced text must neither
+		// archive a block a person wrote nor shape the dream graph and the topic
+		// map.
+		//
+		// NO classify rule: a block becomes session-digest only when its writer
+		// names the type. A title rule ("session digest ", below audit-trail's
+		// 20) would also file the digests of plugin releases that name no type,
+		// but title patterns are substrings: a fresh reviewer's probe moved
+		// titles a person writes ("How the session digest works", "Handover:
+		// session digest backlog", the mirror's "memory: Session digest
+		// settings …") into the type — framed untrusted, out of guard and dream
+		// — and a re-type back would leave untrusted_origin=session-digest on
+		// them for good (trg_block_retype, 174). Facts could get no rule at all:
+		// "fact: " is a substring of every "Artifact: …" title.
+		{
+			Name: "session-digest", Scope: globalScope, Builtin: true,
+			Retrieval: RetrievalPolicy{
+				Kind:          RetrievalDamped,
+				DampingFactor: sessionDigestDamping,
+				Untrusted:     true,
+			},
+			Guard:    GuardPolicy{Check: false, Candidate: false, Mode: GuardModeArchive, Candidates: GuardCandidatesAll},
+			Dream:    DreamPolicy{Linkable: false},
+			Digest:   DigestPolicy{Include: false},
+			Overview: OverviewPolicy{Include: false},
+			Parent:   ParentPolicy{Mode: ParentModeNone},
+			Classify: ClassifyRules{Priority: DefaultClassifyPriority},
 		},
 	}
 }

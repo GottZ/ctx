@@ -109,6 +109,10 @@ CATEGORY_MEMORY = "agent-briefing"  # Hermes built-in memory (MEMORY.md)
 CATEGORY_USER = "reference"  # Hermes user profile (USER.md)
 CATEGORY_LEARNINGS = "learnings"  # pre-compress extraction
 CATEGORY_DIGEST = "agent-briefing"  # session-end digests
+# The block type of the session digests and the facts (GottZ/ctx#289, ctx migration 196): damped in
+# recall and marked untrusted, so every read surface frames their transcript text. A server without
+# it refuses the write (``unknown_type``); the plugin then stores without the type (store_typed).
+SESSION_DIGEST_TYPE = "session-digest"
 
 # Saliency heuristic thresholds (on_pre_compress)
 SALIENT_MIN_LEN = 60

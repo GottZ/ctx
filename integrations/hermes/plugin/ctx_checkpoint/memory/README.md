@@ -468,6 +468,38 @@ the plugin and runs over either transport.
   precision (blind-labelled, held-out n = 60) 33 % → 72 %. This is a heuristic ceiling —
   the server-side distiller (which reads the checkpoint chain) is the long-term path.
 
+### The block type of digests and facts (0.19.0)
+
+- Facts and session digests are stored with `type: session-digest` (GottZ/ctx#289): a
+  builtin type of ctx from migration 196 on, damped in recall, out of guard, dream,
+  digest and overview, and marked untrusted — every read surface frames such a block
+  (`"untrusted": true`), and the recall labels it as untrusted text. Before 0.19.0 they
+  were stored without a type: ctx filed a digest as `audit-trail` and a fact mostly as
+  `knowledge`, both unframed. Blocks stored before keep their type; the curated memory
+  mirror (`MEMORY.md`/`USER.md`) is stored without a type, as before.
+- **A server without the type** (before migration 196) refuses such a write before it
+  stores or books anything: REST 422 `unknown_type`, over MCP the tool error
+  `type: unknown block type "session-digest" (see manage type-list)` (the whole text is
+  read, `mcp_answers.json` section `session_digest`). The write is sent once more without
+  the type, and no later write of the process names it to that server entry: at most one
+  refused write per process and entry (`checkpoint.store_typed`, the entry's state of
+  `EntryState.type_to_send`). While the first write that names it is out, the others of
+  the entry wait for its answer (up to `TYPE_ASK_WAIT_S`, a required fact until its
+  deadline) and then name the type or not. A required fact refused so is sent again in the
+  same checkpoint run, admitted as a call of its own: the refusal is one error answer of
+  the entry (Hermes counts it toward its breaker), ctx books no write for it and the entry
+  holds no slot for it; at two error answers in a row the write after it waits for a read
+  alone, as every write does. Digests and the facts stored outside a required checkpoint
+  are not admitted at the entry (as before): over MCP the write of theirs that asks is
+  preceded by a listing of its category (one row), whose answer ends Hermes' run of error
+  answers — the agent's tools and recall can leave two the plugin does not see, and the
+  refusal must not be the third — and their refusal is followed at once by the write
+  without the type; a listing that fails leaves the question open and the write goes
+  without the type. After the server is updated, a running process keeps storing without
+  the type until it restarts.
+- `prefetch_untrusted: drop` drops untrusted sources from the recall — with 0.19.0 that
+  includes digests and facts stored as `session-digest`.
+
 ### Session digests
 
 - The host calls `on_session_end` at real session end **and** after every compaction,
@@ -480,7 +512,7 @@ the plugin and runs over either transport.
   shutdown). All need `auto_capture` + `auto_session_digest` and at least
   `digest_min_exchanges` new exchanges.
 - Title `Session digest <root8> seg NNN <YYYY-MM-DD>` in `agent-briefing`, unique per
-  root and segment. Content: intent (first new user turn), last request, outcome (last
+  root and segment, type `session-digest` (see above). Content: intent (first new user turn), last request, outcome (last
   assistant turn); compaction digests reference the chain manifest. Metadata:
   `root_session_id`, `session_id`, `segment`, `trigger`, `exchanges`, `manifest_id`.
 - A failed store releases the exchanges; the next trigger retries under a new segment

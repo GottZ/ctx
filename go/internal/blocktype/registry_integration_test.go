@@ -174,12 +174,12 @@ func TestRegistryGolden_Integration(t *testing.T) {
 		if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_block_types`).Scan(&n); err != nil {
 			t.Fatalf("count: %v", err)
 		}
-		// 11 since M143: 072 seeds 4, 084 seeds issue+comment, 107 seeds
+		// 12 since M196: 072 seeds 4, 084 seeds issue+comment, 107 seeds
 		// checkpoint, 136 seeds tool-evidence+tool-overview, 143 seeds
-		// insight+catalog in ONE migration (masterplan K2); re-running 072
-		// (ON CONFLICT DO NOTHING) adds none.
-		if n != 11 {
-			t.Errorf("rows after double-run = %d, want 11", n)
+		// insight+catalog in ONE migration (masterplan K2), 196 seeds
+		// session-digest; re-running 072 (ON CONFLICT DO NOTHING) adds none.
+		if n != 12 {
+			t.Errorf("rows after double-run = %d, want 12", n)
 		}
 	})
 
@@ -191,11 +191,12 @@ func TestRegistryGolden_Integration(t *testing.T) {
 			    AND metadata->>'via' = 'sql'`).Scan(&n); err != nil {
 			t.Fatalf("audit count: %v", err)
 		}
-		// 11 since M143: 4 seed inserts from 072 + issue/comment from 084 +
+		// 12 since M196: 4 seed inserts from 072 + issue/comment from 084 +
 		// checkpoint from 107 + the two tool types from 136 + insight/catalog
-		// from 143, all via=sql (migration path, no api_key_id).
-		if n != 11 {
-			t.Errorf("block_type insert audit rows = %d, want 11 (seed inserts, via=sql)", n)
+		// from 143 + session-digest from 196, all via=sql (migration path, no
+		// api_key_id).
+		if n != 12 {
+			t.Errorf("block_type insert audit rows = %d, want 12 (seed inserts, via=sql)", n)
 		}
 	})
 

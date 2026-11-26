@@ -177,7 +177,7 @@ func TestMCPUpdateType(t *testing.T) {
 		// until somebody decides its row.
 		expect := map[string]string{
 			"knowledge": "", "reference": "", "audit-trail": "", "system-meta": "", "issue": "reserved_type",
-			"tool-evidence": "", "tool-overview": "", "checkpoint": "",
+			"tool-evidence": "", "tool-overview": "", "checkpoint": "", "session-digest": "",
 			"comment": "parent_required",
 			"insight": "reserved_type", "catalog": "reserved_type",
 			"t203-own": "", "t203-own-untrusted": "",

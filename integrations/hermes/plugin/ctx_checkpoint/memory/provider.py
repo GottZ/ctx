@@ -41,6 +41,7 @@ from .config import (
     CATEGORY_MEMORY,
     CATEGORY_USER,
     ORIGIN_NOTE_PREFIX,
+    SESSION_DIGEST_TYPE,
     UNTRUSTED_LABEL,
     FactLedger,
     derive_profile_name,
@@ -129,13 +130,17 @@ class _PacedFactStore:
         sensitivity: str | None = None,
         tags: list[str] | None = None,
         *,
+        type: str | None = None,
         metadata: dict[str, Any] | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
         # ``timeout`` is the caller's bound of the call; the writer bounds it the same way
-        # (what is left of the run's deadline, at most api_timeout).
+        # (what is left of the run's deadline, at most api_timeout). ``type`` goes to the writer,
+        # which sends a write the server refuses for it again without it (#289).
         self._stored += 1
         extra: dict[str, Any] = {"metadata": metadata} if metadata else {}
+        if type:
+            extra["type"] = type
         return self._writer.store_paced(
             f"required fact {self._stored}",
             self._run,
@@ -779,9 +784,11 @@ class CtxMemoryProvider(MemoryProvider):
         title: str,
         content: str,
         sensitivity: str | None,
+        *,
+        block_type: str | None = None,
     ) -> bool:
         """One automatic store with provenance tags + result logging. Never raises."""
-        return self._auto_store_result(client, hook, category, title, content, sensitivity)[0]
+        return self._auto_store_result(client, hook, category, title, content, sensitivity, block_type=block_type)[0]
 
     def _auto_store_result(
         self,
@@ -794,9 +801,11 @@ class CtxMemoryProvider(MemoryProvider):
         metadata: dict[str, Any] | None = None,
         *,
         timeout: float | None = None,
+        block_type: str | None = None,
     ) -> tuple:
         """Like ``_auto_store`` but returns ``(ok, block_id)``. Never raises. ``timeout`` bounds the
         store (the required facts pass the time their deadline leaves); without it the client's own.
+        ``block_type``: the type the block is stored as while the server knows it (:meth:`_store_typed`).
 
         Success → INFO (hook, profile, category/title, action, id); failure →
         WARNING. Only the (shortened) title is logged, never the content.
@@ -814,7 +823,16 @@ class CtxMemoryProvider(MemoryProvider):
         if timeout is not None:
             extra["timeout"] = timeout
         try:
-            data = client.store(category, title, content, sensitivity=sensitivity, tags=tags, **extra)
+            data = self._store_typed(
+                client,
+                block_type,
+                category=category,
+                title=title,
+                content=content,
+                sensitivity=sensitivity,
+                tags=tags,
+                **extra,
+            )
         except CtxApiError as exc:
             if exc.code:
                 logger.warning(
@@ -872,6 +890,38 @@ class CtxMemoryProvider(MemoryProvider):
             block_id or "?",
         )
         return True, block_id
+
+    def _store_typed(self, client: Any, block_type: str | None, **store: Any) -> dict[str, Any]:
+        """``client.store`` naming ``block_type`` (GottZ/ctx#289) through :func:`checkpoint.store_typed` with
+        the process-wide state of the server entry: one write asks, a server without the type refuses it
+        once and the write is sent again without it. The required facts' client takes the type itself:
+        the chain writer admits that second write as a call of its own (``ChainWriter.store_paced``).
+
+        Over MCP the write that asks is preceded by a listing of its category (one row): these writes do
+        not go through the entry's admission, and Hermes counts error answers this process cannot see
+        (the agent's tools, recall) — after two of them the refusal would open Hermes' breaker for the
+        server, where the same write without the type ended the run (a fresh reviewer ran exactly that).
+        REST has no such breaker."""
+        if not block_type:
+            return client.store(**store)
+        if isinstance(client, _PacedFactStore):
+            return client.store(type=block_type, **store)
+        before_ask = None
+        if getattr(client, "transport", "") == "mcp":
+            timeout = float(self._config.get("api_timeout") or 10.0)
+            category = store.get("category")
+
+            def before_ask() -> Any:
+                return client.search(_cp.PROBE_QUERY, category=category, limit=1, timeout=timeout)
+
+        return _cp.store_typed(
+            _cp.entry_state(self._entry_key()),
+            block_type,
+            client.store,
+            wait_s=_cp.TYPE_ASK_WAIT_S,
+            before_ask=before_ask,
+            **store,
+        )
 
     def on_memory_write(self, action: str, target: str, content: str, metadata: dict[str, Any] | None = None) -> None:
         """Mirror Hermes' curated MEMORY.md/USER.md writes to CTX (async).
@@ -1309,6 +1359,7 @@ class CtxMemoryProvider(MemoryProvider):
                     safe,
                     sensitivity,
                     timeout=max(0.5, min(api_timeout, remaining)),
+                    block_type=SESSION_DIGEST_TYPE,
                 )
                 if safe is not None
                 else (False, "")
@@ -1352,7 +1403,13 @@ class CtxMemoryProvider(MemoryProvider):
         for fact in facts:
             safe = self._redacted(fact)
             if safe is not None and self._auto_store(
-                client, "pre_compress", CATEGORY_LEARNINGS, derive_title(safe, prefix="fact: "), safe, sensitivity
+                client,
+                "pre_compress",
+                CATEGORY_LEARNINGS,
+                derive_title(safe, prefix="fact: "),
+                safe,
+                sensitivity,
+                block_type=SESSION_DIGEST_TYPE,
             ):
                 stored += 1
             else:
@@ -1534,7 +1591,16 @@ class CtxMemoryProvider(MemoryProvider):
         def _run() -> None:
             safe = self._redacted(digest)
             ok, _bid = (
-                self._auto_store_result(client, hook, CATEGORY_DIGEST, title, safe, sensitivity, metadata=metadata)
+                self._auto_store_result(
+                    client,
+                    hook,
+                    CATEGORY_DIGEST,
+                    title,
+                    safe,
+                    sensitivity,
+                    metadata=metadata,
+                    block_type=SESSION_DIGEST_TYPE,
+                )
                 if safe is not None
                 else (False, "")
             )

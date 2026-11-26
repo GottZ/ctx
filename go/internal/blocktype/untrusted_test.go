@@ -100,6 +100,8 @@ func TestSet_UntrustedLookup(t *testing.T) {
 		// while the two types are excluded (K7/E-4).
 		"insight": true,
 		"catalog": false,
+		// M196: the plugin's digests and facts quote the session transcript.
+		"session-digest": true,
 		// Unknown names resolve to false, mirroring GuardSameScopeOnly: an
 		// unregistered name cannot reach the prompt in the first place (the
 		// visibility allowlist comes from the SAME snapshot, fail-closed), and
@@ -114,7 +116,7 @@ func TestSet_UntrustedLookup(t *testing.T) {
 	}
 
 	got := s.UntrustedTypes()
-	want := []string{"checkpoint", "insight", "tool-evidence", "tool-overview"}
+	want := []string{"checkpoint", "insight", "session-digest", "tool-evidence", "tool-overview"}
 	if !slices.Equal(got, want) {
 		t.Errorf("UntrustedTypes() = %v, want %v (sorted, derived at NewSet)", got, want)
 	}

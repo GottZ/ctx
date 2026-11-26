@@ -6,6 +6,43 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.19.0] — 2026-11-26
+
+Digests and facts are stored as ctx's block type `session-digest` (GottZ/ctx#289, point 4).
+
+- **The type.** Session digests and the facts of a compaction (required and best effort) are
+  stored with `type: session-digest`, the builtin type of ctx migration 196: damped in recall, out
+  of guard, dream, digest and overview, and marked untrusted, so every read surface frames their
+  transcript text. Before, they went without a type; ctx filed a digest as `audit-trail` (its
+  title holds "session") and a fact mostly as `knowledge`, both unframed in recall. The memory
+  mirror keeps storing without a type.
+- **A server without the type.** It refuses the write before anything is stored or booked (REST
+  422 `unknown_type`; over MCP the whole text `type: unknown block type "<name>" (see manage
+  type-list)`, read into the code `unknown_type` for a store that named a type —
+  `mcp_client._code_for_error`, shared fixture `mcp_answers.json` section `session_digest`). The
+  write is sent once more without the type, and the server entry's process-wide state
+  (`EntryState.type_to_send`/`type_answered`, `checkpoint.store_typed`) keeps every later write of
+  the process from naming it: at most one refused write per process and entry. While the first
+  write that names it is out, other writes of the entry wait for its answer (`TYPE_ASK_WAIT_S`, a
+  required fact until its deadline); an error that is no refusal of the type leaves the question
+  open for the next write.
+- **The required facts.** A required fact refused for its type is sent again in the same run by
+  `ChainWriter.store_paced`, admitted as a call of its own: the refusal is released as an error
+  answer of the entry (Hermes counts it), without a slot of the window (ctx checks the type before
+  its write limit), and the write is planned again. With one error answer in a row before it, the
+  write after it waits for a read alone, as every write at that limit. A checkpoint that completed
+  against such a server completes (`tests/test_session_digest_type_mcp.py`, and the e2e driver
+  through Hermes' MCP client against the ctx MCP handler of v5.87.0, `CTX_E2E_SERVER=before-196`).
+- **Digests and best-effort facts.** They are not admitted at the entry (as before), and Hermes
+  counts error answers the plugin does not see (the agent's tools, recall). Over MCP the write of
+  theirs that asks is therefore preceded by a listing of its category (one row): its answer ends
+  Hermes' run, so the refusal is not the third error answer in a row (a fresh reviewer reproduced
+  that against v5.87.0 without the listing: two failed agent reads, the digest's refusal opened the
+  breaker, the digest was lost and the next checkpoint failed). A failed listing leaves the question
+  open and the write goes without the type. One listing per process and entry, none once the
+  answer is known; REST has no breaker and sends none. A running process keeps storing without the
+  type after its server is updated, until it restarts.
+
 ## [ctx_checkpoint 0.18.0] — 2026-11-26
 
 The follow-ups of 0.17.0 (GottZ/ctx#289, the list of 2026-11-24): counts read under the entry's

@@ -297,10 +297,10 @@ func TestWriteInternalOnly(t *testing.T) {
 		if locked != 2 {
 			t.Errorf("%d builtin rows carry write.internal_only, want exactly 2 (insight, catalog)", locked)
 		}
-		if total != 11 {
-			t.Errorf("%d builtin rows, want 11 — the population this sweep is over", total)
+		if total != 12 {
+			t.Errorf("%d builtin rows, want 12 — the population this sweep is over", total)
 		}
-		// Negative sweep over the nine others, by name: a flag on `checkpoint`
+		// Negative sweep over the ten others, by name: a flag on `checkpoint`
 		// would lock out the plugin that legitimately writes it.
 		rows, err := pool.Query(ctx,
 			`SELECT name FROM context_block_types

@@ -195,8 +195,8 @@ The connection test names the tools when the entry name is rewritten.
 | Recall | before each turn the most relevant blocks are injected as `<ctx-context>` (untrusted text labelled, a block re-typed out of an untrusted type named with an `untrusted_origin:` line); the host's indicator shows `🧠 CTX — recalled N memories` | `auto_recall`, `max_prefetch_results`, `prefetch_types_exclude`, `prefetch_untrusted` |
 | Agent tools | `ctx_query(text, synthesize?, types_exclude?)`, `ctx_store(category, title, content, …)`, `ctx_search(query, category?, tags?, …)`, `ctx_get(block_id)` | — |
 | Memory mirror | Hermes' curated `MEMORY.md`/`USER.md` writes become `agent-briefing` / `reference` blocks | `auto_memory_mirror` |
-| Fact extraction | up to 5 salient closing statements of the compacted turns become `learnings` blocks, deduplicated across compactions | `auto_compress_extract`, `facts_from_user`, `facts_reject_cjk_codeswitch` |
-| Session digests | one intent → outcome digest per segment (after a compaction, rolling, after idle, at session end) | `auto_session_digest`, `digest_*`, `idle_digest_minutes` |
+| Fact extraction | up to 5 salient closing statements of the compacted turns become `learnings` blocks of type `session-digest`, deduplicated across compactions | `auto_compress_extract`, `facts_from_user`, `facts_reject_cjk_codeswitch` |
+| Session digests | one intent → outcome digest per segment (after a compaction, rolling, after idle, at session end), type `session-digest` | `auto_session_digest`, `digest_*`, `idle_digest_minutes` |
 | Provenance | every write is tagged `source:hermes`, `profile:<name>`, `hook:<origin>` | — |
 | Skill | `ctx_checkpoint:ctx-memory` tells the model how to use the store well (query as a question, verify before acting, one durable fact per block) | registered with the provider |
 | CLI | `hermes ctx_checkpoint status\|sync\|query\|store\|search\|get` | needs `transport: rest` for everything but `status` |
@@ -210,6 +210,13 @@ full table with defaults and ranges is in the [engine README](memory/README.md).
 the checkpoint-only versions before 0.6.0. Mirror, facts and digests are skipped in
 `cron`, `flush` and `subagent` agent contexts; the checkpoint chain is written in
 every context (labelled via `metadata.agent_context`).
+
+**Digests and facts are untrusted text** (0.19.0, GottZ/ctx#289). They carry what the
+session read, so they are stored as ctx's builtin type `session-digest` (migration 196):
+damped in recall and framed as untrusted on every read surface. A ctx server without
+the type refuses the first such write of the process; the plugin stores it without the
+type and does not name the type to that server again until it restarts — no checkpoint
+fails for it. Details in the [engine README](memory/README.md#the-block-type-of-digests-and-facts-0190).
 
 **Transport.** Over the default MCP dispatch, retrieval-only recall calls the ctx
 `query` tool with `synthesize: false, include_content: true` — the semantic hybrid
@@ -607,7 +614,8 @@ has that checkout's dependencies and pytest (CI: `uv sync --locked --group dev` 
 checkout). The MCP answers the fakes give are the ones ctx's own test pins:
 `memory/tests/mcp_answers.json` is read by both suites and by
 `go/internal/handler/mcp_checkpoint_answers_integration_test.go`, which compares the real
-`store`, `get` and `search` answers with it.
+`store`, `get` and `search` answers with it (the refusal of an unknown block type:
+`go/internal/handler/session_digest_answers_integration_test.go`).
 
 ```bash
 # umbrella: checkpoint contract, negotiation, setup surfaces, settings sections, status, MCP transport,

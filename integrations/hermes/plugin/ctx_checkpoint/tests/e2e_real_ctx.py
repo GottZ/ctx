@@ -11,7 +11,10 @@ again (a retry after a compaction that did not land) is answered "No change need
 part and rewrites manifest and head in place (same ids); get returns the head and the
 manifest with the ids the receipt names; another root with the same transcript lists the
 stored parts (every part "No change needed") under a manifest and head of its own, and a part
-names no conversation (GottZ/ctx#344).
+names no conversation (GottZ/ctx#344). A fact stored as the plugin stores it carries the block type
+``session-digest`` and reads back framed; a type the server does not know is refused through Hermes'
+MCP client and the fact is stored without it (GottZ/ctx#289; ``CTX_E2E_SERVER=before-196``: the
+endpoint itself does not know ``session-digest``).
 
 Environment: ``CTX_E2E_URL`` (the MCP endpoint), ``CTX_E2E_KEY`` (a key of that database),
 ``HERMES_REPO`` (the hermes-agent checkout on ``sys.path``). Exit 0 = pass; the last line of the
@@ -34,6 +37,7 @@ TYPES_REFUSED = json.loads((ENGINE_DIR / "tests" / "mcp_answers.json").read_text
     "types_refused"
 ]
 NEVER_RANKED = ("checkpoint", "system-meta")
+SESSION_DIGEST = json.loads((ENGINE_DIR / "tests" / "mcp_answers.json").read_text(encoding="utf-8"))["session_digest"]
 
 
 def _fail(message: str) -> None:
@@ -205,6 +209,43 @@ def _head_lookups(registry, McpClient, ChainWriter, first) -> dict:
     return out
 
 
+def _session_digest_type(client) -> dict:
+    """GottZ/ctx#289: a fact stored as the plugin stores it (``store_typed`` with the entry's state) carries
+    the block type ``session-digest`` and comes back framed; a type the server does not know is refused
+    through Hermes' MCP client with the text the plugin reads, and the write is stored without it, once.
+    ``CTX_E2E_SERVER=before-196`` says the endpoint itself does not know ``session-digest``."""
+    from ctx_plugin.checkpoint import EntryState, store_typed
+
+    before_196 = os.environ.get("CTX_E2E_SERVER", "") == "before-196"
+    out: dict = {}
+    for label, block_type in (("plugin_type", SESSION_DIGEST["type"]), ("unknown_type", "session-digest-e2e-unknown")):
+        entry = EntryState()
+        refused = block_type != SESSION_DIGEST["type"] or before_196
+        title = f"fact: e2e 289 {label} — the staging proxy keeps its previous image as rollback"
+        data = store_typed(
+            entry,
+            block_type,
+            client.store,
+            category="learnings",
+            title=title,
+            content=f"The staging proxy keeps its previous image as rollback ({label}).",
+            sensitivity="internal",
+        )
+        block_id = (data.get("block") or {}).get("id") if isinstance(data, dict) else None
+        if not block_id:
+            _fail(f"{label}: the store answered {data!r}")
+        block = client.get_block(block_id).get("block") or {}
+        want = "knowledge" if refused else SESSION_DIGEST["type"]
+        if block.get("type") != want:
+            _fail(f"{label}: stored as {block.get('type')!r}, want {want!r}")
+        if (block.get("untrusted") is True) == refused:
+            _fail(f"{label}: untrusted={block.get('untrusted')!r} for a block of type {block.get('type')!r}")
+        if entry.type_to_send(block_type) == refused:
+            _fail(f"{label}: the entry's verdict on {block_type!r} is not {'refused' if refused else 'known'}")
+        out[label] = {"type": block.get("type"), "untrusted": bool(block.get("untrusted")), "refused": refused}
+    return out
+
+
 def _head_title() -> str:
     from ctx_plugin.checkpoint import head_title_for
 
@@ -284,6 +325,7 @@ def main() -> int:
             _fail("a part names a conversation")
 
         heads = _head_lookups(registry, McpClient, ChainWriter, first)
+        session_digest = _session_digest_type(client)
 
         summary = {
             "parts": parts,
@@ -292,6 +334,7 @@ def main() -> int:
             "other": {"writes": other.writes, "reused": other.reused, "lookup": other.lookup},
             "head": first.head_id,
             "head_lookups": heads,
+            "session_digest": session_digest,
         }
         print(json.dumps(summary, sort_keys=True), flush=True)
         return 0
