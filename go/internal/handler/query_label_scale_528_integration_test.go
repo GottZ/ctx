@@ -286,3 +286,53 @@ func TestQueryLabelCyclicThenLinearGravity(t *testing.T) {
 		t.Errorf("synthesis label %q, want low_confidence (read on the fusion, below the threshold %v)", got, ro.maxScore())
 	}
 }
+
+// operationsEnv: twelve operations logs, one per day of August 2026; the one
+// nearest the question vector is the log of the day the question names, so
+// the linear gravity boosts the list's first.
+func operationsEnv(t *testing.T) *scaleEnv {
+	t.Helper()
+	return newScaleEnv(t, 12,
+		func(j int) string { return fmt.Sprintf("Operations log %02d", j) },
+		func(j int) string {
+			return fmt.Sprintf("Operations log of 2026-08-%02d: rotation, backups, one restart.", 31-j)
+		}, false)
+}
+
+const operationsQuestion = "Was geschah am 2026-08-31?"
+
+// cited is the number of sources that stood in the synthesis prompt.
+func (r scaleResp) cited() int {
+	n := 0
+	for _, s := range r.Sources {
+		if s.CitationIndex != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// M3: the model rejects the sources of an answer the gravity alone lifted
+// across the threshold. The label is low_confidence on the fusion's scale, the
+// prompt carries query.low_confidence_max_sources sources, and the rejection
+// turns the label into no_relevant_blocks_found — the rule every undated
+// low_confidence answer already followed (llm.ApplyConfidenceOverride).
+func TestQueryRejectionOfAGravityLiftedAnswer(t *testing.T) {
+	e := operationsEnv(t)
+	ro := e.ask(t, e.handler(t, nil), operationsQuestion, false)
+	if len(ro.Sources) == 0 || ro.Sources[0].RRFScoreOriginal == nil || !(*ro.Sources[0].RRFScoreOriginal < ro.Sources[0].Score) {
+		t.Fatalf("precondition: the gravity lifted no source")
+	}
+	h := e.handler(t, withThreshold(ro.maxScore(), nil))
+	e.chatAnswer.Store("NO_RELEVANT_SOURCES")
+	sy := e.ask(t, h, operationsQuestion, true)
+	if sy.Confidence != "no_relevant_blocks_found" {
+		t.Errorf("rejected answer: label %q, want no_relevant_blocks_found (low_confidence on the fusion, then rejected)", sy.Confidence)
+	}
+	if n := sy.cited(); n != config.Defaults().Query.LowConfidenceMaxSources {
+		t.Errorf("rejected answer: %d sources in the prompt, want query.low_confidence_max_sources = %d", n, config.Defaults().Query.LowConfidenceMaxSources)
+	}
+	if got := e.ask(t, h, operationsQuestion, false).Confidence; got != "low_confidence" {
+		t.Errorf("retrieval-only label %q, want low_confidence", got)
+	}
+}
