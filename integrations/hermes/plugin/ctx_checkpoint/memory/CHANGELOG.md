@@ -22,10 +22,12 @@ check after a notice, the grant asked again per checkpoint, one reading of failu
   ticket (`Admission.probe` with a ticket); writers that want to write meanwhile wait for its
   answer.
 - **A cheap probe.** The probe searched its category for `Compaction checkpoint head`, which every
-  head matches: on a test ctx with 100 000 heads ctx read and ranked all of them (0.7–1.1 s
-  median, 3.7 s at p95, about 770 000 buffer hits a call; with `search.leave_out_never_ranked` on,
-  5 ms and no row). It lists the category now (`PROBE_QUERY` empty, one row): about 1 ms and 8–10
-  buffer hits at 100 000 heads as at none, on both settings. Any answer ends the run.
+  head matches: on a test ctx ctx read and ranked all of them — at 100 000 heads 0.7–1.1 s median,
+  3.7 s at p95, about 770 000 buffer hits a call; at 1 000 000 heads 15–18 s median (7.7 million
+  buffer hits), longer than the plugin's 10 s bound of a call, so the probe failed there; with
+  `search.leave_out_never_ranked` on, 5 ms and no row. It lists the category now (`PROBE_QUERY`
+  empty, one row): 1.0–1.6 ms and 8–10 buffer hits at 100 000 and at 1 000 000 heads as at none.
+  Any answer ends the run.
 - **The early stop is judged by the transcript.** A run held behind earlier runs stopped before
   its first write when its last planned write would come after its deadline — the required facts
   after the chain included. A chain whose transcript fit failed for a fact that did not; the

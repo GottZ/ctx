@@ -1412,11 +1412,11 @@ def test_a_read_before_a_write_that_fails_is_the_entry_s_third_error_answer_in_a
 
 
 def test_the_read_before_a_write_at_the_limit_is_a_listing_of_the_category():
-    """A11 (#289, measured on a test ctx with 100 000 checkpoint heads): the probe searched its
-    category for "Compaction checkpoint head", which every head matches in full text — ctx read and
-    ranked all of them (0.7–1.1 s median, up to 3.7 s at p95, some 770 000 buffer hits). Any answer
-    ends the run, so the probe lists the category instead (no query text, one row): ctx answers that
-    from an index of the category in about 1 ms, the same at 100 000 heads as at none."""
+    """A11 (#289, measured on a test ctx): the probe searched its category for "Compaction checkpoint
+    head", which every head matches in full text — ctx read and ranked all of them (0.7–1.1 s median
+    at 100 000 heads, 15–18 s at 1 000 000, past the 10 s bound of a call). Any answer ends the run,
+    so the probe lists the category instead (no query text, one row): ctx answers that from an index
+    of the category in 1.0–1.6 ms, the same at 1 000 000 heads as at none."""
     state = _cp.EntryState()
     _at_the_limit(state)
     searched: list[dict] = []

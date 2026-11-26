@@ -112,10 +112,11 @@ ENTRY_WAIT_POLL_S = 0.05
 ENTRY_HOLD_RECHECK_S = 5.0
 # The read a chain sends before a write while the entry's last MAX_RATE_REFUSALS answers were
 # errors (ChainWriter._probe): a search in the chain's category with this text, one row at most.
-# Empty: a listing of the category, newest first (GottZ/ctx#289, measured on a test ctx with
-# 100 000 checkpoint heads: about 1 ms from the category's listing index, the same as with none;
-# the text "Compaction checkpoint head" matched every head, and ctx ranked all of them — 0.7 to
-# 1.1 s median, 3.7 s at p95). Any answer ends the run, so the read needs no hit.
+# Empty: a listing of the category, newest first (GottZ/ctx#289, measured on a test ctx: 1.0 to
+# 1.6 ms from the category's listing index at 100 000 and at 1 000 000 checkpoint heads, as with
+# none; the text "Compaction checkpoint head" matched every head, and ctx ranked all of them —
+# 0.7 to 1.1 s median at 100 000 heads, 15 to 18 s at 1 000 000, past the 10 s bound of a call).
+# Any answer ends the run, so the read needs no hit.
 PROBE_QUERY = ""
 # Hermes calls on_pre_compress in the compaction worker before the summary call, and its wait for
 # that worker counts from the worker's last progress, which only the summary stream reports
