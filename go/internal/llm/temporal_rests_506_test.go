@@ -356,7 +356,7 @@ func TestRules_TheReviewsGaps(t *testing.T) {
 		"Am Samstag jemand eingeteilt?":                               next506["samstag"],
 		"Für Dienstag was reserviert?":                                next506["dienstag"],
 		"Für Freitag was vorbereitet?":                                next506["freitag"],
-		"Was haben wir gestern gemacht - und was steht am Montag an?": next506["montag"],
+		"Was haben wir gestern gemacht - und was steht am Montag an?": {"2026-11-21", "", "past"}, // yesterday first, issue #532
 	})
 	for _, q := range []string{"Wie viele Tokens seit 2024?", "Wie viel kostet es ab 2023?"} {
 		if tr := NormalizeTemporalRules(q, sunday487); tr != nil {

@@ -1,0 +1,153 @@
+# Holdout of the review round of issue #532, r1-n1-englische-formen: every form of englishStrongPast, englishIrregularPast, the verbs of reporting and found/saw/made/got/ran of englishPastVerbs as a past (F) and, where it is another word, in that role with a coming date (G); written with its expectations and hashed before the round's first edit (2026-11-25T20:48:22Z, sha256 of the source list 8ada4cc443d0eeb6).
+# Asked at noon UTC of the day. Expected: the dates by ";" as D:day, NONE for no rule; hours are not judged.
+# id, day, kind, question, expected, the answer of the rules at 5a28c475.
+n1-001	2026-11-25	F	Who knew about the expired certificate on Monday?	D:2026-11-23	D:2026-11-30
+n1-002	2026-11-25	F	The queue grew to forty thousand messages on Saturday, why?	D:2026-11-21	D:2026-11-28
+n1-003	2026-11-25	F	Which service threw the null pointer on Thursday?	D:2026-11-19	D:2026-11-26
+n1-004	2026-11-25	F	Who flew to the customer on Tuesday?	D:2026-11-24	D:2026-12-01
+n1-005	2026-11-25	F	The architect drew the new topology on Monday, where is it?	D:2026-11-23	D:2026-11-30
+n1-006	2026-11-25	G	Will Drew demo the dashboard on Friday?	D:2026-11-27	D:2026-11-27
+n1-007	2026-11-25	G	Drew from support takes the late shift on Saturday.	D:2026-11-28	D:2026-11-28
+n1-008	2026-11-25	F	The fuse blew on Sunday night, who replaced it?	D:2026-11-22	D:2026-11-22@23
+n1-009	2026-11-25	F	We chose the new region on Friday, right?	D:2026-11-20	D:2026-11-27
+n1-010	2026-11-25	F	The UI froze on Tuesday afternoon, do we know why?	D:2026-11-24	D:2026-12-01@15
+n1-011	2026-11-25	F	Who spoke with legal on Thursday?	D:2026-11-19	D:2026-11-26
+n1-012	2026-11-25	G	The spoke nodes get patched on Saturday.	D:2026-11-28	D:2026-11-28
+n1-013	2026-11-25	G	Are the spoke routers in scope for the rollout on Monday?	D:2026-11-30	D:2026-11-30
+n1-014	2026-11-25	F	Somebody stole the disk of the build server on Saturday?	D:2026-11-21	D:2026-11-28
+n1-015	2026-11-25	G	Should the stole for the bride be ready on Saturday?	D:2026-11-28	D:2026-11-28
+n1-016	2026-11-25	F	The pager woke everyone on Sunday, any idea why?	D:2026-11-22	D:2026-11-29
+n1-017	2026-11-25	G	Is the woke debate scheduled for Thursday?	D:2026-11-26	D:2026-11-26
+n1-018	2026-11-25	F	Who wore the pager on Monday?	D:2026-11-23	D:2026-11-30
+n1-019	2026-11-25	F	The storm tore down the antenna on Friday, is it fixed?	D:2026-11-20	D:2026-11-27
+n1-020	2026-11-25	F	The vendor swore on Tuesday that the patch was final.	D:2026-11-24	D:2026-11-24
+n1-021	2026-11-25	F	The customer gave feedback on Monday, where is it?	D:2026-11-23	D:2026-11-30
+n1-022	2026-11-25	F	The cleanup job ate all the disk space on Saturday?	D:2026-11-21	D:2026-11-28
+n1-023	2026-11-25	F	When the replica became primary on Thursday, what broke?	D:2026-11-19	D:2026-11-26
+n1-024	2026-11-25	F	The choir sang at the kickoff on Monday, who booked them?	D:2026-11-23	D:2026-11-23
+n1-025	2026-11-25	G	Will Sang host the retro on Friday?	D:2026-11-27	D:2026-11-27
+n1-026	2026-11-25	F	Our conversion rate sank on Tuesday, any idea why?	D:2026-11-24	D:2026-12-01
+n1-027	2026-11-25	F	Who drank the last coffee on Friday?	D:2026-11-20	D:2026-11-20
+n1-028	2026-11-25	F	The whole team swam at the offsite on Saturday?	D:2026-11-21	D:2026-11-28
+n1-029	2026-11-25	F	The alarm rang on Sunday morning, who silenced it?	D:2026-11-22	D:2026-11-22@8
+n1-030	2026-11-25	G	Welchen Rang erreicht das Team im Ranking am Freitag?	D:2026-11-27	D:2026-11-27
+n1-031	2026-11-25	F	The earthquake shook the datacenter on Thursday, any damage?	D:2026-11-19	D:2026-11-26
+n1-032	2026-11-25	F	Who drove to the colo on Monday?	D:2026-11-23	D:2026-11-30
+n1-033	2026-11-25	G	Does the cattle drove pass the office on Saturday?	D:2026-11-28	D:2026-11-28
+n1-034	2026-11-25	F	The courier rode out with the disks on Tuesday?	D:2026-11-24	D:2026-12-01
+n1-035	2026-11-25	G	Can Anna Rode join the audit on Thursday?	D:2026-11-26	D:2026-11-26
+n1-036	2026-11-25	F	Who forgot to renew the domain on Friday?	D:2026-11-20	D:2026-11-27
+n1-037	2026-11-25	F	The customer forgave the outage on Monday?	D:2026-11-23	D:2026-11-30
+n1-038	2026-11-25	F	Which issues arose during the migration on Saturday?	D:2026-11-21	D:2026-11-28
+n1-039	2026-11-25	F	The new cluster overtook the old one in throughput on Tuesday?	D:2026-11-24	D:2026-12-01
+n1-040	2026-11-25	F	Who undertook the audit on Thursday?	D:2026-11-19	D:2026-11-26
+n1-041	2026-11-25	F	The parser mistook the date on Monday, why?	D:2026-11-23	D:2026-11-30
+n1-042	2026-11-25	F	Which vendor withdrew its offer on Friday?	D:2026-11-20	D:2026-11-27
+n1-043	2026-11-25	F	The batch job overran its window on Sunday, again?	D:2026-11-22	D:2026-11-29
+n1-044	2026-11-25	F	The new heuristic overthrew the old ranking on Tuesday?	D:2026-11-24	D:2026-12-01
+n1-045	2026-11-25	F	Who rewrote the parser on Monday?	D:2026-11-23	D:2026-11-30
+n1-046	2026-11-25	F	The database underwent maintenance on Saturday, any issues?	D:2026-11-21	D:2026-11-28
+n1-047	2026-11-25	F	The shard outgrew its disk on Thursday?	D:2026-11-19	D:2026-11-26
+n1-048	2026-11-25	F	The restore took six hours on Friday, why so slow?	D:2026-11-20	D:2026-11-27
+n1-049	2026-11-25	F	The new hardware came on Monday?	D:2026-11-23	D:2026-11-30
+n1-050	2026-11-25	F	The outage began on Sunday evening?	D:2026-11-22	D:2026-11-29@19
+n1-051	2026-11-25	F	Throughput fell sharply on Thursday, why?	D:2026-11-19	D:2026-11-26
+n1-052	2026-11-25	G	Who joins the fell walk on Saturday?	D:2026-11-28	D:2026-11-28
+n1-053	2026-11-25	G	Crews fell the dead trees near the parking lot on Monday.	D:2026-11-30	D:2026-11-30
+n1-054	2026-11-25	F	We met the vendor on Tuesday, any notes?	D:2026-11-24	D:2026-12-01
+n1-055	2026-11-25	G	Does the Met open its season on Saturday?	D:2026-11-28	D:2026-11-28
+n1-056	2026-11-25	F	Who sent the invoice on Monday?	D:2026-11-23	D:2026-11-30
+n1-057	2026-11-25	G	Will the report be sent on Friday?	D:2026-11-27	D:2026-11-27
+n1-058	2026-11-25	F	The team built the new pipeline on Thursday?	D:2026-11-19	D:2026-11-26
+n1-059	2026-11-25	G	Will the image be built on Thursday?	D:2026-11-26	D:2026-11-26
+n1-060	2026-11-25	F	We lost two nodes on Saturday, why?	D:2026-11-21	D:2026-11-28
+n1-061	2026-11-25	G	Will the lost packets be replayed on Monday?	D:2026-11-30	D:2026-11-30
+n1-062	2026-11-25	F	The customer paid the invoice on Friday?	D:2026-11-20	D:2026-11-27
+n1-063	2026-11-25	G	Is paid leave possible on Friday?	D:2026-11-27	D:2026-11-27
+n1-064	2026-11-25	F	Who held the incident review on Tuesday?	D:2026-11-24	D:2026-12-01
+n1-065	2026-11-25	G	The townhall is held on Tuesday, who presents?	D:2026-12-01	D:2026-12-01
+n1-066	2026-11-25	F	The cache kept stale entries on Monday, why?	D:2026-11-23	D:2026-11-30
+n1-067	2026-11-25	G	Will the old logs be kept on Monday?	D:2026-11-30	D:2026-11-30
+n1-068	2026-11-25	F	Who left the door of the server room open on Sunday?	D:2026-11-22	D:2026-11-29
+n1-069	2026-11-25	G	What is left to do on Friday?	D:2026-11-27	D:2026-11-27
+n1-070	2026-11-25	G	Which tasks are left for Monday?	D:2026-11-30	D:2026-11-30
+n1-071	2026-11-25	F	Who told the customer on Thursday?	D:2026-11-19	D:2026-11-26
+n1-072	2026-11-25	G	Will the team be told on Thursday?	D:2026-11-26	D:2026-11-26
+n1-073	2026-11-25	F	We sold the old servers on Monday?	D:2026-11-23	D:2026-11-30
+n1-074	2026-11-25	G	Will tickets be sold on Monday?	D:2026-11-30	D:2026-11-30
+n1-075	2026-11-25	F	Who bought the licenses on Friday?	D:2026-11-20	D:2026-11-27
+n1-076	2026-11-25	G	Will the licenses be bought on Friday?	D:2026-11-27	D:2026-11-27
+n1-077	2026-11-25	F	The vendor brought the new disks on Tuesday?	D:2026-11-24	D:2026-12-01
+n1-078	2026-11-25	G	Will the disks be brought in on Tuesday?	D:2026-12-01	D:2026-12-01
+n1-079	2026-11-25	F	Which test caught the regression on Saturday?	D:2026-11-21	D:2026-11-28
+n1-080	2026-11-25	G	Will the bug be caught by the canary on Saturday?	D:2026-11-28	D:2026-11-28
+n1-081	2026-11-25	F	Who taught the onboarding class on Monday?	D:2026-11-23	D:2026-11-30
+n1-082	2026-11-25	G	Is the class taught by Anna on Monday?	D:2026-11-30	D:2026-11-30
+n1-083	2026-11-25	F	We thought the fix landed on Friday?	D:2026-11-20	D:2026-11-27
+n1-084	2026-11-25	G	Any thought on the plan for Friday?	D:2026-11-27	D:2026-11-27
+n1-085	2026-11-25	F	What the CTO meant on Tuesday, can someone explain?	D:2026-11-24	D:2026-12-01
+n1-086	2026-11-25	F	We spent four hours on the migration on Thursday?	D:2026-11-19	D:2026-11-26
+n1-087	2026-11-25	G	Is the spent budget reset on Monday?	D:2026-11-30	D:2026-11-30
+n1-088	2026-11-25	F	Which team won the hackathon on Saturday?	D:2026-11-21	D:2026-11-28
+n1-089	2026-11-25	F	Who heard the alarm on Sunday?	D:2026-11-22	D:2026-11-29
+n1-090	2026-11-25	F	The auditor said nothing on Monday?	D:2026-11-23	D:2026-11-30
+n1-091	2026-11-25	F	The worker slept through the alert on Friday?	D:2026-11-20	D:2026-11-27
+n1-092	2026-11-25	F	The cluster stood still for an hour on Tuesday?	D:2026-11-24	D:2026-12-01
+n1-093	2026-11-25	F	Nobody understood the error on Thursday?	D:2026-11-19	D:2026-11-26
+n1-094	2026-11-25	F	Who stuck the note on the rack on Saturday?	D:2026-11-21	D:2026-11-28
+n1-095	2026-11-25	G	Who is stuck on the release on Saturday?	D:2026-11-28	D:2026-11-28
+n1-096	2026-11-25	F	Lightning struck the antenna on Monday?	D:2026-11-23	D:2026-11-30
+n1-097	2026-11-25	F	The deploy hung on Friday at the migration step?	D:2026-11-20	D:2026-11-27
+n1-098	2026-11-25	G	Can Hung review the PR on Friday?	D:2026-11-27	D:2026-11-27
+n1-099	2026-11-25	F	Who dug into the logs on Tuesday?	D:2026-11-24	D:2026-12-01
+n1-100	2026-11-25	F	The two teams fought over the schema on Thursday?	D:2026-11-19	D:2026-11-26
+n1-101	2026-11-25	F	The auditors sought access on Monday?	D:2026-11-23	D:2026-11-30
+n1-102	2026-11-25	F	Who dealt with the outage on Sunday?	D:2026-11-22	D:2026-11-29
+n1-103	2026-11-25	F	Who lent the laptop to the intern on Friday?	D:2026-11-20	D:2026-11-27
+n1-104	2026-11-25	G	Is the bake sale for Lent on Saturday?	D:2026-11-28	D:2026-11-28
+n1-105	2026-11-25	F	The intruder fled on Saturday before security came?	D:2026-11-21	D:2026-11-28
+n1-106	2026-11-25	F	Who used the staging cluster on Tuesday?	D:2026-11-24	D:2026-12-01
+n1-107	2026-11-25	G	Is the used capacity freed on Tuesday?	D:2026-12-01	D:2026-12-01
+n1-108	2026-11-25	F	The primary died on Monday night, who restarted it?	D:2026-11-23	D:2026-11-23@23
+n1-109	2026-11-25	F	The vote tied on Thursday?	D:2026-11-19	D:2026-11-26
+n1-110	2026-11-25	G	Is the score tied before the final on Thursday?	D:2026-11-26	D:2026-11-26
+n1-111	2026-11-25	F	Which customer owed us money on Friday?	D:2026-11-20	D:2026-11-27
+n1-112	2026-11-25	F	The team felt the latency on Tuesday?	D:2026-11-24	D:2026-12-01
+n1-113	2026-11-25	F	The team believed the bug was fixed on Monday?	D:2026-11-23	D:2026-11-23
+n1-114	2026-11-25	F	We assumed the backup ran on Sunday?	D:2026-11-22	D:2026-11-22
+n1-115	2026-11-25	F	Who guessed the root cause on Friday?	D:2026-11-20	D:2026-11-20
+n1-116	2026-11-25	F	The SRE figured out the leak on Thursday?	D:2026-11-19	D:2026-11-26
+n1-117	2026-11-25	F	We hoped the fix would land on Monday, did it?	D:2026-11-23	D:2026-11-23
+n1-118	2026-11-25	F	The vendor claimed on Tuesday that the bug is fixed?	D:2026-11-24	D:2026-12-01
+n1-119	2026-11-25	F	Who expected the outage on Saturday?	D:2026-11-21	D:2026-11-21
+n1-120	2026-11-25	G	Is the release expected on Friday?	D:2026-11-27	D:2026-11-27
+n1-121	2026-11-25	F	Anna promised it on Thursday, where is it?	D:2026-11-19	D:2026-11-26
+n1-122	2026-11-25	G	The promised fix lands on Monday?	D:2026-11-30	D:2026-11-30
+n1-123	2026-11-25	F	We learned about the breach on Sunday?	D:2026-11-22	D:2026-11-22
+n1-124	2026-11-25	F	When we realized the mistake on Friday, what did we do?	D:2026-11-20	D:2026-11-20
+n1-125	2026-11-25	F	The team realised on Monday that the backups were broken?	D:2026-11-23	D:2026-11-23
+n1-126	2026-11-25	F	Who noticed the spike on Tuesday?	D:2026-11-24	D:2026-11-24
+n1-127	2026-11-25	F	The vendor confirmed the fix on Thursday?	D:2026-11-19	D:2026-11-26
+n1-128	2026-11-25	G	Is the maintenance confirmed for Saturday?	D:2026-11-28	D:2026-11-28
+n1-129	2026-11-25	F	Marketing announced the launch on Monday, any feedback?	D:2026-11-23	D:2026-11-30
+n1-130	2026-11-25	G	Is the announced outage on Saturday still on?	D:2026-11-28	D:2026-11-28
+n1-131	2026-11-25	F	Who mentioned the license issue on Friday?	D:2026-11-20	D:2026-11-20
+n1-132	2026-11-25	G	Is the mentioned meeting on Friday still happening?	D:2026-11-27	D:2026-11-27
+n1-133	2026-11-25	F	Who found the root cause on Monday?	D:2026-11-23	D:2026-11-23
+n1-134	2026-11-25	G	Lost and found opens on Saturday?	D:2026-11-28	D:2026-11-21
+n1-135	2026-11-25	F	Who saw the alert on Sunday?	D:2026-11-22	D:2026-11-22
+n1-136	2026-11-25	G	Is the saw in the workshop free on Saturday?	D:2026-11-28	D:2026-11-28
+n1-137	2026-11-25	F	Who made the call to roll back on Thursday?	D:2026-11-19	D:2026-11-19
+n1-138	2026-11-25	F	Who got paged on Friday?	D:2026-11-20	D:2026-11-20
+n1-139	2026-11-25	F	The backup ran on Saturday, did it finish?	D:2026-11-21	D:2026-11-21
+n1-140	2026-11-25	F	Will the patch the vendor gave us on Monday be deployed on Friday?	D:2026-11-23;D:2026-11-27	D:2026-11-30;D:2026-11-27
+n1-141	2026-11-25	F	Will the service that froze on Tuesday be restarted on Thursday?	D:2026-11-24;D:2026-11-26	D:2026-12-01;D:2026-11-26
+n1-142	2026-11-25	F	Who will take over what Anna began on Monday?	D:2026-11-23	D:2026-11-30
+n1-143	2026-11-25	F	The shard that grew on Saturday will be split on Monday?	D:2026-11-21;D:2026-11-30	D:2026-11-28;D:2026-11-30
+n1-144	2026-11-25	G	Shall we ask Drew on Friday?	D:2026-11-27	D:2026-11-27
+n1-145	2026-11-25	G	Is Drew going to present on Friday?	D:2026-11-27	D:2026-11-27
+n1-146	2026-11-25	G	Drew and Anna review the design on Thursday?	D:2026-11-26	D:2026-11-26
+n1-147	2026-11-25	G	Tell Drew about the release on Friday.	D:2026-11-27	D:2026-11-27
+n1-148	2026-11-25	G	Who brings the spoke wrench on Monday?	D:2026-11-30	D:2026-11-30
+n1-149	2026-11-25	G	Meet Drew at the office on Monday?	D:2026-11-30	D:2026-11-30
+n1-150	2026-11-25	G	Can the team that knew the old system help on Friday?	D:2026-11-27	D:2026-11-27

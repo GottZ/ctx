@@ -1,0 +1,43 @@
+# Holdout of the review round of issue #532, r1-n5-partizip-ellipsen: two participle clauses side by side: reports of acts (T) and arrangements or states (P); written with its expectations and hashed before the round's first edit (2026-11-25T20:48:22Z, sha256 of the source list de3ceb13315adefd).
+# Asked at noon UTC of the day. Expected: the dates by ";" as D:day, NONE for no rule; hours are not judged.
+# id, day, kind, question, expected, the answer of the rules at 5a28c475.
+n5-001	2026-11-25	T	Am Montag gemerged, am Dienstag zurückgerollt – warum?	D:2026-11-23;D:2026-11-24	D:2026-11-30;D:2026-12-01
+n5-002	2026-11-25	T	Am Freitag eingespielt, am Samstag wieder entfernt?	D:2026-11-20;D:2026-11-21	D:2026-11-27;D:2026-11-28
+n5-003	2026-11-25	T	Am Donnerstag gebaut, am Freitag getestet, am Montag ausgerollt – wieso so langsam?	D:2026-11-19;D:2026-11-20;D:2026-11-23	D:2026-11-26;D:2026-11-27;D:2026-11-30
+n5-004	2026-11-25	T	Am Sonntag abgestürzt, am Montag neu gestartet?	D:2026-11-22;D:2026-11-23	D:2026-11-22;D:2026-11-23
+n5-005	2026-11-25	T	Am Montag gemeldet, am Dienstag gefixt?	D:2026-11-23;D:2026-11-24	D:2026-11-30;D:2026-12-01
+n5-006	2026-11-25	T	Am Freitag gekauft, am Samstag zurückgeschickt – warum?	D:2026-11-20;D:2026-11-21	D:2026-11-27;D:2026-11-28
+n5-007	2026-11-25	T	Montag deployed, Dienstag rollbacked?	D:2026-11-23;D:2026-11-24	D:2026-11-30;D:2026-12-01
+n5-008	2026-11-25	T	Am Samstag ausgefallen, am Sonntag wiederhergestellt?	D:2026-11-21;D:2026-11-22	D:2026-11-21;D:2026-11-22
+n5-009	2026-11-25	T	Am Donnerstag angefangen, am Freitag aufgegeben?	D:2026-11-19;D:2026-11-20	D:2026-11-26;D:2026-11-27
+n5-010	2026-11-25	T	Am Montag eingecheckt, am Dienstag reviewt – wieso noch nicht gemergt?	D:2026-11-23;D:2026-11-24	D:2026-11-30;D:2026-12-01
+n5-011	2026-11-25	T	Am Freitag eskaliert, am Montag gelöst?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-30
+n5-012	2026-11-25	T	Am Sonntag gepatcht, am Montag wieder kaputt?	D:2026-11-22;D:2026-11-23	D:2026-11-29;D:2026-11-30
+n5-013	2026-11-25	T	Am Freitag geschrieben, am Dienstag gelesen?	D:2026-11-20;D:2026-11-24	D:2026-11-20;D:2026-12-01
+n5-014	2026-11-25	T	Am Samstag hochgeladen, am Sonntag gelöscht – von wem?	D:2026-11-21;D:2026-11-22	D:2026-11-28;D:2026-11-29
+n5-015	2026-11-25	T	Am Montag beantragt, am Dienstag abgelehnt?	D:2026-11-23;D:2026-11-24	D:2026-11-30;D:2026-12-01
+n5-016	2026-11-25	T	Am Donnerstag installiert, am Freitag deinstalliert, warum?	D:2026-11-19;D:2026-11-20	D:2026-11-26;D:2026-11-27
+n5-017	2026-11-25	T	Am Freitag versprochen, am Montag gebrochen?	D:2026-11-20;D:2026-11-23	D:2026-11-27;D:2026-11-30
+n5-018	2026-11-25	T	Am Sonntag gestartet, am Montag abgebrochen?	D:2026-11-22;D:2026-11-23	D:2026-11-22;D:2026-11-23
+n5-019	2026-11-25	T	Am Samstag repariert, am Sonntag erneut ausgefallen?	D:2026-11-21;D:2026-11-22	D:2026-11-28;D:2026-11-22
+n5-020	2026-11-25	T	Am Montag gefunden, am Dienstag behoben – wer war das?	D:2026-11-23;D:2026-11-24	D:2026-11-30;D:2026-12-01
+n5-021	2026-11-25	P	Meeting am Freitag angesetzt, Review am Montag eingeplant?	D:2026-11-27;D:2026-11-30	D:2026-11-27;D:2026-11-30
+n5-022	2026-11-25	P	Wartung am Samstag vorgesehen, Abnahme am Montag terminiert?	D:2026-11-28;D:2026-11-30	D:2026-11-28;D:2026-11-30
+n5-023	2026-11-25	P	Am Donnerstag reserviert, am Freitag gebucht?	D:2026-11-26;D:2026-11-27	D:2026-11-26;D:2026-11-27
+n5-024	2026-11-25	P	Büro am Samstag geschlossen, am Sonntag auch geschlossen?	D:2026-11-28;D:2026-11-29	D:2026-11-28;D:2026-11-29
+n5-025	2026-11-25	P	Am Freitag ausgebucht, am Montag noch frei?	D:2026-11-27;D:2026-11-30	D:2026-11-27;D:2026-11-30
+n5-026	2026-11-25	P	Kantine am Freitag geöffnet, am Montag geschlossen?	D:2026-11-27;D:2026-11-30	D:2026-11-20;D:2026-11-23
+n5-027	2026-11-25	P	Release am Donnerstag terminiert, Launch am Freitag vorgesehen?	D:2026-11-26;D:2026-11-27	D:2026-11-26;D:2026-11-27
+n5-028	2026-11-25	P	Am Montag Urlaub eingetragen, am Dienstag Homeoffice vereinbart?	D:2026-11-30;D:2026-12-01	D:2026-11-30;D:2026-12-01
+n5-029	2026-11-25	P	Am Samstag gesperrt, am Sonntag freigegeben?	D:2026-11-28;D:2026-11-29	D:2026-11-28;D:2026-11-29
+n5-030	2026-11-25	P	Am Freitag besetzt, am Montag ausgelastet?	D:2026-11-27;D:2026-11-30	D:2026-11-27;D:2026-11-30
+n5-031	2026-11-25	P	Halle am Samstag vermietet, am Sonntag reserviert?	D:2026-11-28;D:2026-11-29	D:2026-11-28;D:2026-11-29
+n5-032	2026-11-25	P	Am Donnerstag eingetaktet, am Freitag fixiert?	D:2026-11-26;D:2026-11-27	D:2026-11-26;D:2026-11-27
+n5-033	2026-11-25	P	Standup am Montag angesetzt, Retro am Dienstag geplant?	D:2026-11-30;D:2026-12-01	D:2026-11-30;D:2026-12-01
+n5-034	2026-11-25	P	Am Freitag abgesperrt, am Samstag umgeleitet?	D:2026-11-27;D:2026-11-28	D:2026-11-27;D:2026-11-28
+n5-035	2026-11-25	P	Am Montag verabredet, am Donnerstag avisiert?	D:2026-11-30;D:2026-11-26	D:2026-11-30;D:2026-11-26
+n5-036	2026-11-25	P	Lieferung am Freitag avisiert, Montage am Montag eingeplant?	D:2026-11-27;D:2026-11-30	D:2026-11-27;D:2026-11-30
+n5-037	2026-11-25	P	Am Samstag geschlossen, am Sonntag Notdienst organisiert?	D:2026-11-28;D:2026-11-29	D:2026-11-21;D:2026-11-29
+n5-038	2026-11-25	P	Am Donnerstag ausverkauft, am Freitag noch Karten?	D:2026-11-26;D:2026-11-27	D:2026-11-26;D:2026-11-27
+n5-039	2026-11-25	P	Am Montag terminiert, am Dienstag bestätigt?	D:2026-11-30;D:2026-12-01	D:2026-11-30;D:2026-12-01
+n5-040	2026-11-25	P	Am Freitag eingeplant, am Samstag zugesagt?	D:2026-11-27;D:2026-11-28	D:2026-11-27;D:2026-11-28

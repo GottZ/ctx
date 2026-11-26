@@ -1,0 +1,63 @@
+# Holdout of issue #532, class d2-ten-praesens: written with its expectations and hashed before any rule changed (2026-11-25T17:37:24Z, sha256 of the source list fc254022c0904697).
+# Asked at noon UTC of the day. Expected: alternatives split by " | ", the dates of one by ";": D:day, W:start..end, F:from, U:until, NONE for no rule; @H the hour of that date, @- no hour, no mark not judged.
+# id, day, kind (F: the reading of the class is right, G: a counter-case, K: a control), question, expected, the answer of the rules at 5a28c475.
+d2-001	2026-11-22	F	Welche Teams punkten am Freitag?	D:2026-11-27	D:2026-11-20
+d2-002	2026-11-22	F	Welche Jobs belasten am Montag die Datenbank?	D:2026-11-23	D:2026-11-16
+d2-003	2026-11-22	F	Am Montag punkten wir beim Kunden?	D:2026-11-23	D:2026-11-16
+d2-004	2026-11-22	F	Welche Prozesse lasten am Dienstag die Server aus?	D:2026-11-24	D:2026-11-17
+d2-005	2026-11-22	F	Welche Kollegen leiten am Donnerstag den Workshop?	D:2026-11-26	D:2026-11-26
+d2-006	2026-11-22	F	Welche Teams entlasten am Freitag den Support?	D:2026-11-27	D:2026-11-20
+d2-007	2026-11-22	F	Welche Hosts boosten am Mittwoch die Taktrate?	D:2026-11-25	D:2026-11-18
+d2-008	2026-11-22	F	Welche Services shiften am Montag in die neue Region?	D:2026-11-23	D:2026-11-16
+d2-009	2026-11-22	F	Welche Teams sichten am Dienstag die Bewerbungen?	D:2026-11-24	D:2026-11-17
+d2-010	2026-11-22	F	Welche Kollegen texten am Freitag die Release Notes?	D:2026-11-27	D:2026-11-20
+d2-011	2026-11-22	F	Welche Squads richten am Donnerstag das Monitoring ein?	D:2026-11-26	D:2026-11-26
+d2-012	2026-11-22	F	Welche Teams rüsten am Montag die Racks auf?	D:2026-11-23	D:2026-11-16
+d2-013	2026-11-22	F	Welche Kunden testen am Mittwoch die Beta?	D:2026-11-25	D:2026-11-25
+d2-014	2026-11-22	F	Am Freitag lüften wir den Serverraum?	D:2026-11-27	D:2026-11-20
+d2-015	2026-11-22	F	Welche Teams schichten am Montag um?	D:2026-11-23	D:2026-11-16
+d2-016	2026-11-22	F	Welche Leute fasten am Freitag?	D:2026-11-27	D:2026-11-20
+d2-017	2026-11-22	F	Welche Kollegen falten am Donnerstag die Flyer?	D:2026-11-26	D:2026-11-19
+d2-018	2026-11-22	F	Welche Teams spalten am Dienstag den Monolithen auf?	D:2026-11-24	D:2026-11-17
+d2-019	2026-11-22	F	Wo rasten wir am Samstag auf der Tour?	D:2026-11-28	D:2026-11-21
+d2-020	2026-11-22	F	Welche Teams leisten am Freitag Bereitschaft?	D:2026-11-27	D:2026-11-27
+d2-021	2026-11-22	F	Welche Hosts casten am Montag den Stream?	D:2026-11-23	D:2026-11-16
+d2-022	2026-11-22	F	Am Dienstag posten wir das Update?	D:2026-11-24	D:2026-11-24
+d2-023	2026-11-22	F	Welche Teams achten am Montag auf die Alarme?	D:2026-11-23	D:2026-11-23
+d2-024	2026-11-22	F	Wir punkten am Freitag mit der Demo, oder?	D:2026-11-27	D:2026-11-20
+d2-025	2026-11-22	F	Welche Beiträge posten wir am Donnerstag?	D:2026-11-26	D:2026-11-26
+d2-026	2026-11-22	F	Welche Teams sichten am Montag die Logs?	D:2026-11-23	D:2026-11-16
+d2-027	2026-11-22	F	Welche Teams schuften am Samstag?	D:2026-11-28	D:2026-11-21
+d2-028	2026-11-25	F	Welche Teams punkten am Freitag beim Hackathon?	D:2026-11-27	D:2026-11-20
+d2-029	2026-11-25	F	Welche Batches belasten am Montag das Netz?	D:2026-11-30	D:2026-11-23
+d2-030	2026-11-25	F	Welche Kollegen sichten am Freitag die Tickets?	D:2026-11-27	D:2026-11-20
+d2-031	2026-11-22	G	Welche Jobs scheiterten am Donnerstag?	D:2026-11-19	D:2026-11-19
+d2-032	2026-11-22	G	Welche Autos parkten am Montag vor dem Tor?	D:2026-11-16	D:2026-11-16
+d2-033	2026-11-22	G	Welche Teams planten am Dienstag die Migration?	D:2026-11-17	D:2026-11-17
+d2-034	2026-11-22	G	Welche Server crashten am Freitag?	D:2026-11-20	D:2026-11-20
+d2-035	2026-11-22	G	Welche Kollegen mergten am Mittwoch die PRs?	D:2026-11-18	D:2026-11-18
+d2-036	2026-11-22	G	Welche Bots pushten am Montag auf main?	D:2026-11-16	D:2026-11-16
+d2-037	2026-11-22	G	Welche Kunden kündigten am Dienstag?	D:2026-11-17	D:2026-11-17
+d2-038	2026-11-22	G	Welche Neuen lernten am Donnerstag das System kennen?	D:2026-11-19	D:2026-11-19
+d2-039	2026-11-22	G	Welche Leute merkten am Freitag den Fehler?	D:2026-11-20	D:2026-11-20
+d2-040	2026-11-22	G	Welche Jobs hakten am Montag?	D:2026-11-16	D:2026-11-16
+d2-041	2026-11-22	G	Welche Services stoppten am Dienstag?	D:2026-11-17	D:2026-11-17
+d2-042	2026-11-22	G	Welche Teams checkten am Montag die Alarme?	D:2026-11-16	D:2026-11-16
+d2-043	2026-11-22	G	Welche Pods blockten am Freitag den Rollout?	D:2026-11-20	D:2026-11-20
+d2-044	2026-11-22	G	Welche Kunden meldeten am Donnerstag Fehler?	D:2026-11-19	D:2026-11-19
+d2-045	2026-11-22	G	Welche Jobs warteten am Montag in der Queue?	D:2026-11-16	D:2026-11-16
+d2-046	2026-11-22	G	Welche Hosts lagten am Dienstag?	D:2026-11-17	D:2026-11-17
+d2-047	2026-11-22	G	Welche Teams tickten am Freitag anders?	D:2026-11-20	D:2026-11-20
+d2-048	2026-11-22	G	Am Montag parkten wir das Feature?	D:2026-11-16	D:2026-11-16
+d2-049	2026-11-22	G	Wir planten am Dienstag den Umzug	D:2026-11-17	D:2026-11-17
+d2-050	2026-11-22	G	Welche Teams packten am Donnerstag die Server ein?	D:2026-11-19	D:2026-11-19
+d2-051	2026-11-22	G	Welche Server rebooteten am Mittwoch?	D:2026-11-18	D:2026-11-18
+d2-052	2026-11-22	G	Welche Kollegen dankten am Freitag dem Support?	D:2026-11-20	D:2026-11-20
+d2-053	2026-11-22	G	Welche Jobs zickten am Montag rum?	D:2026-11-16	D:2026-11-16
+d2-054	2026-11-22	G	Welche Teams tanzten am Samstag auf der Feier?	D:2026-11-21	D:2026-11-21
+d2-055	2026-11-22	G	Welche Leute lachten am Freitag über den Bug?	D:2026-11-20	D:2026-11-20
+d2-056	2026-11-22	G	Welche Mitarbeiter wechselten am Montag das Team?	D:2026-11-16	D:2026-11-16
+d2-057	2026-11-22	G	Welche Kunden zahlten am Dienstag zu spät?	D:2026-11-17	D:2026-11-17
+d2-058	2026-11-22	G	Welche Hosts antworteten am Donnerstag nicht?	D:2026-11-19	D:2026-11-19
+d2-059	2026-11-22	G	Welche Teams fasteten am Montag?	D:2026-11-16	D:2026-11-16
+d2-060	2026-11-22	G	Welche Jobs belasteten am Dienstag die Datenbank?	D:2026-11-17	D:2026-11-17

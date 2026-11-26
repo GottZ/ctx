@@ -1,0 +1,203 @@
+# Holdout of issue #532, class f-kontrolle: written with its expectations and hashed before any rule changed (2026-11-25T17:37:24Z, sha256 of the source list 9b5f0c0e523fe897).
+# Asked at noon UTC of the day. Expected: alternatives split by " | ", the dates of one by ";": D:day, W:start..end, F:from, U:until, NONE for no rule; @H the hour of that date, @- no hour, no mark not judged.
+# id, day, kind (F: the reading of the class is right, G: a counter-case, K: a control), question, expected, the answer of the rules at 5a28c475.
+f-001	2026-11-25	K	Wie konfiguriere ich den Reverse Proxy für ctx?	NONE	NIL
+f-002	2026-11-25	K	Welche Ports nutzt Postgres standardmäßig?	NONE	NIL
+f-003	2026-11-25	K	What is the retention policy for logs?	NONE	NIL
+f-004	2026-11-25	K	Wie lange dauert ein vollständiges Backup?	NONE	NIL
+f-005	2026-11-25	K	What is the maximum timeout in seconds?	NONE	NIL
+f-006	2026-11-25	K	Wie viel RAM braucht der Embedding-Server?	NONE	NIL
+f-007	2026-11-25	K	Which model handles the reranking?	NONE	NIL
+f-008	2026-11-25	K	Wo liegt die Konfiguration des Gateways?	NONE	NIL
+f-009	2026-11-25	K	How do I rotate an API key?	NONE	NIL
+f-010	2026-11-25	K	Was ist der Unterschied zwischen Scope und Tenant?	NONE	NIL
+f-011	2026-11-25	K	Welche Version von pgvector ist installiert?	NONE	NIL
+f-012	2026-11-25	K	How many blocks does the store hold?	NONE	NIL
+f-013	2026-11-25	K	Warum ist die Suche langsam?	NONE	NIL
+f-014	2026-11-25	K	What does the dream job do?	NONE	NIL
+f-015	2026-11-25	K	Wie funktioniert die Graph-Expansion?	NONE	NIL
+f-016	2026-11-25	K	Which port does the MCP server listen on, 8080?	NONE	NIL
+f-017	2026-11-25	K	Gibt es eine Doku zum Guard?	NONE	NIL
+f-018	2026-11-25	K	What is RRF and why four ways?	NONE	NIL
+f-019	2026-11-25	K	Wie setze ich random_page_cost auf 1.1?	NONE	NIL
+f-020	2026-11-25	K	Is the API rate limited per key?	NONE	NIL
+f-021	2026-11-25	K	Was bedeutet der Fehler 409 write_conflict?	NONE	NIL
+f-022	2026-11-25	K	How large is the embedding dimension, 1024?	NONE	NIL
+f-023	2026-11-25	K	Wer ist für das Frontend zuständig?	NONE	NIL
+f-024	2026-11-25	K	Which license does the project use?	NONE	NIL
+f-025	2026-11-25	K	Wie installiere ich die CLI auf macOS?	NONE	NIL
+f-026	2026-11-25	K	What is the default batch size of 256 for?	NONE	NIL
+f-027	2026-11-25	K	Welche Kategorien gibt es im Store?	NONE	NIL
+f-028	2026-11-25	K	How does the translation step detect German?	NONE	NIL
+f-029	2026-11-25	K	Was macht das Flag --shared genau?	NONE	NIL
+f-030	2026-11-25	K	Is there a Helm chart?	NONE	NIL
+f-031	2026-11-25	K	Wie viele Tenants unterstützt ein Server?	NONE	NIL
+f-032	2026-11-25	K	What happens when the quota is exhausted?	NONE	NIL
+f-033	2026-11-25	K	Warum schlägt der Healthcheck fehl?	NONE	NIL
+f-034	2026-11-25	K	Who maintains the hermes plugin?	NONE	NIL
+f-035	2026-11-25	K	Welche Indexe hat die Tabelle context_blocks?	NONE	NIL
+f-036	2026-11-25	K	How do I export all blocks as JSON?	NONE	NIL
+f-037	2026-11-25	K	Wie groß darf ein Block maximal sein?	NONE	NIL
+f-038	2026-11-25	K	What is the p99 latency target?	NONE	NIL
+f-039	2026-11-25	K	Gibt es einen Dark Mode im Web-UI?	NONE	NIL
+f-040	2026-11-25	K	Which embedding model is the default one?	NONE	NIL
+f-041	2026-11-25	K	Wie lösche ich einen Tenant?	NONE	NIL
+f-042	2026-11-25	K	How are scopes migrated?	NONE	NIL
+f-043	2026-11-25	K	Was ist der Zweck von Migration 195?	NONE	NIL
+f-044	2026-11-25	K	Does the CLI support Windows?	NONE	NIL
+f-045	2026-11-25	K	Wie sichere ich die Datenbank?	NONE	NIL
+f-046	2026-11-25	K	What is the difference between query and search?	NONE	NIL
+f-047	2026-11-25	K	Welche Felder hat ein Issue-Block?	NONE	NIL
+f-048	2026-11-25	K	How does the guard decide on conflicts?	NONE	NIL
+f-049	2026-11-25	K	Wie aktiviere ich OAuth?	NONE	NIL
+f-050	2026-11-25	K	Can I run two ctxd instances against one database?	NONE	NIL
+f-051	2026-11-22	K	Wie funktioniert die Gravity im Ranking?	NONE	NIL
+f-052	2026-11-22	K	What is the sigma of the weekday dimension?	NONE	NIL
+f-053	2026-11-22	K	Welche Werte hat das Setting search.leave_out_never_ranked?	NONE	NIL
+f-054	2026-11-22	K	How do I list all backends?	NONE	NIL
+f-055	2026-11-22	K	Wer hat das Projekt gegründet?	NONE	NIL
+f-056	2026-11-22	K	What is the cost of a GIN scan?	NONE	NIL
+f-057	2026-11-22	K	Wie viele Tests hat das Paket store?	NONE	NIL
+f-058	2026-11-22	K	Why does the build need Go 1.25?	NONE	NIL
+f-059	2026-11-22	K	Was ist ein Checkpoint im Plugin?	NONE	NIL
+f-060	2026-11-22	K	Where are the eval baselines stored?	NONE	NIL
+f-061	2026-01-01	K	Wie richte ich Spark ein?	NONE	NIL
+f-062	2026-01-01	K	What is the replication lag limit?	NONE	NIL
+f-063	2026-01-01	K	Welche Rollen gibt es im Tenant?	NONE	NIL
+f-064	2026-01-01	K	How do I debug a slow query?	NONE	NIL
+f-065	2026-01-01	K	Warum gibt die API 429 zurück?	NONE	NIL
+f-066	2026-12-31	K	Wie viele Blöcke sind archiviert?	NONE	NIL
+f-067	2026-12-31	K	What does the overview endpoint return?	NONE	NIL
+f-068	2026-12-31	K	Welche Header braucht der Webhook?	NONE	NIL
+f-069	2026-12-31	K	How is the digest generated?	NONE	NIL
+f-070	2026-12-31	K	Wie ändere ich die Zeitzone der Queries?	NONE	NIL
+f-071	2026-02-28	K	Was ist TimescaleDB?	NONE	NIL
+f-072	2026-02-28	K	How do I tag a release?	NONE	NIL
+f-073	2026-02-28	K	Wie viele Kerne hat der CI-Runner?	NONE	NIL
+f-074	2026-02-28	K	What is the deadcode gate?	NONE	NIL
+f-075	2026-02-28	K	Welche Sprache nutzt das Web-Frontend?	NONE	NIL
+f-076	2026-11-30	K	Wie heißt der Container der Datenbank?	NONE	NIL
+f-077	2026-11-30	K	What does a scope grant allow?	NONE	NIL
+f-078	2026-11-30	K	Welche Metriken exportiert der Server?	NONE	NIL
+f-079	2026-11-30	K	How is the write budget computed?	NONE	NIL
+f-080	2026-11-30	K	Was passiert bei einem Netzwerkfehler?	NONE	NIL
+f-081	2026-06-05	K	Wie viele Rerank-Kandidaten gibt es?	NONE	NIL
+f-082	2026-06-05	K	What is the role of the overview service?	NONE	NIL
+f-083	2026-06-05	K	Welche Felder liefert /health?	NONE	NIL
+f-084	2026-06-05	K	How are duplicates detected?	NONE	NIL
+f-085	2026-06-05	K	Wie ist das Repo strukturiert?	NONE	NIL
+f-086	2026-03-18	K	What is the minimum free disk for the gates?	NONE	NIL
+f-087	2026-03-18	K	Wie viele Leads arbeiten gleichzeitig?	NONE	NIL
+f-088	2026-03-18	K	Which issues are still open?	NONE	NIL
+f-089	2026-03-18	K	Wie teste ich einen Mutanten?	NONE	NIL
+f-090	2026-03-18	K	What is the release process?	NONE	NIL
+f-091	2026-11-25	K	Gibt es eine Obergrenze für Tags pro Block?	NONE	NIL
+f-092	2026-11-25	K	What is the version number of the CLI?	NONE	NIL
+f-093	2026-11-25	K	Wer reviewt die Pull Requests?	NONE	NIL
+f-094	2026-11-25	K	How many CPUs does the database use?	NONE	NIL
+f-095	2026-11-25	K	Welche Fehlercodes kennt die API?	NONE	NIL
+f-096	2026-11-25	K	Does the reranker run on the GPU?	NONE	NIL
+f-097	2026-11-25	K	Wie funktioniert der Superseded-Filter?	NONE	NIL
+f-098	2026-11-25	K	Why are some blocks never ranked?	NONE	NIL
+f-099	2026-11-25	K	Was ist eine Welle im Schichtbau?	NONE	NIL
+f-100	2026-11-25	K	How do I enable verbose logging?	NONE	NIL
+f-101	2026-11-25	K	Was ist am Freitag passiert?	D:2026-11-20	D:2026-11-20
+f-102	2026-11-25	K	Was steht am Montag an?	D:2026-11-30	D:2026-11-30
+f-103	2026-11-25	K	Wer hat am Dienstag deployed?	D:2026-11-24	D:2026-11-24
+f-104	2026-11-25	K	Was passiert am Donnerstag?	D:2026-11-26	D:2026-11-26
+f-105	2026-11-25	K	What did we ship on Monday?	D:2026-11-23	D:2026-11-23
+f-106	2026-11-25	K	What ships on Friday?	D:2026-11-27	D:2026-11-27
+f-107	2026-11-25	K	Was steht morgen an?	D:2026-11-26	D:2026-11-26
+f-108	2026-11-25	K	What happened yesterday?	D:2026-11-24	D:2026-11-24
+f-109	2026-11-25	K	Was ist heute los?	D:2026-11-25	D:2026-11-25
+f-110	2026-11-25	K	Was war letzte Woche los?	W:2026-11-16..2026-11-22	W:2026-11-16..2026-11-22
+f-111	2026-11-25	K	What is planned for next week?	W:2026-11-30..2026-12-06	W:2026-11-30..2026-12-06
+f-112	2026-11-25	K	Was haben wir diese Woche geschafft?	W:2026-11-23..2026-11-29	W:2026-11-23..2026-11-29
+f-113	2026-11-25	K	Was war letzten Monat?	W:2026-10-01..2026-10-31	W:2026-10-01..2026-10-31
+f-114	2026-11-25	K	Was ist vor 3 Tagen passiert?	D:2026-11-22	D:2026-11-22
+f-115	2026-11-25	K	Was passiert in 3 Tagen?	D:2026-11-28	D:2026-11-28
+f-116	2026-11-25	K	What happened 5 days ago?	D:2026-11-20	D:2026-11-20
+f-117	2026-11-25	K	Was ist in einer Woche?	D:2026-12-02	D:2026-12-02
+f-118	2026-11-25	K	Was ist am 2026-03-15 passiert?	D:2026-03-15	D:2026-03-15
+f-119	2026-11-25	K	Was war am 15.03.2026?	D:2026-03-15	D:2026-03-15
+f-120	2026-11-25	K	Was war vorgestern?	D:2026-11-23	D:2026-11-23
+f-121	2026-11-25	K	Was ist übermorgen?	D:2026-11-27	D:2026-11-27
+f-122	2026-11-25	K	Wer hatte gestern Dienst?	D:2026-11-24	D:2026-11-24
+f-123	2026-11-25	K	Who is on call tomorrow?	D:2026-11-26	D:2026-11-26
+f-124	2026-11-25	K	Was steht heute auf dem Plan?	D:2026-11-25	D:2026-11-25
+f-125	2026-11-25	K	What changed last week?	W:2026-11-16..2026-11-22	NIL
+f-126	2026-11-25	K	Was ist am Sonntag passiert?	D:2026-11-22	D:2026-11-22
+f-127	2026-11-25	K	Was ist am Samstag geplant?	D:2026-11-28	D:2026-11-28
+f-128	2026-11-25	K	Was haben wir am Freitag besprochen?	D:2026-11-20	D:2026-11-20
+f-129	2026-11-25	K	Who deployed on Tuesday?	D:2026-11-24	D:2026-11-24
+f-130	2026-11-25	K	Is the release on Friday?	D:2026-11-27	D:2026-11-27
+f-131	2026-11-25	K	Was war am Montag?	D:2026-11-23	D:2026-11-23
+f-132	2026-11-25	K	What happened on 2026-11-02?	D:2026-11-02	D:2026-11-02
+f-133	2026-11-25	K	Was haben wir heute deployed?	D:2026-11-25	D:2026-11-25
+f-134	2026-11-25	K	Was war gestern los?	D:2026-11-24	D:2026-11-24
+f-135	2026-11-25	K	What happens tomorrow?	D:2026-11-26	D:2026-11-26
+f-136	2026-11-22	K	Was ist am Freitag passiert?	D:2026-11-20	D:2026-11-20
+f-137	2026-11-22	K	Was steht am Montag an?	D:2026-11-23	D:2026-11-23
+f-138	2026-11-22	K	Wer hat am Mittwoch gemerged?	D:2026-11-18	D:2026-11-18
+f-139	2026-11-22	K	Was kommt am Dienstag?	D:2026-11-24	D:2026-11-24
+f-140	2026-11-22	K	What broke on Thursday?	D:2026-11-19	D:2026-11-19
+f-141	2026-11-22	K	What is planned for Wednesday?	D:2026-11-25	D:2026-11-25
+f-142	2026-11-22	K	Was war gestern?	D:2026-11-21	D:2026-11-21
+f-143	2026-11-22	K	Was ist morgen?	D:2026-11-23	D:2026-11-23
+f-144	2026-11-22	K	Was war letzte Woche?	W:2026-11-09..2026-11-15	W:2026-11-09..2026-11-15
+f-145	2026-11-22	K	Was steht nächste Woche an?	W:2026-11-23..2026-11-29	W:2026-11-23..2026-11-29
+f-146	2026-11-22	K	Was ist vor 2 Tagen passiert?	D:2026-11-20	D:2026-11-20
+f-147	2026-11-22	K	What happened 3 days ago?	D:2026-11-19	D:2026-11-19
+f-148	2026-11-22	K	Was war am Samstag?	D:2026-11-21	D:2026-11-21
+f-149	2026-11-22	K	Who merged on Saturday?	D:2026-11-21	D:2026-11-21
+f-150	2026-01-01	K	Was war am Dienstag?	D:2025-12-30	D:2025-12-30
+f-151	2026-01-01	K	Was steht am Montag an?	D:2026-01-05	D:2026-01-05
+f-152	2026-01-01	K	Was war letzte Woche?	W:2025-12-22..2025-12-28	W:2025-12-22..2025-12-28
+f-153	2026-01-01	K	Was war gestern?	D:2025-12-31	D:2025-12-31
+f-154	2026-01-01	K	What is planned for tomorrow?	D:2026-01-02	D:2026-01-02
+f-155	2026-01-01	K	Was war letzten Monat los?	W:2025-12-01..2025-12-31	W:2025-12-01..2025-12-31
+f-156	2026-01-01	K	What happened on Wednesday?	D:2025-12-31	D:2025-12-31
+f-157	2026-01-01	K	Was passiert am Freitag?	D:2026-01-02	D:2026-01-02
+f-158	2026-01-01	K	Was ist vor 2 Tagen passiert?	D:2025-12-30	D:2025-12-30
+f-159	2026-01-01	K	Was war am 30.12.2025?	D:2025-12-30	D:2025-12-30
+f-160	2026-12-31	K	Was steht morgen an?	D:2027-01-01	D:2027-01-01
+f-161	2026-12-31	K	Was ist nächste Woche geplant?	W:2027-01-04..2027-01-10	W:2027-01-04..2027-01-10
+f-162	2026-12-31	K	Was war gestern?	D:2026-12-30	D:2026-12-30
+f-163	2026-12-31	K	What happened on Monday?	D:2026-12-28	D:2026-12-28
+f-164	2026-12-31	K	What is on Friday?	D:2027-01-01	D:2027-01-01
+f-165	2026-12-31	K	Was passiert in 3 Tagen?	D:2027-01-03	D:2027-01-03
+f-166	2026-12-31	K	Was war diese Woche?	W:2026-12-28..2027-01-03	W:2026-12-28..2027-01-03
+f-167	2026-12-31	K	Was war am Dienstag?	D:2026-12-29	D:2026-12-29
+f-168	2026-02-28	K	Was steht morgen an?	D:2026-03-01	D:2026-03-01
+f-169	2026-02-28	K	Was passiert in 3 Tagen?	D:2026-03-03	D:2026-03-03
+f-170	2026-02-28	K	Was war am Freitag?	D:2026-02-27	D:2026-02-27
+f-171	2026-02-28	K	Was steht am Montag an?	D:2026-03-02	D:2026-03-02
+f-172	2026-02-28	K	What happened yesterday?	D:2026-02-27	D:2026-02-27
+f-173	2026-02-28	K	Was war letzten Monat?	W:2026-01-01..2026-01-31	W:2026-01-01..2026-01-31
+f-174	2026-02-28	K	What is planned for Tuesday?	D:2026-03-03	D:2026-03-03
+f-175	2026-02-28	K	Was war am Donnerstag?	D:2026-02-26	D:2026-02-26
+f-176	2026-11-30	K	Was war am Sonntag?	D:2026-11-29	D:2026-11-29
+f-177	2026-11-30	K	Was war gestern?	D:2026-11-29	D:2026-11-29
+f-178	2026-11-30	K	Was war letzten Monat?	W:2026-10-01..2026-10-31	W:2026-10-01..2026-10-31
+f-179	2026-11-30	K	Was steht am Mittwoch an?	D:2026-12-02	D:2026-12-02
+f-180	2026-11-30	K	What did we merge on Friday?	D:2026-11-27	D:2026-11-27
+f-181	2026-11-30	K	Was ist diese Woche geplant?	W:2026-11-30..2026-12-06	W:2026-11-30..2026-12-06
+f-182	2026-11-30	K	Was war letzte Woche?	W:2026-11-23..2026-11-29	W:2026-11-23..2026-11-29
+f-183	2026-11-30	K	What is planned for Thursday?	D:2026-12-03	D:2026-12-03
+f-184	2026-06-05	K	Was ist am Mittwoch passiert?	D:2026-06-03	D:2026-06-03
+f-185	2026-06-05	K	Was steht am Montag an?	D:2026-06-08	D:2026-06-08
+f-186	2026-06-05	K	What happened yesterday?	D:2026-06-04	D:2026-06-04
+f-187	2026-06-05	K	Was ist morgen?	D:2026-06-06	D:2026-06-06
+f-188	2026-06-05	K	Was war letzte Woche los?	W:2026-05-25..2026-05-31	W:2026-05-25..2026-05-31
+f-189	2026-06-05	K	Who is on call on Saturday?	D:2026-06-06	D:2026-06-06
+f-190	2026-03-18	K	Was war am Montag?	D:2026-03-16	D:2026-03-16
+f-191	2026-03-18	K	Was steht am Freitag an?	D:2026-03-20	D:2026-03-20
+f-192	2026-03-18	K	What happened on Tuesday?	D:2026-03-17	D:2026-03-17
+f-193	2026-03-18	K	Was steht übermorgen an?	D:2026-03-20	D:2026-03-20
+f-194	2026-03-18	K	Was ist am 2026-03-01 passiert?	D:2026-03-01	D:2026-03-01
+f-195	2026-03-18	K	Was war letzten Monat?	W:2026-02-01..2026-02-28	W:2026-02-01..2026-02-28
+f-196	2026-11-25	K	Wie viele Shards hat der Index?	NONE	NIL
+f-197	2026-11-25	K	What is the default port of Ollama?	NONE	NIL
+f-198	2026-06-05	K	Was ist am Donnerstag passiert?	D:2026-06-04	D:2026-06-04
+f-199	2026-06-05	K	What is planned for Tuesday?	D:2026-06-09	D:2026-06-09
+f-200	2026-12-31	K	Was haben wir am Montag deployed?	D:2026-12-28	D:2026-12-28

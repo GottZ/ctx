@@ -1,0 +1,161 @@
+# Holdout of issue #532, class b-zwei-wochentage: written with its expectations and hashed before any rule changed (2026-11-25T17:37:24Z, sha256 of the source list 9b21db19ce4aae40).
+# Asked at noon UTC of the day. Expected: alternatives split by " | ", the dates of one by ";": D:day, W:start..end, F:from, U:until, NONE for no rule; @H the hour of that date, @- no hour, no mark not judged.
+# id, day, kind (F: the reading of the class is right, G: a counter-case, K: a control), question, expected, the answer of the rules at 5a28c475.
+b-001	2026-11-22	F	Was war am Montag, was am Dienstag?	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-24
+b-002	2026-11-22	F	Was ist am Montag passiert, was am Mittwoch?	D:2026-11-16;D:2026-11-18	D:2026-11-16;D:2026-11-25
+b-003	2026-11-22	F	Was haben wir am Dienstag gemerged und was am Donnerstag?	D:2026-11-17;D:2026-11-19	D:2026-11-24;D:2026-11-26
+b-004	2026-11-22	F	Was lief am Montag schief und was am Freitag?	D:2026-11-16;D:2026-11-20	D:2026-11-16;D:2026-11-20
+b-005	2026-11-22	F	Wer hat am Montag deployed und wer am Donnerstag?	D:2026-11-16;D:2026-11-19	D:2026-11-16;D:2026-11-19
+b-006	2026-11-22	F	Was ist am Dienstag kaputtgegangen, und was ging am Freitag schief?	D:2026-11-17;D:2026-11-20	D:2026-11-17;D:2026-11-20
+b-007	2026-11-22	F	Am Montag war der Build rot, am Mittwoch wieder grün – warum?	D:2026-11-16;D:2026-11-18	D:2026-11-16;D:2026-11-18
+b-008	2026-11-22	F	Am Dienstag lief alles, aber am Donnerstag ist der Cluster abgestürzt	D:2026-11-17;D:2026-11-19	D:2026-11-17;D:2026-11-19
+b-009	2026-11-22	F	Am Montag lief alles aber am Dienstag ist der Build gebrochen	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-010	2026-11-22	F	What happened on Monday and what on Thursday?	D:2026-11-16;D:2026-11-19	D:2026-11-16;D:2026-11-26
+b-011	2026-11-22	F	What broke on Tuesday, and what on Friday?	D:2026-11-17;D:2026-11-20	D:2026-11-17;D:2026-11-27
+b-012	2026-11-22	F	The job crashed on Monday but it recovered on Wednesday	D:2026-11-16;D:2026-11-18	D:2026-11-16;D:2026-11-18
+b-013	2026-11-22	F	We deployed on Monday and rolled back on Tuesday	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-014	2026-01-01	F	tuesday merged, wednesday reverted?	D:2025-12-30;D:2025-12-31	D:2025-12-30;D:2026-01-07
+b-015	2026-01-01	F	monday deployed, tuesday rolled back, why?	D:2025-12-29;D:2025-12-30	D:2025-12-29;D:2025-12-30
+b-016	2026-11-22	F	Montag gemerged, Mittwoch zurückgerollt – was war da los?	D:2026-11-16;D:2026-11-18	D:2026-11-23;D:2026-11-25
+b-017	2026-11-22	F	Wer war am Montag im Büro und wer am Freitag?	D:2026-11-16;D:2026-11-20	D:2026-11-16;D:2026-11-20
+b-018	2026-11-22	F	Was gab es am Dienstag, was am Donnerstag?	D:2026-11-17;D:2026-11-19	D:2026-11-17;D:2026-11-26
+b-019	2026-11-22	F	Was hatten wir am Montag, was am Mittwoch, was am Freitag?	D:2026-11-16;D:2026-11-18;D:2026-11-20	D:2026-11-16;D:2026-11-25;D:2026-11-27
+b-020	2026-11-22	F	Which tickets did we close on Monday and which on Wednesday?	D:2026-11-16;D:2026-11-18	D:2026-11-16;D:2026-11-25
+b-021	2026-11-22	F	Who was on call on Tuesday and who on Saturday?	D:2026-11-17;D:2026-11-21	D:2026-11-17;D:2026-11-28
+b-022	2026-11-25	F	Was war am Montag, was am Dienstag?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-12-01
+b-023	2026-11-25	F	Was ist am Freitag passiert und was am Samstag?	D:2026-11-20;D:2026-11-21	D:2026-11-27;D:2026-11-28
+b-024	2026-11-25	F	What failed on Friday and what on Monday?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-30
+b-025	2026-03-18	F	Was lief am Montag und was am Dienstag schief?	D:2026-03-16;D:2026-03-17	D:2026-03-16;D:2026-03-17
+b-026	2026-03-18	F	What did we release on Monday and on Tuesday?	D:2026-03-16;D:2026-03-17	D:2026-03-16;D:2026-03-17
+b-027	2026-11-22	F	Was war Montag, was Dienstag?	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-24
+b-028	2026-11-22	F	Am Montag deployt, am Dienstag gefixt, am Mittwoch wieder kaputt – was war los?	D:2026-11-16;D:2026-11-17;D:2026-11-18	D:2026-11-16;D:2026-11-24;D:2026-11-18
+b-029	2026-11-22	F	Was ist zwischen dem Treffen am Montag und dem Call am Donnerstag passiert?	D:2026-11-16;D:2026-11-19 | W:2026-11-16..2026-11-19	D:2026-11-16;D:2026-11-19
+b-030	2026-11-22	F	Was steht am Montag an, was am Dienstag?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+b-031	2026-11-22	F	Was machen wir am Montag und was am Freitag?	D:2026-11-23;D:2026-11-27	D:2026-11-23;D:2026-11-27
+b-032	2026-11-22	F	Wer übernimmt am Dienstag und wer am Donnerstag?	D:2026-11-24;D:2026-11-26	D:2026-11-24;D:2026-11-26
+b-033	2026-11-22	F	Was wird am Montag deployed und was am Mittwoch?	D:2026-11-23;D:2026-11-25	D:2026-11-23;D:2026-11-25
+b-034	2026-11-22	F	What is planned for Monday and what for Tuesday?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+b-035	2026-11-22	F	Who will review on Tuesday and who on Friday?	D:2026-11-24;D:2026-11-27	D:2026-11-24;D:2026-11-27
+b-036	2026-11-22	F	What ships on Monday, what on Thursday?	D:2026-11-23;D:2026-11-26	D:2026-11-23;D:2026-11-26
+b-037	2026-11-22	F	Am Montag kommt der Techniker, am Mittwoch die Lieferung	D:2026-11-23;D:2026-11-25	D:2026-11-23;D:2026-11-25
+b-038	2026-11-22	F	Wir deployen am Dienstag und testen am Donnerstag, passt das?	D:2026-11-24;D:2026-11-26	D:2026-11-24;D:2026-11-26
+b-039	2026-11-22	F	Können wir am Montag oder am Dienstag releasen?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+b-040	2026-11-22	F	Will the release go out on Monday or on Wednesday?	D:2026-11-23;D:2026-11-25	D:2026-11-23;D:2026-11-25
+b-041	2026-11-25	F	Was steht am Freitag an, was am Montag?	D:2026-11-27;D:2026-11-30	D:2026-11-27;D:2026-11-30
+b-042	2026-11-25	F	Who covers Thursday and who covers Friday?	D:2026-11-26;D:2026-11-27	D:2026-11-26;D:2026-11-27
+b-043	2026-11-25	F	Am Donnerstag Planung, am Freitag Release?	D:2026-11-26;D:2026-11-27	D:2026-11-26;D:2026-11-27
+b-044	2026-11-25	F	Was soll am Freitag passieren und was am Samstag?	D:2026-11-27;D:2026-11-28	D:2026-11-27;D:2026-11-28
+b-045	2026-03-18	F	Was planen wir für Donnerstag und was für Freitag?	D:2026-03-19;D:2026-03-20	D:2026-03-19;D:2026-03-20
+b-046	2026-11-22	F	Wer hat am Montag Dienst, wer am Dienstag?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+b-047	2026-11-22	F	Was gibt es am Montag, was am Mittwoch?	D:2026-11-23;D:2026-11-25	D:2026-11-23;D:2026-11-25
+b-048	2026-11-22	F	Was ist am Montag, was am Dienstag?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+b-049	2026-11-22	F	Was war am Montag, und was kommt am Dienstag?	D:2026-11-16;D:2026-11-24	D:2026-11-16;D:2026-11-24
+b-050	2026-11-22	F	Schreib Anna am Montag, was am Freitag schiefging	D:2026-11-23;D:2026-11-20	D:2026-11-23;D:2026-11-27
+b-051	2026-11-22	F	Which PRs that we merged on Monday will ship on Friday?	D:2026-11-16;D:2026-11-27	D:2026-11-16;D:2026-11-20
+b-052	2026-11-22	F	The job crashed on Saturday but it will run again on Tuesday	D:2026-11-21;D:2026-11-24	D:2026-11-21;D:2026-11-17
+b-053	2026-11-22	F	Was wurde am Dienstag gemerged und was wird am Donnerstag deployed?	D:2026-11-17;D:2026-11-26	D:2026-11-17;D:2026-11-26
+b-054	2026-11-22	F	Am Freitag ging der Server down, am Dienstag kommt der Ersatz	D:2026-11-20;D:2026-11-24	D:2026-11-20;D:2026-11-24
+b-055	2026-11-22	F	Was haben wir am Montag beschlossen und was setzen wir am Mittwoch um?	D:2026-11-16;D:2026-11-25	D:2026-11-16;D:2026-11-25
+b-056	2026-11-22	F	We broke prod on Thursday, will it be fixed by Tuesday?	D:2026-11-19;D:2026-11-24	D:2026-11-19;D:2026-11-24
+b-057	2026-11-22	F	Das Meeting am Dienstag fiel aus, holen wir es am Donnerstag nach?	D:2026-11-17;D:2026-11-26	D:2026-11-17;D:2026-11-26
+b-058	2026-11-22	F	Am Montag hatten wir drei Incidents, am Freitag halten wir das Postmortem	D:2026-11-16;D:2026-11-27	D:2026-11-16;D:2026-11-27
+b-059	2026-11-22	F	Was lief am Freitag schief und wer kümmert sich am Montag darum?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-23
+b-060	2026-11-22	F	Die Tickets, die wir am Montag geschlossen haben, gehen am Freitag live?	D:2026-11-16;D:2026-11-27	D:2026-11-16;D:2026-11-20
+b-061	2026-11-22	F	Who broke the build on Friday, and who will fix it on Monday?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-23
+b-062	2026-11-22	F	The outage on Thursday hurt us, can we talk on Tuesday?	D:2026-11-19;D:2026-11-24	D:2026-11-26;D:2026-11-24
+b-063	2026-11-25	F	Was ist am Montag passiert, und was machen wir am Freitag?	D:2026-11-23;D:2026-11-27	D:2026-11-23;D:2026-11-27
+b-064	2026-11-25	F	We shipped on Monday, what goes out on Friday?	D:2026-11-23;D:2026-11-27	D:2026-11-23;D:2026-11-27
+b-065	2026-11-25	F	Am Dienstag war Release, am Donnerstag ist Retro?	D:2026-11-24;D:2026-11-26	D:2026-11-24;D:2026-11-26
+b-066	2026-01-01	F	Was ist am Dienstag passiert und was steht am Montag an?	D:2025-12-30;D:2026-01-05	D:2025-12-30;D:2026-01-05
+b-067	2026-01-01	F	What failed on Tuesday and what is planned for Monday?	D:2025-12-30;D:2026-01-05	D:2025-12-30;D:2026-01-05
+b-068	2026-03-18	F	Wir haben am Montag deployed, am Freitag kommt das Review	D:2026-03-16;D:2026-03-20	D:2026-03-16;D:2026-03-20
+b-069	2026-11-22	F	Lass uns am Montag über das reden, was am Freitag passiert ist	D:2026-11-23;D:2026-11-20	D:2026-11-23;D:2026-11-20
+b-070	2026-11-22	F	Let's talk on Monday about what happened on Friday	D:2026-11-23;D:2026-11-20	D:2026-11-16;D:2026-11-20
+b-071	2026-11-22	F	Was war am Freitag, was wird am Montag?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-23
+b-072	2026-11-22	F	Wer hat am Freitag deployed, wer deployt am Dienstag?	D:2026-11-20;D:2026-11-24	D:2026-11-20;D:2026-11-24
+b-073	2026-11-22	F	Was haben wir am Donnerstag verloren, was holen wir am Montag zurück?	D:2026-11-19;D:2026-11-23	D:2026-11-19;D:2026-11-23
+b-074	2026-11-22	F	Der Build lief am Montag aber am Dienstag brach er	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-075	2026-11-22	F	It worked on Monday but it failed on Tuesday	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-076	2026-11-22	F	It failed on Friday but it will be fixed on Monday	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-16
+b-077	2026-11-22	F	Der Job lief am Freitag aber am Montag wird er neu gebaut	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-16
+b-078	2026-11-22	F	We planned it for Monday but we shipped on Thursday	D:2026-11-16;D:2026-11-19	D:2026-11-16;D:2026-11-19
+b-079	2026-11-25	F	It crashed on Monday but it will restart on Friday	D:2026-11-23;D:2026-11-27	D:2026-11-23;D:2026-11-20
+b-080	2026-11-22	F	Welche PRs, die am Montag gemerged wurden, gehen am Freitag raus?	D:2026-11-16;D:2026-11-27	D:2026-11-16;D:2026-11-20
+b-081	2026-11-22	F	Which PRs we merged on Monday go out on Friday?	D:2026-11-16;D:2026-11-27	D:2026-11-16;D:2026-11-20
+b-082	2026-11-22	F	Which bugs that we found on Tuesday are fixed by Thursday?	D:2026-11-17;D:2026-11-26	D:2026-11-17;D:2026-11-19
+b-083	2026-11-22	F	Was wird am Freitag mit dem Bug gemacht, den wir am Montag gefunden haben?	D:2026-11-27;D:2026-11-16	D:2026-11-27;D:2026-11-16
+b-084	2026-11-22	F	The ticket you closed on Monday reopens on Wednesday?	D:2026-11-16;D:2026-11-25	D:2026-11-16;D:2026-11-18
+b-085	2026-11-22	F	Is the bug we saw on Tuesday fixed in the release on Friday?	D:2026-11-17;D:2026-11-27	D:2026-11-17;D:2026-11-20
+b-086	2026-11-25	F	Die Fehler, die am Montag auftraten, werden am Freitag gefixt?	D:2026-11-23;D:2026-11-27	D:2026-11-30;D:2026-11-27
+b-087	2026-11-22	F	Monday merged, Tuesday reverted, Wednesday merged again?	D:2026-11-16;D:2026-11-17;D:2026-11-18	D:2026-11-16;D:2026-11-24;D:2026-11-18
+b-088	2026-11-22	F	deployed monday, reverted tuesday	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-089	2026-11-22	F	Merged on Monday, reverted on Thursday – why?	D:2026-11-16;D:2026-11-19	D:2026-11-16;D:2026-11-19
+b-090	2026-11-22	F	Am Montag gemerged, am Dienstag revertet, was ist passiert?	D:2026-11-16;D:2026-11-17	D:2026-11-23;D:2026-11-17
+b-091	2026-11-25	F	Was war am Montag mit dem Build und was am Dienstag mit den Tests?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+b-092	2026-11-25	F	What did we decide on Monday, and what on Tuesday?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-12-01
+b-093	2026-11-25	F	Who joined on Monday, who on Tuesday?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-12-01
+b-094	2026-11-25	F	Was wurde am Montag gelöscht und was am Dienstag?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+b-095	2026-11-25	F	Wann kommt der Fix, am Donnerstag oder am Freitag?	D:2026-11-26;D:2026-11-27	D:2026-11-26;D:2026-11-27
+b-096	2026-11-25	F	Which day suits you, Thursday or Friday?	D:2026-11-26;D:2026-11-27	D:2026-11-26;D:2026-11-27
+b-097	2026-11-25	F	Am Freitag gibt es Pizza, am Samstag Grillen?	D:2026-11-27;D:2026-11-28	D:2026-11-27;D:2026-11-28
+b-098	2026-11-22	F	Was war am Montag los, und was war am Mittwoch los?	D:2026-11-16;D:2026-11-18	D:2026-11-16;D:2026-11-18
+b-099	2026-11-22	F	Welche Alarme gab es am Dienstag und welche am Donnerstag?	D:2026-11-17;D:2026-11-19	D:2026-11-17;D:2026-11-19
+b-100	2026-11-22	F	Who deployed on Monday and who reverted on Tuesday?	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-101	2026-11-22	F	Was hat am Montag gefehlt und was am Freitag?	D:2026-11-16;D:2026-11-20	D:2026-11-16;D:2026-11-20
+b-102	2026-11-22	F	Am Montag Release, am Dienstag Hotfix, am Mittwoch Rollback – was war los?	D:2026-11-16;D:2026-11-17;D:2026-11-18	D:2026-11-16;D:2026-11-17;D:2026-11-18
+b-103	2026-11-22	G	Was war am Montag und was ist am Freitag?	D:2026-11-16;D:2026-11-27	D:2026-11-16;D:2026-11-27
+b-104	2026-11-22	G	Was war am Montag los, was ist am Mittwoch los?	D:2026-11-16;D:2026-11-25	D:2026-11-16;D:2026-11-25
+b-105	2026-11-22	G	What broke on Monday, what is on for Friday?	D:2026-11-16;D:2026-11-27	D:2026-11-16;D:2026-11-27
+b-106	2026-11-22	G	Am Montag war Deploy, am Freitag ist Retro	D:2026-11-16;D:2026-11-27	D:2026-11-16;D:2026-11-27
+b-107	2026-11-22	G	Der Build war am Dienstag rot, ist er am Donnerstag grün?	D:2026-11-17;D:2026-11-26	D:2026-11-17;D:2026-11-26
+b-108	2026-11-22	G	Wer war am Montag krank, wer ist am Dienstag da?	D:2026-11-16;D:2026-11-24	D:2026-11-16;D:2026-11-24
+b-109	2026-11-25	G	Was ist am Montag passiert und was gibt es am Freitag?	D:2026-11-23;D:2026-11-27	D:2026-11-23;D:2026-11-27
+b-110	2026-11-25	G	What happened on Monday and what is happening on Friday?	D:2026-11-23;D:2026-11-27	D:2026-11-23;D:2026-11-27
+b-111	2026-11-22	G	It failed on Friday, is it green on Monday?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-23
+b-112	2026-11-22	G	Wir hatten am Freitag einen Ausfall, haben wir am Montag ein Review?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-23
+b-113	2026-03-18	G	Was gab es am Montag, was gibt es am Freitag?	D:2026-03-16;D:2026-03-20	D:2026-03-16;D:2026-03-20
+b-114	2026-11-22	G	Montag war Feiertag, Dienstag ist Arbeitstag?	D:2026-11-16;D:2026-11-24	D:2026-11-16;D:2026-11-24
+b-115	2026-11-22	G	Was war am Montag, was wird am Freitag, was am Samstag?	D:2026-11-16;D:2026-11-27;D:2026-11-28	D:2026-11-16;D:2026-11-27;D:2026-11-28
+b-116	2026-11-22	G	Was haben wir am Montag gemacht, und was am Freitag vor?	D:2026-11-16;D:2026-11-27	D:2026-11-16;D:2026-11-27
+b-117	2026-11-22	G	Was steht am Montag an und was stand am Freitag an?	D:2026-11-23;D:2026-11-20	D:2026-11-23;D:2026-11-20
+b-118	2026-11-22	G	Was steht am Montag an, was am Dienstag, und was ging am Freitag schief?	D:2026-11-23;D:2026-11-24;D:2026-11-20	D:2026-11-23;D:2026-11-24;D:2026-11-20
+b-119	2026-11-22	G	Was kommt am Montag, was am Dienstag – und was war am Freitag?	D:2026-11-23;D:2026-11-24;D:2026-11-20	D:2026-11-23;D:2026-11-24;D:2026-11-20
+b-120	2026-11-25	G	Was war am Montag, was ist für Freitag geplant und was für Samstag?	D:2026-11-23;D:2026-11-27;D:2026-11-28	D:2026-11-23;D:2026-11-27;D:2026-11-28
+b-121	2026-11-22	G	Nicht am Montag, aber am Dienstag ist Release?	D:2026-11-24 | D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+b-122	2026-11-22	G	Not on Monday but on Tuesday we ship?	D:2026-11-24 | D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+b-123	2026-11-22	G	Did it fail on Monday but succeed on Tuesday?	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-124	2026-11-22	G	Will it run on Monday but fail on Tuesday?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+b-125	2026-11-22	G	Lief der Job am Montag aber nicht am Dienstag?	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-126	2026-11-22	G	The job ran on Monday but not on Tuesday, why?	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-127	2026-11-22	G	Kommt der Patch am Montag aber erst am Mittwoch live?	D:2026-11-23;D:2026-11-25	D:2026-11-23;D:2026-11-25
+b-128	2026-11-22	G	It shipped on Monday but only reached users on Wednesday	D:2026-11-16;D:2026-11-18	D:2026-11-16;D:2026-11-18
+b-129	2026-11-22	G	Am Dienstag hat Anna Freitag angerufen	D:2026-11-17	D:2026-11-17
+b-130	2026-11-22	G	Hat Herr Montag am Dienstag zugesagt?	D:2026-11-17	D:2026-11-17
+b-131	2026-11-22	G	Was hat Frau Freitag am Montag gesagt?	D:2026-11-16	D:2026-11-16
+b-132	2026-11-22	G	Wie lief das Montag-Meeting am Dienstag?	D:2026-11-17	D:2026-11-17
+b-133	2026-11-22	G	Der Freitags-Job lief am Dienstag nicht – warum?	D:2026-11-17	D:2026-11-17
+b-134	2026-11-22	G	Mr. Monday called on Thursday, what did he want?	D:2026-11-19	D:2026-11-19
+b-135	2026-11-22	G	Was ist mit dem friday-deploy-script, das am Montag lief?	D:2026-11-16	D:2026-11-16
+b-136	2026-11-22	G	Did Ms Friday reply on Tuesday?	D:2026-11-17	D:2026-11-20;D:2026-11-17
+b-137	2026-11-22	G	Hat das Meeting am Montag oder am Dienstag stattgefunden?	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-138	2026-11-22	G	Findet das Meeting am Montag oder am Dienstag statt?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+b-139	2026-11-22	G	Wer hat am Montag gemerged und am Dienstag deployed?	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-140	2026-11-22	G	Will it be fixed on Monday and deployed on Tuesday?	D:2026-11-23;D:2026-11-24	D:2026-11-16;D:2026-11-17
+b-141	2026-11-22	G	Was the outage on Monday or on Tuesday?	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-142	2026-11-22	G	Montag und Dienstag war der Build rot	D:2026-11-16;D:2026-11-17	D:2026-11-16;D:2026-11-17
+b-143	2026-11-22	G	Montag oder Dienstag – wann passt das Review?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+b-144	2026-11-22	G	Did we deploy on Monday and on Wednesday?	D:2026-11-16;D:2026-11-18	D:2026-11-16;D:2026-11-18
+b-145	2026-11-22	G	Wer hatte von Montag bis Mittwoch Bereitschaft?	W:2026-11-16..2026-11-18	W:2026-11-16..2026-11-18
+b-146	2026-11-22	G	Was steht von Montag bis Freitag an?	W:2026-11-23..2026-11-27	W:2026-11-23..2026-11-27
+b-147	2026-11-22	G	What is planned Monday through Friday?	W:2026-11-23..2026-11-27	W:2026-11-23..2026-11-27
+b-148	2026-11-22	G	Der Bug, der am Montag auftrat, wird am Freitag gefixt	D:2026-11-16;D:2026-11-27	D:2026-11-23;D:2026-11-27
+b-149	2026-11-22	G	Wer am Montag gefehlt hat, kommt am Dienstag?	D:2026-11-16;D:2026-11-24	D:2026-11-16;D:2026-11-24
+b-150	2026-11-22	G	Was am Freitag kaputtging, reparieren wir am Montag	D:2026-11-20;D:2026-11-23	D:2026-11-27;D:2026-11-23
+b-151	2026-11-22	G	Am Montag ist das Release fehlgeschlagen, wann ist am Mittwoch der Neuversuch?	D:2026-11-16;D:2026-11-25	D:2026-11-16;D:2026-11-25
+b-152	2026-11-22	G	Was war am Freitag, und was ist am Montag geplant?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-23
+b-153	2026-11-22	G	What went wrong on Friday and what is the plan for Monday?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-23
+b-154	2026-11-25	G	Gestern war Dienstag, was ist am Donnerstag?	D:2026-11-24;D:2026-11-26 | D:2026-11-26	D:2026-11-24;D:2026-11-26
+b-155	2026-11-22	G	Lief am Montag etwas, und läuft am Dienstag etwas?	D:2026-11-16;D:2026-11-24	D:2026-11-16;D:2026-11-24
+b-156	2026-11-22	G	What did Monday look like, and what does Tuesday look like?	D:2026-11-16;D:2026-11-24	D:2026-11-16;D:2026-11-24
+b-157	2026-11-22	G	Am Montag hat es geregnet, am Dienstag soll die Sonne scheinen	D:2026-11-16;D:2026-11-24	D:2026-11-16;D:2026-11-24
+b-158	2026-11-22	G	Wer hat am Freitag gefehlt und wer fehlt am Montag?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-23

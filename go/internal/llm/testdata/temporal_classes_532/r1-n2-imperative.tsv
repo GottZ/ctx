@@ -1,0 +1,93 @@
+# Holdout of the review round of issue #532, r1-n2-imperative: every form of imperatives and hortatives as an imperative opening the question or behind a comma (F), and the same forms as another word opening a clause: English words, German nouns with their capital, "sage und schreibe" (G); written with its expectations and hashed before the round's first edit (2026-11-25T20:48:22Z, sha256 of the source list 4d99034d5b99d757).
+# Asked at noon UTC of the day. Expected: the dates by ";" as D:day, NONE for no rule; hours are not judged.
+# id, day, kind, question, expected, the answer of the rules at 5a28c475.
+n2-001	2026-11-25	F	Schau dir am Freitag an, was am Montag schiefging.	D:2026-11-27;D:2026-11-23	D:2026-11-27;D:2026-11-30
+n2-002	2026-11-25	F	Schaue bitte am Donnerstag nach, warum der Job am Dienstag abbrach.	D:2026-11-26;D:2026-11-24	D:2026-11-26;D:2026-12-01
+n2-003	2026-11-25	F	Guck am Montag mal, was der Bot am Samstag gepostet hat.	D:2026-11-30;D:2026-11-21	D:2026-11-23;D:2026-11-21
+n2-004	2026-11-25	F	Sieh dir am Freitag an, was wir am Dienstag deployed haben.	D:2026-11-27;D:2026-11-24	D:2026-11-20;D:2026-11-24
+n2-005	2026-11-25	F	Schick mir am Montag die Logs vom Samstag.	D:2026-11-30;D:2026-11-21	D:2026-11-30;D:2026-11-28
+n2-006	2026-11-25	F	Schicke dem Kunden am Donnerstag den Bericht zum Ausfall, der am Sonntag war.	D:2026-11-26;D:2026-11-22	D:2026-11-19;D:2026-11-22
+n2-007	2026-11-25	F	Sende am Freitag die Rechnung für das, was wir am Montag geliefert haben.	D:2026-11-27;D:2026-11-23	D:2026-11-20;D:2026-11-23
+n2-008	2026-11-25	F	Sag mir am Montag, was am Freitag beim Kunden los war.	D:2026-11-30;D:2026-11-20	D:2026-11-23;D:2026-11-20
+n2-009	2026-11-25	F	Sage dem Team am Donnerstag, was am Dienstag passiert ist.	D:2026-11-26;D:2026-11-24	D:2026-11-19;D:2026-11-24
+n2-010	2026-11-25	F	Ruf am Freitag den Dienstleister an wegen des Ausfalls, den wir am Montag hatten.	D:2026-11-27;D:2026-11-23	D:2026-11-20;D:2026-11-23
+n2-011	2026-11-25	F	Rufe am Montag bei Anna an, sie war am Freitag krank.	D:2026-11-30;D:2026-11-20	D:2026-11-23;D:2026-11-20
+n2-012	2026-11-25	F	Gib mir am Donnerstag Bescheid, was am Dienstag kaputtging.	D:2026-11-26;D:2026-11-24	D:2026-11-26;D:2026-12-01
+n2-013	2026-11-25	F	Prüf am Freitag, ob das Backup vom Sonntag lief.	D:2026-11-27;D:2026-11-22	D:2026-11-20;D:2026-11-22
+n2-014	2026-11-25	F	Prüfe am Montag die Alerts, die am Samstag kamen.	D:2026-11-30;D:2026-11-21	D:2026-11-23;D:2026-11-21
+n2-015	2026-11-25	F	Überprüf am Donnerstag, was am Montag geändert wurde.	D:2026-11-26;D:2026-11-23	D:2026-11-19;D:2026-11-23
+n2-016	2026-11-25	F	Überprüfe am Freitag die Rechte, die wir am Dienstag vergeben haben.	D:2026-11-27;D:2026-11-24	D:2026-11-20;D:2026-11-24
+n2-017	2026-11-25	F	Frag am Montag nach, warum der Build am Freitag rot war.	D:2026-11-30;D:2026-11-20	D:2026-11-23;D:2026-11-20
+n2-018	2026-11-25	F	Frage am Donnerstag beim Support, was am Sonntag mit dem DNS war.	D:2026-11-26;D:2026-11-22	D:2026-11-19;D:2026-11-22
+n2-019	2026-11-25	F	Check am Freitag, ob der Fix vom Montag drin ist.	D:2026-11-27;D:2026-11-23	D:2026-11-27;D:2026-11-30
+n2-020	2026-11-25	F	Checke am Montag die Mails, die am Samstag reinkamen.	D:2026-11-30;D:2026-11-21	D:2026-11-30;D:2026-11-28
+n2-021	2026-11-25	F	Schreib am Freitag eine Notiz zu dem, was am Dienstag schieflief.	D:2026-11-27;D:2026-11-24	D:2026-11-27;D:2026-11-24
+n2-022	2026-11-25	F	Schreibe am Montag das Postmortem für den Ausfall, den es am Samstag gab.	D:2026-11-30;D:2026-11-21	D:2026-11-23;D:2026-11-21
+n2-023	2026-11-25	F	Erinnere mich am Donnerstag an das Ticket, das am Montag aufkam.	D:2026-11-26;D:2026-11-23	D:2026-11-26;D:2026-11-30
+n2-024	2026-11-25	F	Erinner mich am Freitag daran, was wir am Dienstag besprochen haben.	D:2026-11-27;D:2026-11-24	D:2026-11-20;D:2026-11-24
+n2-025	2026-11-25	F	Melde am Montag, was am Freitag ausgefallen ist.	D:2026-11-30;D:2026-11-20	D:2026-11-23;D:2026-11-20
+n2-026	2026-11-25	F	Meld dich am Donnerstag, wenn du weißt, was am Montag los war.	D:2026-11-26;D:2026-11-23	D:2026-11-19;D:2026-11-23
+n2-027	2026-11-25	F	Kümmere dich am Freitag um den Bug, der am Dienstag auftrat.	D:2026-11-27;D:2026-11-24	D:2026-11-27;D:2026-12-01
+n2-028	2026-11-25	F	Kümmer dich am Montag um das, was am Samstag liegen blieb.	D:2026-11-30;D:2026-11-21	D:2026-11-23;D:2026-11-21
+n2-029	2026-11-25	F	Bring am Donnerstag die Festplatte mit, die am Montag ausgebaut wurde.	D:2026-11-26;D:2026-11-23	D:2026-11-19;D:2026-11-23
+n2-030	2026-11-25	F	Bringe am Freitag die Unterlagen zum Vorfall vom Dienstag mit.	D:2026-11-27;D:2026-11-24	D:2026-11-27;D:2026-12-01
+n2-031	2026-11-25	F	Leg am Montag ein Ticket für den Fehler an, der am Freitag auftrat.	D:2026-11-30;D:2026-11-20	D:2026-11-30;D:2026-11-27
+n2-032	2026-11-25	F	Lege am Donnerstag fest, was mit den Daten vom Sonntag passiert.	D:2026-11-26;D:2026-11-22	D:2026-11-19;D:2026-11-22
+n2-033	2026-11-25	F	Lies am Freitag nach, was am Dienstag entschieden wurde.	D:2026-11-27;D:2026-11-24	D:2026-11-20;D:2026-11-24
+n2-034	2026-11-25	F	Nimm am Montag die Änderung zurück, die wir am Freitag gemacht haben.	D:2026-11-30;D:2026-11-20	D:2026-11-23;D:2026-11-20
+n2-035	2026-11-25	F	Denk am Donnerstag an den Fix, den wir am Montag verschoben haben.	D:2026-11-26;D:2026-11-23	D:2026-11-19;D:2026-11-23
+n2-036	2026-11-25	F	Denke am Freitag daran, was der Kunde am Dienstag gesagt hat.	D:2026-11-27;D:2026-11-24	D:2026-11-20;D:2026-11-24
+n2-037	2026-11-25	F	Merk dir für Montag, was am Samstag schiefgelaufen ist.	D:2026-11-30;D:2026-11-21	D:2026-11-23;D:2026-11-21
+n2-038	2026-11-25	F	Merke dir am Donnerstag vor, was wir am Montag versprochen haben.	D:2026-11-26;D:2026-11-23	D:2026-11-19;D:2026-11-23
+n2-039	2026-11-25	F	Teste am Freitag den Fix für den Fehler, der am Dienstag gemeldet wurde.	D:2026-11-27;D:2026-11-24	D:2026-11-20;D:2026-11-24
+n2-040	2026-11-25	F	Hilf mir am Montag mit dem Bug, den wir am Freitag gefunden haben.	D:2026-11-30;D:2026-11-20	D:2026-11-23;D:2026-11-20
+n2-041	2026-11-25	F	Zeig mir am Donnerstag, was am Sonntag kaputtgegangen ist.	D:2026-11-26;D:2026-11-22	D:2026-11-19;D:2026-11-22
+n2-042	2026-11-25	F	Zeige dem Kunden am Freitag, was wir am Dienstag repariert haben.	D:2026-11-27;D:2026-11-24	D:2026-11-20;D:2026-11-24
+n2-043	2026-11-25	F	Hol am Montag die Logs, die am Samstag geschrieben wurden.	D:2026-11-30;D:2026-11-21	D:2026-11-23;D:2026-11-21
+n2-044	2026-11-25	F	Hole am Donnerstag das Feedback ein, das am Montag kam.	D:2026-11-26;D:2026-11-23	D:2026-11-19;D:2026-11-23
+n2-045	2026-11-25	F	Such am Freitag den Commit raus, der am Dienstag alles brach.	D:2026-11-27;D:2026-11-24	D:2026-11-20;D:2026-11-24
+n2-046	2026-11-25	F	Suche am Montag die Mail heraus, die am Freitag kam.	D:2026-11-30;D:2026-11-20	D:2026-11-23;D:2026-11-20
+n2-047	2026-11-25	F	Notier dir für Donnerstag, was am Montag passiert ist.	D:2026-11-26;D:2026-11-23	D:2026-11-19;D:2026-11-23
+n2-048	2026-11-25	F	Notiere am Freitag, was am Dienstag schiefging.	D:2026-11-27;D:2026-11-24	D:2026-11-27;D:2026-12-01
+n2-049	2026-11-25	F	Informier am Montag die Kunden über den Ausfall, den es am Samstag gab.	D:2026-11-30;D:2026-11-21	D:2026-11-23;D:2026-11-21
+n2-050	2026-11-25	F	Informiere am Donnerstag das Team über den Bug, der am Sonntag auftauchte.	D:2026-11-26;D:2026-11-22	D:2026-11-26;D:2026-11-29
+n2-051	2026-11-25	F	Kontrollier am Freitag, ob der Patch vom Dienstag aktiv ist.	D:2026-11-27;D:2026-11-24	D:2026-11-27;D:2026-12-01
+n2-052	2026-11-25	F	Kontrolliere am Montag die Backups, die am Samstag liefen.	D:2026-11-30;D:2026-11-21	D:2026-11-23;D:2026-11-21
+n2-053	2026-11-25	F	Stell am Donnerstag sicher, dass der Fehler vom Montag weg ist.	D:2026-11-26;D:2026-11-23	D:2026-11-26;D:2026-11-30
+n2-054	2026-11-25	F	Stelle am Freitag die Zahlen zusammen, die wir am Dienstag erhoben haben.	D:2026-11-27;D:2026-11-24	D:2026-11-20;D:2026-11-24
+n2-055	2026-11-25	F	Setz am Montag ein Meeting zu dem an, was am Freitag passiert ist.	D:2026-11-30;D:2026-11-20	D:2026-11-30;D:2026-11-20
+n2-056	2026-11-25	F	Setze am Donnerstag zurück, was am Montag verstellt wurde.	D:2026-11-26;D:2026-11-23	D:2026-11-19;D:2026-11-23
+n2-057	2026-11-25	F	Trag am Freitag ein, was am Dienstag erledigt wurde.	D:2026-11-27;D:2026-11-24	D:2026-11-20;D:2026-11-24
+n2-058	2026-11-25	F	Trage am Montag nach, was am Samstag gelaufen ist.	D:2026-11-30;D:2026-11-21	D:2026-11-23;D:2026-11-21
+n2-059	2026-11-25	F	Lass uns am Donnerstag besprechen, was am Montag schiefging.	D:2026-11-26;D:2026-11-23	D:2026-11-26;D:2026-11-23
+n2-060	2026-11-25	F	Lasst uns am Freitag klären, was am Dienstag kaputt war.	D:2026-11-27;D:2026-11-24	D:2026-11-27;D:2026-11-24
+n2-061	2026-11-25	F	Lassen Sie uns am Montag besprechen, was am Freitag geschah.	D:2026-11-30;D:2026-11-20	D:2026-11-30;D:2026-11-20
+n2-062	2026-11-25	F	Let's review on Thursday what broke on Monday.	D:2026-11-26;D:2026-11-23	D:2026-11-19;D:2026-11-23
+n2-063	2026-11-25	F	Let’s talk on Friday about what failed on Tuesday.	D:2026-11-27;D:2026-11-24	D:2026-11-20;D:2026-11-24
+n2-064	2026-11-25	F	Der Build brach am Montag, schau dir das bitte am Donnerstag an.	D:2026-11-23;D:2026-11-26	D:2026-11-23;D:2026-11-19
+n2-065	2026-11-25	F	Am Freitag fiel der Server aus, frag am Montag beim Hoster nach.	D:2026-11-20;D:2026-11-30	D:2026-11-20;D:2026-11-23
+n2-066	2026-11-25	F	The build broke on Monday, check it again on Thursday.	D:2026-11-23;D:2026-11-26	D:2026-11-23;D:2026-11-26
+n2-067	2026-11-25	F	We lost data on Saturday, bring the backups on Monday.	D:2026-11-21;D:2026-11-30	D:2026-11-28;D:2026-11-30
+n2-068	2026-11-25	F	Der Job lief am Dienstag nicht, prüfe ihn am Freitag erneut.	D:2026-11-24;D:2026-11-27	D:2026-11-24;D:2026-11-27
+n2-069	2026-11-25	F	Am Sonntag war der Server down, sag dem Team am Donnerstag Bescheid.	D:2026-11-22;D:2026-11-26	D:2026-11-22;D:2026-11-19
+n2-070	2026-11-25	G	Payments failed on Saturday, such chaos on Sunday as well?	D:2026-11-21;D:2026-11-22	D:2026-11-21;D:2026-11-22
+n2-071	2026-11-25	G	Two disks failed on Saturday, such bad luck again on Sunday?	D:2026-11-21;D:2026-11-22	D:2026-11-21;D:2026-11-22
+n2-072	2026-11-25	G	Builds were red on Thursday, check runs on Friday as well?	D:2026-11-19;D:2026-11-20	D:2026-11-19;D:2026-11-20
+n2-073	2026-11-25	G	Am Montag gab es Ärger, sage und schreibe sieben Alerts am Dienstag?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+n2-074	2026-11-25	G	The fiber was cut on Friday, hole in the road on Monday too?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-23
+n2-075	2026-11-25	G	Bob injured his knee on Saturday, leg cramps on Sunday as well?	D:2026-11-21;D:2026-11-22	D:2026-11-28;D:2026-11-29
+n2-076	2026-11-25	G	The roof leaked on Sunday, sag in the ceiling on Monday as well?	D:2026-11-22;D:2026-11-23	D:2026-11-29;D:2026-11-30
+n2-077	2026-11-25	G	Der Server fiel am Freitag aus, Check am Montag ohne Befund?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-23
+n2-078	2026-11-25	G	Am Montag gab es einen Ausfall, Frage am Dienstag: wieso?	D:2026-11-23;D:2026-11-24	D:2026-11-23;D:2026-11-24
+n2-079	2026-11-25	G	Das Backup ist am Sonntag gelaufen, Suche am Montag ergebnislos?	D:2026-11-22;D:2026-11-23	D:2026-11-22;D:2026-11-23
+n2-080	2026-11-25	G	Am Samstag lief die Messe, Schau am Sonntag auch gut besucht?	D:2026-11-21;D:2026-11-22	D:2026-11-21;D:2026-11-29
+n2-081	2026-11-25	G	Am Freitag kündigte Anna, Stelle am Montag schon ausgeschrieben?	D:2026-11-20;D:2026-11-23	D:2026-11-20;D:2026-11-30
+n2-082	2026-11-25	G	Am Samstag stürzte ein Kletterer, Trage am Sonntag noch im Einsatz?	D:2026-11-21;D:2026-11-22	D:2026-11-21;D:2026-11-22
+n2-083	2026-11-25	G	Am Freitag gab es Proteste, Rufe am Samstag noch lauter?	D:2026-11-20;D:2026-11-21	D:2026-11-20;D:2026-11-21
+n2-084	2026-11-25	G	Check am Montag ergab nichts – was lief am Freitag schief?	D:2026-11-23;D:2026-11-20	D:2026-11-23;D:2026-11-20
+n2-085	2026-11-25	G	Suche am Montag blieb erfolglos, was fehlte am Freitag?	D:2026-11-23;D:2026-11-20	D:2026-11-23;D:2026-11-20
+n2-086	2026-11-25	G	Schau am Samstag war gut besucht, wer kam am Sonntag?	D:2026-11-21;D:2026-11-22	D:2026-11-21;D:2026-11-22
+n2-087	2026-11-25	G	Frage am Dienstag war, warum der Deploy am Montag scheiterte.	D:2026-11-24;D:2026-11-23	D:2026-11-24;D:2026-11-23
+n2-088	2026-11-25	G	Der Patch brach am Freitag, Sage und Schreibe drei Rollbacks am Samstag?	D:2026-11-20;D:2026-11-21	D:2026-11-20;D:2026-11-21
+n2-089	2026-11-25	G	The release slipped on Thursday, such delays on Friday too?	D:2026-11-19;D:2026-11-20	D:2026-11-26;D:2026-11-27
+n2-090	2026-11-25	G	Das Netz fiel am Sonntag aus, Suche nach der Ursache am Montag erfolglos?	D:2026-11-22;D:2026-11-23	D:2026-11-22;D:2026-11-23

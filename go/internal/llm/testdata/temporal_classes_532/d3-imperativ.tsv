@@ -1,0 +1,63 @@
+# Holdout of issue #532, class d3-imperativ: written with its expectations and hashed before any rule changed (2026-11-25T17:37:24Z, sha256 of the source list 93671eb7a85fdceb).
+# Asked at noon UTC of the day. Expected: alternatives split by " | ", the dates of one by ";": D:day, W:start..end, F:from, U:until, NONE for no rule; @H the hour of that date, @- no hour, no mark not judged.
+# id, day, kind (F: the reading of the class is right, G: a counter-case, K: a control), question, expected, the answer of the rules at 5a28c475.
+d3-001	2026-11-22	F	Erinnere mich am Freitag an den Bug, den wir am Montag hatten	D:2026-11-27;D:2026-11-16	D:2026-11-20;D:2026-11-16
+d3-002	2026-11-22	F	Schau dir am Montag an, was am Freitag kaputtging	D:2026-11-23;D:2026-11-20	D:2026-11-23;D:2026-11-27
+d3-003	2026-11-22	F	Schick mir am Dienstag die Liste	D:2026-11-24	D:2026-11-24
+d3-004	2026-11-22	F	Ruf mich am Freitag an	D:2026-11-27	D:2026-11-27
+d3-005	2026-11-22	F	Erinnere mich am Montag daran, was wir am Donnerstag beschlossen haben	D:2026-11-23;D:2026-11-19	D:2026-11-16;D:2026-11-19
+d3-006	2026-11-22	F	Sag mir am Mittwoch Bescheid	D:2026-11-25	D:2026-11-25
+d3-007	2026-11-22	F	Prüf bitte am Donnerstag, was am Dienstag schiefging	D:2026-11-26;D:2026-11-17	D:2026-11-26;D:2026-11-24
+d3-008	2026-11-22	F	Schau mal am Montag in die Logs vom Freitag	D:2026-11-23;D:2026-11-20	D:2026-11-23;D:2026-11-27
+d3-009	2026-11-22	F	Schreib mir am Freitag, was am Mittwoch passiert ist	D:2026-11-27;D:2026-11-18	D:2026-11-20;D:2026-11-18
+d3-010	2026-11-22	F	Erinnere uns am Dienstag an das Review	D:2026-11-24	D:2026-11-24
+d3-011	2026-11-22	F	Gib mir am Montag Bescheid, wie es am Samstag lief	D:2026-11-23;D:2026-11-21	D:2026-11-16;D:2026-11-21
+d3-012	2026-11-22	F	Plane bitte am Donnerstag ein Meeting ein	D:2026-11-26	D:2026-11-26
+d3-013	2026-11-22	F	Melde dich am Freitag, falls der Build am Mittwoch rot war	D:2026-11-27;D:2026-11-18	D:2026-11-20;D:2026-11-18
+d3-014	2026-11-22	F	Frag ihn am Montag, was am Freitag los war	D:2026-11-23;D:2026-11-20	D:2026-11-16;D:2026-11-20
+d3-015	2026-11-22	F	Check mal am Montag, warum der Job am Samstag hing	D:2026-11-23;D:2026-11-21	D:2026-11-23;D:2026-11-28
+d3-016	2026-11-22	F	Kümmere dich am Mittwoch um das Ticket	D:2026-11-25	D:2026-11-25
+d3-017	2026-11-22	F	Bring mir am Freitag den Laptop mit	D:2026-11-27	D:2026-11-27
+d3-018	2026-11-22	F	Erinnere mich am Donnerstag an die Rechnung	D:2026-11-26	D:2026-11-26
+d3-019	2026-11-22	F	Leg mir am Montag den Bericht hin	D:2026-11-23	D:2026-11-23
+d3-020	2026-11-22	F	Ruf bitte am Dienstag beim Provider an	D:2026-11-24	D:2026-11-24
+d3-021	2026-11-22	F	Sieh dir am Freitag an, was am Donnerstag deployed wurde	D:2026-11-27;D:2026-11-19	D:2026-11-20;D:2026-11-19
+d3-022	2026-11-22	F	Lies dir am Montag durch, was am Freitag beschlossen wurde	D:2026-11-23;D:2026-11-20	D:2026-11-16;D:2026-11-20
+d3-023	2026-11-22	F	Nimm dir am Mittwoch Zeit für das Review	D:2026-11-25	D:2026-11-25
+d3-024	2026-11-22	F	Denk am Freitag an das Backup	D:2026-11-27	D:2026-11-27
+d3-025	2026-11-22	F	Merk dir am Montag, was am Freitag schiefgelaufen ist	D:2026-11-23;D:2026-11-20	D:2026-11-16;D:2026-11-20
+d3-026	2026-11-22	F	Starte am Dienstag den Job neu, der am Montag hing	D:2026-11-24;D:2026-11-16	D:2026-11-24;D:2026-11-23
+d3-027	2026-11-22	F	Teste am Donnerstag, ob der Fix vom Dienstag hält	D:2026-11-26;D:2026-11-17	D:2026-11-26;D:2026-11-24
+d3-028	2026-11-22	F	Sende mir am Montag die Zahlen	D:2026-11-23	D:2026-11-23
+d3-029	2026-11-22	F	Hilf mir am Freitag beim Umzug	D:2026-11-27	D:2026-11-27
+d3-030	2026-11-25	F	Erinnere mich am Freitag an das, was wir am Montag besprochen haben	D:2026-11-27;D:2026-11-23	D:2026-11-20;D:2026-11-23
+d3-031	2026-11-22	G	Wieder mal am Freitag, als alles kaputt war?	D:2026-11-20	D:2026-11-20
+d3-032	2026-11-22	G	Schon mal am Montag, wo der Build rot war, nachgeschaut?	D:2026-11-16	D:2026-11-16
+d3-033	2026-11-22	G	Noch mal am Dienstag, was war da los?	D:2026-11-17	D:2026-11-17
+d3-034	2026-11-22	G	Erst mal am Montag, was ist da passiert?	D:2026-11-16	D:2026-11-16
+d3-035	2026-11-22	G	Damals am Montag, was haben wir da beschlossen?	D:2026-11-16	D:2026-11-16
+d3-036	2026-11-22	G	Auch mal am Montag nachgesehen, was im Log stand?	D:2026-11-16	D:2026-11-23
+d3-037	2026-11-22	G	Nochmal am Dienstag, was war mit dem Cluster?	D:2026-11-17	D:2026-11-17
+d3-038	2026-11-22	G	Wieder mal am Donnerstag ein Ausfall gewesen?	D:2026-11-19	D:2026-11-19
+d3-039	2026-11-22	G	Mal ehrlich, am Montag lief doch alles?	D:2026-11-16	D:2026-11-16
+d3-040	2026-11-22	G	Bitte am Freitag nicht deployen!	D:2026-11-27	D:2026-11-27
+d3-041	2026-11-22	G	Sie haben am Montag angerufen?	D:2026-11-16	D:2026-11-16
+d3-042	2026-11-22	G	Ihr habt am Freitag deployed?	D:2026-11-20	D:2026-11-20
+d3-043	2026-11-22	G	Uns hat am Dienstag keiner informiert?	D:2026-11-17	D:2026-11-17
+d3-044	2026-11-22	G	Mich hat am Montag der Alarm geweckt	D:2026-11-16	D:2026-11-16
+d3-045	2026-11-22	G	Dir ist am Freitag aufgefallen, dass der Build rot war?	D:2026-11-20	D:2026-11-20
+d3-046	2026-11-22	G	Euch wurde am Mittwoch Bescheid gegeben?	D:2026-11-18	D:2026-11-18
+d3-047	2026-11-22	G	Ihn hat am Donnerstag niemand erreicht?	D:2026-11-19	D:2026-11-19
+d3-048	2026-11-22	G	Hat dir am Freitag jemand geholfen?	D:2026-11-20	D:2026-11-20
+d3-049	2026-11-22	G	Gab es mal am Montag einen Ausfall?	D:2026-11-16	D:2026-11-16
+d3-050	2026-11-22	G	Wer hat mir am Dienstag geschrieben?	D:2026-11-17	D:2026-11-17
+d3-051	2026-11-22	G	Kam am Freitag mal jemand vorbei?	D:2026-11-20	D:2026-11-20
+d3-052	2026-11-22	G	Lief am Montag mal was schief?	D:2026-11-16	D:2026-11-16
+d3-053	2026-11-22	G	Ging am Donnerstag mal wieder der Server down?	D:2026-11-19	D:2026-11-19
+d3-054	2026-11-22	G	Lag es am Montag mal wieder am DNS?	D:2026-11-16	D:2026-11-16
+d3-055	2026-11-22	G	Fiel dir am Freitag mal was auf?	D:2026-11-20	D:2026-11-20
+d3-056	2026-11-22	G	Sah es am Dienstag mal besser aus?	D:2026-11-17	D:2026-11-17
+d3-057	2026-11-22	G	Stand am Montag mal wieder alles?	D:2026-11-16	D:2026-11-16
+d3-058	2026-11-22	G	Nahm uns am Freitag jemand die Arbeit ab?	D:2026-11-20	D:2026-11-20
+d3-059	2026-11-22	G	Fehlte dir am Montag mal was?	D:2026-11-16	D:2026-11-23
+d3-060	2026-11-22	G	Krachte es am Mittwoch mal wieder im Cluster?	D:2026-11-18	D:2026-11-25

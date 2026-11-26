@@ -1152,9 +1152,11 @@ func TestMatchAnnualHoliday_Positive(t *testing.T) {
 		expectedDate string
 		expectedRef  string
 	}{
-		{"Weihnachten", "an Weihnachten 2025 war viel los", "2026-12-25", "Weihnachten"},
-		{"Silvester", "Silvester war toll", "2026-12-31", "Silvester"},
-		{"Neujahr", "Neujahr feiern wir immer", "2026-01-01", "Neujahr"},
+		// The year written behind the holiday, else the last one for a
+		// question in the past and the next one otherwise (issue #532).
+		{"Weihnachten", "an Weihnachten 2025 war viel los", "2025-12-25", "Weihnachten"},
+		{"Silvester", "Silvester war toll", "2025-12-31", "Silvester"},
+		{"Neujahr", "Neujahr feiern wir immer", "2027-01-01", "Neujahr"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
