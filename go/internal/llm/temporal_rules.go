@@ -2143,9 +2143,9 @@ func beforeNoNoun(words []string, i int) bool {
 }
 
 // englishAfterVerb are adverbs that follow a verb and no noun ("fired twice
-// on Monday", "left early on Friday"), and the pronouns that are its object
-// ("The pager woke everyone on Sunday"), issue #532.
-var englishAfterVerb = toWordSet("twice", "once", "early", "late", "overnight", "everyone", "everybody", "someone",
+// on Monday", "left early on Friday", "went well"), and the pronouns that
+// are its object ("The pager woke everyone on Sunday"), issue #532.
+var englishAfterVerb = toWordSet("twice", "once", "early", "late", "overnight", "well", "everyone", "everybody", "someone",
 	"somebody", "anyone", "anybody", "nobody")
 
 // strongPastForms are the simple past of the strong and mixed German verbs a
@@ -4520,12 +4520,17 @@ func (c clauseWords) greetingAt(i int) bool {
 }
 
 // attributivePartAt reports whether word i of c, an English part of the day,
-// is a word of a noun phrase and names no time (attributiveOpeners).
+// is a word of a noun phrase and names no time (attributiveOpeners): it
+// modifies a noun behind it (partBeforeNoun), or it is a part of another day
+// behind "that" or "last" ("What happened that night?", "Was the last night
+// productive?") or a name written with its capital ("the Evening Standard").
+// Without a noun behind it, it heads its phrase and names today's part of
+// the day ("How was the evening?").
 func (c clauseWords) attributivePartAt(i int) bool {
 	if !englishDayParts[c.words[i]] || i == 0 || c.starts[i] {
 		return false
 	}
-	prev := c.words[i-1]
+	k, prev := i, c.words[i-1]
 	if prev == "last" {
 		if i+1 < len(c.words) && !c.starts[i+1] && c.words[i+1] == "of" {
 			return true
@@ -4535,7 +4540,53 @@ func (c clauseWords) attributivePartAt(i int) bool {
 		}
 		i, prev = i-1, c.words[i-2]
 	}
-	return attributiveOpeners[prev] && (i < 2 || c.starts[i-1] || !timePrepositions[c.words[i-2]])
+	if !attributiveOpeners[prev] || i >= 2 && !c.starts[i-1] && timePrepositions[c.words[i-2]] {
+		return false
+	}
+	return prev == "that" || k > i || c.nameAt(k) || c.partBeforeNoun(k, i-1)
+}
+
+// partBeforeNoun reports whether word k of c, a part of the day behind the
+// opener at word o, modifies a noun behind it in its clause: a word that
+// says of which day the part is (lastNightOf: "the morning of the release"),
+// or a word a noun can be — none of beforeNoNoun and no finite verb ("the
+// night owl", not "the evening is"). Where the phrase is the subject of a
+// question (subjectAt), a word behind it that ends the clause or stands
+// before an adverb is its predicate: "Was the evening productive?", "Did the
+// morning go well?", but "Was the night shift busy?" (issue #532).
+func (c clauseWords) partBeforeNoun(k, o int) bool {
+	n := k + 1
+	if n == len(c.words) || c.starts[n] {
+		return false
+	}
+	if lastNightOf[c.words[n]] {
+		return true
+	}
+	if beforeNoNoun(c.words, k) || englishFiniteWords[c.words[n]] {
+		return false
+	}
+	if !c.subjectAt(o) {
+		return true
+	}
+	m := n + 1
+	return m < len(c.words) && !c.starts[m] && !englishAfterVerb[c.words[m]] && !strings.HasSuffix(c.words[m], "ly")
+}
+
+// subjectAt reports whether the noun phrase that opens at word o of c is the
+// subject of a question behind its auxiliary: one that opens the clause
+// ("Was the evening productive?"), or one that is no form of "be" and no
+// modal (englishMainAux) behind an interrogative that is no subject itself
+// ("How did the afternoon go?", not "Who is the night owl?" or "Who did the
+// night shift?"). An English sentence starts a clause at the interrogative
+// (embeddedClauses).
+func (c clauseWords) subjectAt(o int) bool {
+	if o == 0 || !englishFiniteWords[c.words[o-1]] {
+		return false
+	}
+	if c.starts[o-1] {
+		return true
+	}
+	return o >= 2 && englishInterrogatives[c.words[o-2]] && c.words[o-2] != "who" && !englishMainAux[c.words[o-1]]
 }
 
 // withoutUnreadDayParts returns lower, the lowercased query, with the words

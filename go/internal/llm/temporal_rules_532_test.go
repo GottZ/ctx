@@ -307,3 +307,47 @@ func TestRules_TheReviewOfIssue532(t *testing.T) {
 		"The vendor confirmed the release happens on Friday":                 "2026-11-27/future",
 	})
 }
+
+// TestRules_APartOfTheDayThatHeadsItsPhrase (issue #532, third round): an
+// English part of the day behind an article or a possessive names no time
+// only where it modifies a noun behind it ("the night owl", "my evening
+// routine") or names a part of another day ("the last night of the
+// conference", "that night"). At the end of its clause, before a word no noun
+// can be, or as the subject of a question whose next word is its predicate,
+// it heads its phrase and is today's part of the day.
+func TestRules_APartOfTheDayThatHeadsItsPhrase(t *testing.T) {
+	check517(t, now517, want517{
+		"How was the evening?":                 "2026-11-22/today@19",
+		"How was your evening?":                "2026-11-22/today@19",
+		"How was the night?":                   "2026-11-22/today@23",
+		"How did the afternoon go?":            "2026-11-22/today@15",
+		"How was the evening, and what broke?": "2026-11-22/today@19",
+		"Was the evening productive?":          "2026-11-22/today@19",
+		"Did the morning go well?":             "2026-11-22/today@8",
+		"Did the night pass quietly?":          "2026-11-22/today@23",
+		"What did the evening bring?":          "2026-11-22/today@19",
+		"So how did the night go?":             "2026-11-22/today@23",
+		"How was the evening at the office?":   "2026-11-22/today@19",
+		"How was your evening, Anna?":          "2026-11-22/today@19",
+		"What happens if the night is quiet?":  "2026-11-22/today@23",
+		// counter-cases: a noun behind it, another day's part, a title
+		"What happened during the night?":                    "2026-11-22/today@23",
+		"What happened in the evening?":                      "2026-11-22/today@19",
+		"Who is the night owl in the team?":                  "nil",
+		"What did we decide at the morning standup?":         "2026-11-22/today@8",
+		"Is the night owl online?":                           "nil",
+		"Was the night shift busy?":                          "nil",
+		"Was the morning standup cancelled?":                 "nil",
+		"Did the morning standup go well?":                   "nil",
+		"When did the night shift start?":                    "nil",
+		"Who is the night owl?":                              "nil",
+		"What is my evening routine?":                        "nil",
+		"What happened on the last night of the conference?": "nil",
+		"What happened on the morning of the release?":       "nil",
+		"What happened that night?":                          "nil",
+		"Who founded the Evening Standard?":                  "nil",
+		"Who wrote the song Tonight's the Night?":            "nil",
+		"Was the last night productive?":                     "nil",
+		"Who did the night shift?":                           "nil",
+	})
+}
