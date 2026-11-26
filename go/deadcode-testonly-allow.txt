@@ -253,3 +253,4 @@ internal/testgoroutine/testgoroutine.go	TakeSettled	# testgoroutine: Testhelfer 
 migrations/fold.go	IsFolded	# Prod iteriert Folded() (store/migrations.go:268, check.go:164); IsFolded nur in fold_test.go:84/87
 migrations/fold.go	Section	# Nur Tests lesen Migrations-SQL über Section (fold_test.go:34 + 33 Integrationstests); Runner nutzt FS
 internal/gatewaylimits/gatewaylimits.go	FieldError.Error	# W06-15: FieldError erfüllt error für Tests und %v-Logs; die Handler schreiben Field/Code/Msg einzeln (400 + param)
+internal/backends/orwindow.go	EndpointCache.ResetForTest	# the llm auto-window tests run through the process-wide discovery cache and empty it per stub (httptest reuses ports)
