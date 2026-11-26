@@ -24,10 +24,10 @@ RANDOM_UID_COLUMNS = ("message_uid", "tool_call_uid", "tool_call_uids")
 
 def _db(path):
     require_upstream()
-    from hermes_state import SessionDB
+    from ctx_handover.tests.fakes.hoststore import open_session_db
 
     path.mkdir(parents=True, exist_ok=True)
-    return SessionDB(path / "state.db")
+    return open_session_db(path / "state.db")
 
 
 def _rows(db, sid, *, uids: bool = False):

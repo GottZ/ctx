@@ -121,7 +121,9 @@ class SessionBuilder:
     ) -> None:
         if tick <= 0:
             raise ValueError("tick must be positive")
-        self.db = db
+        from ctx_handover.tests.fakes.hoststore import as_test_db
+
+        self.db = as_test_db(db)
         self.clock = clock
         self.tick = float(tick)
         self.templates = templates

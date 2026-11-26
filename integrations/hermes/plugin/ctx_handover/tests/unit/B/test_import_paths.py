@@ -138,14 +138,15 @@ def test_path_a_and_b_prime_agree(make_session, session_db, target_db, store, so
     two paths are interchangeable for every message column (B′ only loses the session counters, DESIGN §6.8)."""
     from dataclasses import replace
 
-    from hermes_state import SessionDB
+    from ctx_handover.tests.fakes.hoststore import open_session_db
 
     tip = rich_lineage(make_session)
     info, cap = export(session_db, store, tip, source_paths)
     capsule = session_export.read_capsule(store, cap.capsule_id, max_json_bytes=64 * 1024**2)
     plan_a = plan(target_db, capsule, target_cwd)
     prepared_a = session_import.import_hidden(target_db, store, cap.capsule_id, plan_a)
-    other = SessionDB(tmp_path / "other-target.db")
+    (tmp_path / "other-target").mkdir()
+    other = open_session_db(tmp_path / "other-target" / "state.db")
     try:
         plan_b = plan(other, capsule, target_cwd)
         plan_b = replace(plan_b, segments=tuple(replace(s, path="B'") for s in plan_b.segments))

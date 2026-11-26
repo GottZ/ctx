@@ -90,6 +90,10 @@ STATIC_HERMES_NAMES = frozenset(
         "run_agent",
         "cli",
         "utils",
+        # the storage interface (Hermes v0.23.3 and later): absent from an older checkout, Hermes' all the same
+        "persistence",
+        "persistence_assembly",
+        "storage_limits",
     }
 )
 

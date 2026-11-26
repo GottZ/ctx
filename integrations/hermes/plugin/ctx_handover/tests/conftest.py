@@ -24,7 +24,9 @@ Fixtures
 --------
 ``user_home``     the isolated ``$HOME`` (Path)
 ``hermes_home``   the isolated ``HERMES_HOME`` = ``<tmp>/hermes-home`` (Path, exists)
-``session_db``    a real ``hermes_state.SessionDB`` at ``hermes_home / "state.db"``
+``session_db``    the real session store at ``hermes_home / "state.db"`` as the engine opens it
+                  (``tests.fakes.hoststore.open_session_db``: ``hermes_state.SessionDB``, or the storage
+                  interface's ``hostcompat.StoreSessionDB`` with the test write paths)
 ``make_session``  ``tests.fakes.sessiondb.SessionBuilder`` over ``session_db`` — lineages are built
                   through the core's own paths only (no SQL, no import flags); ``large_segment`` on it copies a
                   session-wide template per shape (``segment_templates``, contract K-6)
@@ -124,9 +126,9 @@ def clock():
 @pytest.fixture
 def session_db(hermes_home):
     require_upstream()
-    from hermes_state import SessionDB
+    from ctx_handover.tests.fakes.hoststore import open_session_db
 
-    db = SessionDB(hermes_home / "state.db")
+    db = open_session_db(hermes_home / "state.db")
     try:
         yield db
     finally:
@@ -205,11 +207,11 @@ class SegmentTemplates:
         return (*shape, kw, builder.now(), *builder.counters(), builder.tick)
 
     def _fresh_db(self):
-        from hermes_state import SessionDB
+        from ctx_handover.tests.fakes.hoststore import open_session_db
 
         folder = self.root / f"t{len(self._entries):03d}-{uuid.uuid4().hex[:8]}"
         folder.mkdir(parents=True)
-        return SessionDB(folder / "state.db")
+        return open_session_db(folder / "state.db")
 
     def _pristine_state(self) -> tuple[dict[str, int], list[tuple]]:
         if self._pristine is None:

@@ -24,7 +24,8 @@ State is plain attributes a test may change:
 Paths come from the isolated test home: ``effective_home()`` = ``user_home`` = ``HOME``, ``hermes_home`` =
 ``HERMES_HOME`` = ``hermes_root`` (one profile), the document cache ``<hermes_home>/cache/documents``, the plugin
 data dir ``<hermes_home>/plugin-data/ctx_handover``.
-``session_db()`` opens a real ``hermes_state.SessionDB`` at ``<hermes_home>/state.db`` when Hermes is importable.
+``session_db()`` opens the real session store at ``<hermes_home>/state.db`` when Hermes is importable, as the real
+``hostcompat.session_db`` does (``tests.fakes.hoststore.open_session_db``).
 ``redact`` uses the core's ``redact_sensitive_text(force=True)`` when importable, else a small offline stand-in.
 """
 
@@ -101,9 +102,9 @@ class FakeHost:
 
     def session_db(self, path: Path | None = None):
         self._record("session_db")
-        from hermes_state import SessionDB
+        from ctx_handover.tests.fakes.hoststore import open_session_db
 
-        return SessionDB(Path(path) if path is not None else self.hermes_home / "state.db")
+        return open_session_db(Path(path) if path is not None else self.hermes_home / "state.db")
 
     def state_db_path(self) -> Path:
         self._record("state_db_path")

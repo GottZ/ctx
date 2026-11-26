@@ -34,9 +34,9 @@ def target_db(target_home):
     from ctx_handover.tests.conftest import require_upstream
 
     require_upstream()
-    from hermes_state import SessionDB
+    from ctx_handover.tests.fakes.hoststore import open_session_db
 
-    db = SessionDB(target_home / "state.db")
+    db = open_session_db(target_home / "state.db")
     try:
         yield db
     finally:

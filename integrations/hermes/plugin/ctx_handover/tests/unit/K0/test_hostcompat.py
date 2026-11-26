@@ -42,9 +42,17 @@ def test_hostcompat_import_is_lazy(tmp_path):
     assert out.stdout.strip() == "[]"
 
 
+def _store_host() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("persistence_assembly") is not None
+
+
 def test_features_against_real_hermes(monkeypatch):
     feats = hostcompat.features()
     assert feats.session_db_ok and feats.plugin_llm and feats.missing == ()
+    expected = hostcompat.SESSION_STORE_PERSISTENCE if _store_host() else hostcompat.SESSION_STORE_SESSIONDB
+    assert feats.session_store == expected
     assert not (feats.side_question or feats.ask_choice or feats.post_message or feats.host_isolated)
     ctx = FakeCtx()
     feats = hostcompat.features(ctx)
@@ -55,10 +63,66 @@ def test_features_against_real_hermes(monkeypatch):
 
 
 def test_required_sessiondb_methods_exist_on_the_floor_tree():
-    from hermes_state import SessionDB
+    """The host's session store offers everything the plugin calls: on a ``SessionDB`` host every method of
+    ``REQUIRED_SESSIONDB_METHODS``, on a storage-interface host every verb of ``REQUIRED_STORE_VERBS`` on the
+    repository protocols ``persistence_assembly.PersistenceStore`` names (the compatibility ``SessionDB`` there lacks
+    most of the old methods, issue GottZ/ctx#570). Mutant: one verb renamed in the table → red on the store host."""
+    if not _store_host():
+        from hermes_state import SessionDB
 
-    missing = [m for m in hostcompat.REQUIRED_SESSIONDB_METHODS if not callable(getattr(SessionDB, m, None))]
+        missing = [m for m in hostcompat.REQUIRED_SESSIONDB_METHODS if not callable(getattr(SessionDB, m, None))]
+        assert missing == []
+        return
+    from persistence_assembly import PersistenceStore
+
+    hints = inspect.get_annotations(PersistenceStore, eval_str=True)
+    missing = [
+        f"{repo}.{verb}"
+        for repo, verbs in hostcompat.REQUIRED_STORE_VERBS.items()
+        for verb in verbs
+        if not callable(getattr(hints.get(repo), verb, None))
+    ]
     assert missing == []
+
+
+def test_features_name_what_the_hosts_store_lacks(monkeypatch):
+    """A verb or method the host's store does not offer makes ``session_db_ok`` false and is named in ``missing``
+    with its interface — never silently passed over (issue GottZ/ctx#570: ``doctor`` names what is missing)."""
+    hostcompat._static_features.cache_clear()
+    try:
+        if _store_host():
+            verbs = dict(hostcompat.REQUIRED_STORE_VERBS)
+            verbs["messages"] = (*verbs["messages"], "no_such_verb")
+            monkeypatch.setattr(hostcompat, "REQUIRED_STORE_VERBS", verbs)
+            want = "persistence.messages.no_such_verb"
+        else:
+            monkeypatch.setattr(
+                hostcompat, "REQUIRED_SESSIONDB_METHODS", (*hostcompat.REQUIRED_SESSIONDB_METHODS, "no_such_method")
+            )
+            want = "SessionDB.no_such_method"
+        feats = hostcompat.features()
+        assert not feats.session_db_ok and feats.missing == (want,)
+    finally:
+        hostcompat._static_features.cache_clear()
+
+
+def test_session_db_is_the_hosts_store(hermes_home):
+    """``session_db`` hands out the store the host has: ``hermes_state.SessionDB`` without the storage interface,
+    ``StoreSessionDB`` over ``open_persistence`` with it — both at the profile's ``state.db``. A ``StoreSessionDB`` path
+    must name a ``state.db`` (the interface opens a profile's store, never another file)."""
+    db = hostcompat.session_db(hermes_home / "state.db")
+    try:
+        if _store_host():
+            assert isinstance(db, hostcompat.StoreSessionDB)
+            assert Path(db.db_path) == hermes_home / "state.db"
+            with pytest.raises(ValueError):
+                hostcompat.session_db(hermes_home / "other.db")
+        else:
+            from hermes_state import SessionDB
+
+            assert type(db) is SessionDB
+    finally:
+        db.close()
 
 
 def test_session_db_paths_and_plugin_dir(hermes_home):
@@ -210,6 +274,7 @@ def test_plugin_llm_adapter(monkeypatch):
 
 
 def test_missing_hermes_degrades_to_capability_missing(monkeypatch):
+    monkeypatch.setitem(sys.modules, "persistence_assembly", None)
     monkeypatch.setitem(sys.modules, "hermes_state", None)
     monkeypatch.setitem(sys.modules, "agent.plugin_llm", None)
     with pytest.raises(CapabilityMissing) as info:

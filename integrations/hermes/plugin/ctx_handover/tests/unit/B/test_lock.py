@@ -52,9 +52,9 @@ def _row(db, sid):
 _DEAD_HOLDER = """
 import os, sys
 from pathlib import Path
-from hermes_state import SessionDB
 from ctx_handover.engine.lock import holder_string
-db = SessionDB(Path(sys.argv[1]))
+from ctx_handover.tests.fakes.hoststore import open_session_db
+db = open_session_db(Path(sys.argv[1]))
 holder = holder_string("01JDEADHOLDER") if sys.argv[3] == "stamped" else f"pid={os.getpid()}:ctx_handover:job=x"
 assert db.try_acquire_session_turn_lease(sys.argv[2], holder, ttl_seconds=300, patience_s=2.0)
 print(holder, flush=True)
@@ -367,11 +367,11 @@ def test_primary_lock_without_plugin(session_db, make_session, ledger, hermes_ho
 
     Mutant: ``prepare`` skips p5 (``set_session_archived``).
     """
-    from hermes_state import SessionDB
+    from ctx_handover.tests.fakes.hoststore import open_session_db
 
     tip = build(make_session)
     info, _ = prepared(session_db, ledger, tip)
-    fresh = SessionDB(hermes_home / "state.db")
+    fresh = open_session_db(hermes_home / "state.db")
     try:
         for seg in info.lineage_ids:
             row = fresh.get_session(seg)
