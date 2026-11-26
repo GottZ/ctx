@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 	"github.com/GottZ/ctx/migrations"
 )
@@ -318,7 +319,7 @@ func TestMetaLiveness_AdvisoryLockKeepsCandidateN(t *testing.T) {
 	}
 
 	// The advisory-lock skip carries no candidates (nil map).
-	if err := StampAttempt(ctx, pool, []string{"private"}, "advisory-lock", nil, time.Now()); err != nil {
+	if err := StampAttempt(ctx, pool, "", []string{"private"}, "advisory-lock", nil, time.Now()); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 
@@ -355,7 +356,7 @@ func TestMetaLiveness_GlobalSuccessKeepsSkipOnlyRow(t *testing.T) {
 
 	// A partition that only ever recorded an ATTEMPT — no blocks, no cluster
 	// rows, no computed_at.
-	if err := StampAttempt(ctx, pool, []string{"over-cap"}, "node-cap",
+	if err := StampAttempt(ctx, pool, "", []string{"over-cap"}, "node-cap",
 		map[string]int{"over-cap": 1204331}, time.Now()); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
@@ -385,4 +386,50 @@ func TestMetaLiveness_GlobalSuccessKeepsSkipOnlyRow(t *testing.T) {
 // the B3 helpers take the id, and the two partitions must not collide.
 func uuidSeq(prefix string, i int) string {
 	return fmt.Sprintf("019d0000-0000-7000-9000-00000000%s%03x", prefix, i)
+}
+
+// TestStampAttemptHoldsTheRunTenantsGate (issue #555, code-owner review): the
+// scoped stamp creates the meta rows of its scopes, so it holds the run
+// tenant's gate. A stamp for a tenant that is not active any more — its delete
+// has begun — writes nothing: before, a run that outlived its tenant's delete
+// left the rows in scope names the next owner gets.
+func TestStampAttemptHoldsTheRunTenantsGate(t *testing.T) {
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	tn, err := store.CreateTenant(ctx, pool, "stampgate", "stampgate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const scope = "stampgate-1"
+	if _, err := store.AssignTenantScope(ctx, pool, tn.ID, scope, nil); err != nil {
+		t.Fatal(err)
+	}
+	count := func() int {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM graph_overview_meta WHERE scope = $1`, scope).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	// An active tenant: the stamp writes its row.
+	if err := StampAttempt(ctx, pool, tn.ID, []string{scope}, "timeout", nil, time.Now()); err != nil {
+		t.Fatalf("stamp for an active tenant: %v", err)
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("%d meta rows after the stamp of an active tenant, want 1", n)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM graph_overview_meta WHERE scope = $1`, scope); err != nil {
+		t.Fatal(err)
+	}
+	// The delete's first step.
+	if _, err := store.UpdateTenant(ctx, pool, tn.ID, "offboarding", ""); err != nil {
+		t.Fatal(err)
+	}
+	err = StampAttempt(ctx, pool, tn.ID, []string{scope}, "timeout", nil, time.Now())
+	if !errors.Is(err, store.ErrRunTenantGone) {
+		t.Errorf("stamp for a tenant whose delete has begun: %v, want ErrRunTenantGone", err)
+	}
+	if n := count(); n != 0 {
+		t.Errorf("%d meta row(s) written for a tenant whose delete has begun", n)
+	}
 }

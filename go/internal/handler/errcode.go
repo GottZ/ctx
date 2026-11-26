@@ -257,6 +257,10 @@ func errResultReject(rej *writeReject) *mcp.CallToolResult {
 // The cause never reaches the client: it lives in the log line alone, and the
 // wire text is the fixed one writeInternal owns.
 func internalError(w http.ResponseWriter, ctx context.Context, logMsg string, err error) {
+	if rej := requestKeyGoneReject(err); rej != nil {
+		writeJSONReject(w, rej) // a refusal, not a fault (issue #555): no line
+		return
+	}
 	logRequestError(ctx, logMsg, "error", err, "request_id", RequestIDFromContext(ctx))
 	writeInternal(w)
 }

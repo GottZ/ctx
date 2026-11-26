@@ -243,7 +243,9 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if logErr := store.LogAccess(bgCtx, h.pool, authResult.ApiKeyID, block.ID, "write"); logErr != nil {
+		// A key deleted by its tenant's delete after the write committed (issue
+		// #555) leaves nothing to book on; the delete takes the block as well.
+		if logErr := store.LogAccess(bgCtx, h.pool, authResult.ApiKeyID, block.ID, "write"); logErr != nil && !errors.Is(logErr, store.ErrRequestKeyGone) {
 			slog.Error("store: write log error", "error", logErr, "request_id", reqID)
 		}
 	}()

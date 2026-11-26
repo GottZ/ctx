@@ -284,3 +284,50 @@ func TestRefusedSingleUpdateRunsNoStatement(t *testing.T) {
 		t.Errorf("update that changes nothing, key without budget: %v — want it not refused", err)
 	}
 }
+
+// TestRefusedBatchRunsNoStatement (issue #555, point 6): a block batch of a
+// key whose budget is used up is refused before its first write — by the
+// count without the lock, after the lock pass has decided which items
+// write — instead of running every write, its triggers and its parent links
+// and rolling them back. A trigger fails the statement of the marked item:
+// before, the batch answered with the trigger's error. A batch whose items
+// all change nothing is still neither counted nor refused.
+func TestRefusedBatchRunsNoStatement(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool := testdb.SetupTestDB(t)
+	ctx := context.Background()
+	key, _, err := store.CreateApiKey(ctx, pool, "batch-refused", "private", nil, store.DefaultTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE FUNCTION zz_batch_statement_ran() RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN IF NEW.content = 'statement ran' THEN RAISE EXCEPTION 'statement ran'; END IF; RETURN NEW; END $$`,
+		`CREATE TRIGGER zz_batch_statement_ran BEFORE INSERT OR UPDATE ON context_blocks
+		 FOR EACH ROW EXECUTE FUNCTION zz_batch_statement_ran()`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	budget := &store.WriteBudget{APIKeyID: key.ID, Limit: 1}
+	item := func(title, content string) store.BatchUpsert {
+		return store.BatchUpsert{Category: "learnings", Title: title, Content: content, Scope: "batch-refused", ScopeExplicit: true}
+	}
+	if _, err := store.UpsertBlocks(ctx, pool, []store.BatchUpsert{item("a", "written")}, key.ID, nil, budget); err != nil {
+		t.Fatal(err)
+	}
+	var refused *store.WriteBudgetError
+	_, err = store.UpsertBlocks(ctx, pool, []store.BatchUpsert{item("b", "statement ran"), item("c", "written")}, key.ID, nil, budget)
+	if !errors.As(err, &refused) {
+		t.Fatalf("batch of a key without budget: %v, want the budget's refusal before the first write", err)
+	}
+	if refused.Writes != 2 || refused.Used != 1 {
+		t.Errorf("the early refusal counted %d writes beside %d used, want 2 and 1", refused.Writes, refused.Used)
+	}
+	if _, err := store.UpsertBlocks(ctx, pool, []store.BatchUpsert{item("a", "written")}, key.ID, nil, budget); err != nil {
+		t.Errorf("a batch that changes nothing, key without budget: %v — want it neither counted nor refused", err)
+	}
+}

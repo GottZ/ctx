@@ -577,6 +577,16 @@ func (s *Scheduler) SetProjectHub(hub *ProjectHub) {
 type backgroundTenant struct {
 	scope string
 	owned []string
+	// id is the tenant (issue #555): a run's writes for it hold its gate
+	// (store.WithRunTenant, runCtx), so a run that read the tenant before
+	// its delete writes nothing after the delete's first step. "" in the
+	// tenant-less fallback, which holds nothing.
+	id string
+}
+
+// runCtx is ctx carrying bt's tenant for the run's writes (store.WithRunTenant).
+func (bt backgroundTenant) runCtx(ctx context.Context) context.Context {
+	return store.WithRunTenant(ctx, bt.id)
 }
 
 // backgroundTenants returns the per-tenant resolution context the background
@@ -647,12 +657,12 @@ func (s *Scheduler) backgroundTenantFor(ctx context.Context, t store.Tenant) (ba
 		}
 		// owned may be nil (no rows yet) -> unbounded fallback; or
 		// {private,shared,work} -> clamps to the byte-identical legacy set.
-		return backgroundTenant{scope: store.GlobalScope, owned: owned}, true
+		return backgroundTenant{scope: store.GlobalScope, owned: owned, id: t.ID}, true
 	}
 	if err != nil || len(owned) == 0 {
 		return backgroundTenant{}, false
 	}
-	return backgroundTenant{scope: owned[0], owned: owned}, true
+	return backgroundTenant{scope: owned[0], owned: owned, id: t.ID}, true
 }
 
 // backgroundTenantScopes projects backgroundTenants to the config-resolution
@@ -1095,7 +1105,11 @@ func (s *Scheduler) runDailySynthesis(ctx context.Context) {
 
 			slog.Info("scheduler: daily synthesis started", "scope", scope)
 
-			blockID, err := dream.GenerateDailyReport(ctx, s.pool, router, scope)
+			blockID, err := dream.GenerateDailyReport(bt.runCtx(ctx), s.pool, router, scope)
+			if errors.Is(err, store.ErrRunTenantGone) {
+				slog.Info("scheduler: daily synthesis skipped — its tenant is not active", "scope", scope)
+				continue
+			}
 			if err != nil {
 				slog.Error("scheduler: daily synthesis failed", "error", err, "scope", scope)
 				continue
@@ -1403,7 +1417,16 @@ func (s *Scheduler) stampOverviewAttempt(ctx context.Context, bt backgroundTenan
 	// why the status section carries the reason alongside the number instead of
 	// the number alone.
 	s.consecutiveOverviewFails.Add(1)
-	if err := overview.StampAttempt(ctx, s.pool, bt.owned, reason, candidates, attemptStart); err != nil {
+	err := overview.StampAttempt(ctx, s.pool, bt.id, bt.owned, reason, candidates, attemptStart)
+	if errors.Is(err, store.ErrRunTenantGone) {
+		// The tenant's delete began since the cycle read it (issue #555): no
+		// row of its scopes is written after that. This is also where a
+		// refusal of the worker process ends, which arrives as text and takes
+		// the error exit of the rebuild.
+		slog.Info("scheduler: overview attempt not stamped — its tenant is not active", "reason", reason, "tenant_scope", bt.scope)
+		return
+	}
+	if err != nil {
 		slog.Error("scheduler: overview attempt stamp failed", "error", err,
 			"reason", reason, "tenant_scope", bt.scope, "scope_filter", bt.owned)
 	}
@@ -1455,6 +1478,8 @@ func (s *Scheduler) renderRootMap(ctx context.Context, bt backgroundTenant) {
 		effectiveHomeScope(cfgT.Scheduler.HomeScope, bt.owned),
 		store.IntersectWindow(cfgT.Scheduler.ReadScopes, bt.owned))
 	switch {
+	case errors.Is(err, store.ErrRunTenantGone):
+		slog.Info("scheduler: root map skipped — its tenant is not active", "tenant_scope", bt.scope)
 	case err != nil:
 		slog.Warn("scheduler: root map failed", "error", err, "tenant_scope", bt.scope)
 	case res.Written:
@@ -1496,7 +1521,7 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// map reads the liveness row this very attempt just wrote. It takes the
 	// OUTER ctx on purpose — on the timeout path rctx is expired exactly when
 	// the map is due.
-	defer s.renderRootMap(ctx, bt)
+	defer s.renderRootMap(bt.runCtx(ctx), bt)
 	cfg := s.cfg.Snapshot() //nolint:forbidigo // MT 06 background: overview rebuild gate/resolution/cap/timeout are server-global policy knobs, not tenant-scoped — the B-W6 per-tenant loop varies the SCOPE FILTER per tick, not these.
 	if !cfg.GraphOverview.Enabled {
 		s.stampOverviewAttempt(ctx, bt, "disabled", nil, attemptStart)
@@ -1568,6 +1593,7 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 	// keinen Lauf verhindern — es wird laut geloggt, und FinishRun laeuft mit
 	// leerer runID ins no-op.
 	runID, jerr := overview.StartRun(ctx, s.pool, overview.RunStart{
+		Tenant:     bt.id,
 		ScopeSet:   bt.owned,
 		Engine:     cfg.GraphOverview.Engine,
 		Resolution: cfg.GraphOverview.Resolution,
@@ -1582,6 +1608,12 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 			cfg.GraphOverview.MaxNodes, cfg.GraphOverview.MaxNodesCtx),
 		ParentRSSKb: overview.ReadVmHWMkB(),
 	})
+	if errors.Is(jerr, store.ErrRunTenantGone) {
+		// The tenant's delete has begun (issue #555): no journal row, no
+		// rebuild; the next cycle leaves the tenant out.
+		slog.Info("scheduler: overview rebuild skipped — its tenant is not active", "tenant_scope", bt.scope)
+		return
+	}
 	if jerr != nil {
 		slog.Error("scheduler: overview run journal not opened", "error", jerr,
 			"tenant_scope", bt.scope, "scope_filter", bt.owned)
@@ -1592,6 +1624,7 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		OverviewTypes: typeSet.OverviewTypes(),
 		MaxNodes:      cfg.GraphOverview.MaxNodes,
 		ScopeFilter:   bt.owned,
+		RunTenant:     bt.id,
 		// S3: der CSR-Loader steuert den Rechenpfad IM KIND, also muss der
 		// Schalter ueber die Prozessgrenze. Default aus.
 		CSRLoader: cfg.GraphOverview.CSRLoader,
@@ -1621,6 +1654,15 @@ func (s *Scheduler) rebuildOverviewOnce(ctx context.Context, bt backgroundTenant
 		SuperMinResolution: cfg.RootMap.SuperMinResolution,
 		SuperMaxNodes:      cfg.RootMap.SuperMaxNodes,
 	})
+	if errors.Is(err, store.ErrRunTenantGone) {
+		// The tenant's delete began while the rebuild ran (issue #555): its
+		// persist wrote nothing, and the next cycle leaves the tenant out.
+		// (Through the worker process the error arrives as text and is
+		// logged below.)
+		slog.Info("scheduler: overview rebuild skipped — its tenant is not active", "tenant_scope", bt.scope)
+		s.closeOverviewRun(ctx, runID, overview.RunResult{Outcome: "failed", SkipReason: "tenant-deleted", Stats: stats})
+		return
+	}
 	if err != nil {
 		// W-A: distinguish the two failure shapes the map has to tell apart.
 		// A rebuild_timeout SIGKILLs the worker child (overview_worker.go:
@@ -1950,7 +1992,7 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 		return
 	}
 	search := s.cfg.Snapshot().GuardSearch() //nolint:forbidigo // MT 06 background: the guard batch is ONE process-wide run over every tenant's blocks; how it searches is global-only (#381).
-	processed, err := guard.RunGuardBatch(ctx, s.pool, s.blocktypes.Snapshot(), guardBatchLimit, search)
+	processed, deferred, err := guard.RunGuardBatchDeferring(ctx, s.pool, s.blocktypes.Snapshot(), guardBatchLimit, search)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -1959,13 +2001,19 @@ func (s *Scheduler) runGuard(ctx context.Context) {
 		return
 	}
 
+	// A run that deferred a verdict (its block's neighbour held by a purge, a
+	// prune, a supersedes write) leaves the guard pending (issue #555): the
+	// next tick of the guard ticker — guardInterval, the pause — runs it again
+	// and decides the block once the holder is gone, without waiting for the
+	// next block write. Beside a holder that keeps its rows the run comes back
+	// once per tick, not in a loop.
 	s.mu.Lock()
-	if processed == 0 {
+	if processed == 0 && deferred == 0 {
 		s.guardPending = false
 	}
 	s.mu.Unlock()
 
-	slog.Info("scheduler: guard batch complete", "processed", processed)
+	slog.Info("scheduler: guard batch complete", "processed", processed, "deferred", deferred)
 }
 
 // runDreamLoop runs dream cycles continuously in its own goroutine.
@@ -2308,7 +2356,11 @@ func (s *Scheduler) runDigest(ctx context.Context) {
 		}
 		window := store.IntersectWindow(cfg.Scheduler.ReadScopes, bt.owned)
 		slog.Info("scheduler: running digest", "scope", homeScope)
-		res, err := run(ctx, s.pool, s.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, bt.scope, homeScope, window)
+		res, err := run(bt.runCtx(ctx), s.pool, s.blocktypes, cfg.Digest.Mode, cfg.Dream.Language, bt.scope, homeScope, window)
+		if errors.Is(err, store.ErrRunTenantGone) {
+			slog.Info("scheduler: digest skipped — its tenant is not active", "scope", homeScope)
+			continue
+		}
 		if res.MapID != "" {
 			maps = append(maps, res.MapID)
 		}

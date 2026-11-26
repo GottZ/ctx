@@ -101,6 +101,10 @@ func (h *WebhookSecretHandler) HandleCreate(w http.ResponseWriter, r *http.Reque
 			return false
 		}
 		if _, err := store.PutSecret(ctx, tx, name, row.Scope, nonce, ct, 1, actorID(r)); err != nil {
+			if rej := requestKeyGoneReject(err); rej != nil {
+				writeJSONReject(w, rej) // the key was deleted while the request ran (issue #555)
+				return false
+			}
 			h.fail(w, r, "webhook-secret: persist", err)
 			return false
 		}

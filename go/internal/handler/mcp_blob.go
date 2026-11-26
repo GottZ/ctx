@@ -35,6 +35,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/pgxdb"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -326,6 +327,9 @@ func mcpStageBlobLink(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, i
 	noteToolBlob(ctx, blobID)
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, scope, store.OpBlobLink, "mcp", canonical, hash, ttl)
 	noteToolStaged(ctx, err, false)
+	if rej := requestKeyGoneReject(err); rej != nil {
+		return errResultReject(rej), nil, nil // the key was deleted while the request ran (issue #555)
+	}
 	if err != nil {
 		logRequestError(ctx, "mcp: stage pending blob link failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
@@ -453,6 +457,9 @@ func mcpStageBlobStore(ctx context.Context, cfg MCPConfig, ar *auth.AuthResult, 
 
 	pw, err := store.StagePendingWrite(ctx, cfg.Pool, ar.ApiKeyID, writeScope, store.OpBlobStore, "mcp", canonical, hash, ttl)
 	noteToolStaged(ctx, err, false)
+	if rej := requestKeyGoneReject(err); rej != nil {
+		return errResultReject(rej), nil, nil // the key was deleted while the request ran (issue #555)
+	}
 	if err != nil {
 		logRequestError(ctx, "mcp: stage pending blob write failed", "error", err, "write_outcome", statementOutcome(err), "request_id", reqID)
 		return classInternal.errResult("stage failed: could not persist the staged write"), nil, nil
@@ -503,9 +510,14 @@ func mcpBlobFetchHandler(cfg MCPConfig) mcp.ToolHandlerFor[blobFetchInput, any] 
 		// A category+title read resolves to the id first and then takes the
 		// same ranged path — one range implementation, not one per selector.
 		blob, err := blobFetchTarget(ctx, cfg, ar, input, length)
+		if pgxdb.MalformedUUID(err) {
+			// An id that is no uuid names no blob: the answer of an unknown
+			// id, no line (issue #555; before, the cast's error text).
+			blob, err = nil, nil
+		}
 		if err != nil {
 			logRequestError(ctx, "mcp blob_fetch: query error", "error", err, "request_id", RequestIDFromContext(ctx))
-			return errResult(fmt.Sprintf("blob_fetch failed: %v", err)), nil, nil
+			return classInternal.errResult("blob_fetch failed: internal error"), nil, nil // the cause in the line (issue #555)
 		}
 		if blob == nil {
 			return errResult("blob not found"), nil, nil

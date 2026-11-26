@@ -170,6 +170,10 @@ type BatchResult struct {
 // Lock order, the same for every batch, so two batches never wait for each
 // other in opposite orders:
 //
+//  0. the request key's gate, a shared advisory lock (holdRequestKey, issue
+//     #555) — a batch whose key a tenant-delete removed, or took a scope
+//     from, writes nothing; it waits for nothing but that delete's key step,
+//     so it comes before every lock below;
 //  1. the supersedes lock of every scope the batch names — written or not,
 //     an update item's current scope (read without a lock first,
 //     readBatchUpdateTargets) and the scope it moves to — EXCLUSIVE, in sorted
@@ -229,7 +233,7 @@ func UpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUpsert, 
 	var results []BatchResult
 	err = writeSupersedesSourceScopes(ctx, pool, pgxdb.At("store: upsert block batch"), func(tx pgx.Tx, extra []string) error {
 		var err error
-		if results, err = upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types, extra); err != nil {
+		if results, err = upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types, extra, budget); err != nil {
 			return err
 		}
 		if budget == nil {
@@ -271,7 +275,7 @@ func CheckUpsertBlocks(ctx context.Context, pool *pgxpool.Pool, items []BatchUps
 		return err
 	}
 	err = writeSupersedesSourceScopes(ctx, pool, pgxdb.At("store: check block batch"), func(tx pgx.Tx, extra []string) error {
-		if _, err := upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types, extra); err != nil {
+		if _, err := upsertBlocksTx(ctx, tx, items, prep, apiKeyID, types, extra, nil); err != nil {
 			return err
 		}
 		return pgxdb.ErrRollback
@@ -339,8 +343,13 @@ type batchIdentity struct{ scope, category, title string }
 // update items' scopes read, the scope locks (with extra, the scopes an
 // earlier run of the transaction asked for), the lock pass over every item
 // with its no-op decision, the writes, then the parent links. The budget is
-// the caller's, spent after this (WriteBudget.spend).
-func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep batchPrep, apiKeyID string, types *blocktype.Set, extra []string) ([]BatchResult, error) {
+// the caller's, spent after this (WriteBudget.spend); a budget already used
+// up refuses the batch before its first write (refuseSpentBudget).
+func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep batchPrep, apiKeyID string, types *blocktype.Set, extra []string, budget *WriteBudget) ([]BatchResult, error) {
+	// The request's key before every other lock (issue #555, holdRequestKey).
+	if err := holdRequestKey(ctx, tx); err != nil {
+		return nil, err
+	}
 	current, err := readBatchUpdateTargets(ctx, tx, items)
 	if err != nil {
 		return nil, err
@@ -366,6 +375,9 @@ func upsertBlocksTx(ctx context.Context, tx pgx.Tx, items []BatchUpsert, prep ba
 		holds[i] = h
 	}
 	if err := batchIdentityClash(items, holds); err != nil {
+		return nil, err
+	}
+	if err := refuseSpentBudget(ctx, tx, budget, holds); err != nil {
 		return nil, err
 	}
 	results := make([]BatchResult, len(items))
@@ -555,7 +567,7 @@ func (b WriteBudget) book(ctx context.Context, tx pgx.Tx, blockIDs []string, int
 		blockIDs = []string{}
 	}
 	if _, err := tx.Exec(ctx, writeBookingSQL, b.APIKeyID, blockIDs, intents); err != nil {
-		return fmt.Errorf("store: write booking: %w", err)
+		return fmt.Errorf("store: write booking: %w", requestKeyGoneOr(err))
 	}
 	return nil
 }
@@ -588,6 +600,28 @@ func writeBatchItem(ctx context.Context, tx pgx.Tx, it BatchUpsert, contentTimes
 		return nil, err
 	}
 	return u.execDeclared(ctx, tx, SupersedesDeclaration{TargetID: it.Supersedes, APIKeyID: apiKeyID, Types: types}, tgt)
+}
+
+// refuseSpentBudget is the early refusal of a batch whose key has no budget
+// left for the items that write (issue #555): after the lock pass decided
+// which items change nothing (holds[i].match.Unchanged()), before the first
+// write, the count without the budget lock (WriteBudget.check) — as a single
+// update refuses before its statement (UpdateBlockBooked). Before, such a
+// batch ran every write, its triggers and its parent links and rolled them
+// back when spend refused it. spend, under the lock after the writes, stays
+// the decision for a key with budget left; a batch that writes nothing is
+// neither counted nor refused. nil budget: nothing.
+func refuseSpentBudget(ctx context.Context, tx pgx.Tx, budget *WriteBudget, holds []batchHold) error {
+	if budget == nil {
+		return nil
+	}
+	writes := 0
+	for _, h := range holds {
+		if !h.match.Unchanged() {
+			writes++
+		}
+	}
+	return budget.check(ctx, tx, writes)
 }
 
 // batchLockOrder is the order UpsertBlocks locks and writes the items in: by

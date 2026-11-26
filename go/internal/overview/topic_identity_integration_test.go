@@ -948,7 +948,7 @@ func TestW3EmptyNodeCutDoesNotRetireThePartition(t *testing.T) {
 	// The stamp has to be writable — an unstampable skip is an INVISIBLE
 	// freeze, which is the state migration 123 abolished (migration 126 adds
 	// the vocabulary entry).
-	if err := StampAttempt(ctx, pool, nil, st.SkipReason, st.CandidateCount, time.Now()); err != nil {
+	if err := StampAttempt(ctx, pool, "", nil, st.SkipReason, st.CandidateCount, time.Now()); err != nil {
 		t.Fatalf("stamping the empty-cut skip: %v — chk_gom_skip_reason rejects the value", err)
 	}
 

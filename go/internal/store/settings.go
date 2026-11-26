@@ -374,6 +374,10 @@ func upsertSetting(ctx context.Context, tx pgx.Tx, key, scope string, value, met
 	if len(value) == 0 || !json.Valid(value) {
 		return fmt.Errorf("settings: value must be valid JSON")
 	}
+	// The request's key first (issue #555, holdRequestKey): the row names a scope.
+	if err := holdRequestKey(ctx, tx); err != nil {
+		return err
+	}
 
 	if err := setTxActor(ctx, tx, by); err != nil {
 		return err

@@ -135,6 +135,10 @@ func (h *ManageHandler) handleDisableProfileCreate(w http.ResponseWriter, r *htt
 		}
 		var err error
 		id, err = store.CreateDisableProfile(ctx, tx, p, memberIDs, actorID(r))
+		if rej := requestKeyGoneReject(err); rej != nil {
+			writeJSONReject(w, rej) // the key was deleted while the request ran (issue #555)
+			return false
+		}
 		if err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
 			return false

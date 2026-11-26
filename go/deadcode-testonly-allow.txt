@@ -133,6 +133,7 @@ internal/goldset/sheet.go	ForbiddenSheetFields	# Nur draw_c34a_test.go:254: Kopi
 internal/graphcache/snapshot.go	sortedMembership	# Permanenter Vergleichsarm zu mapMembership (snapshot.go:383); nur export_test.go:91 für Bench und Arm-Gleichheit
 internal/graphcache/validate.go	checkOrdering	# Nur export_test.go:72 (CheckOrdering): CSR-Ordnungsinvariante gegen den unsortierten Fixture-Seam
 internal/graphcache/validate.go	checkRangeOrder	# Einziger Aufrufer ist checkOrdering (validate.go:103/108), das selbst nur über export_test.go:72 lebt
+internal/guard/guard.go	RunGuardBatch	# the two-value form of RunGuardBatchDeferring the guard, handler and events tests call (29 files); the scheduler reads the deferrals (issue #555)
 internal/handler/manage_table.go	actionTier	# Nur Tier-Gate-Tests (action_tier_gate_test.go:156 u. a.); Prod gated über enforceManageActionTier
 internal/handler/manage_table.go	actionTierExplicit	# Prod-Referenz nur im toten actionTier:272; 11 Aufrufe in action_tier_gate_test.go pinnen die Tier-Tabelle
 internal/handler/v1census/v1census.go	Assert	# v1census: Admissions-Census-Testhelfer (A03-W8; Pflicht der Routen-Wellen W02-07ff.), 0 Prod by design — wie v1door

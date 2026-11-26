@@ -111,8 +111,14 @@ The codes are the ones the HTTP API uses for the same class:
 `supersedes_conflict`, `supersedes_not_allowed`, `reserved_category`, `provenance_protected`,
 `reserved_metadata`, `unknown_action`, `constraint`, `edit_mismatch`, `rate_limit`, `write_conflict`, `internal`
 (`TestRejectClassesAreDocumented` holds this list and the one in [api](api.md) to the classes of the handler).
-Other errors (an unknown id, an invalid type filter, a failed lookup) carry text only,
-so a client must not rely on a code being present.
+Other errors (an unknown id, an invalid type filter) carry text only,
+so a client must not rely on a code being present. A fault of the database under a
+tool's call — a dropped connection, a statement timeout, a constraint the tool does not
+map — answers `<tool> failed: internal error` (`cannot resolve block id: internal error`
+for an id the tool resolves) with the code `internal`; its cause, with the database's
+text, is in the server log line, never in the answer (issue #555; before, `store`,
+`search`, `get`, `recent`, `update`, `archive` and `blob_fetch` put the statement, the
+table and the SQLSTATE into their text).
 
 Which errors carry a code is a property of each tool's write path: `store`,
 `blob_store` and `blob_link` code every rejection; `update` codes the verdict of
@@ -124,7 +130,9 @@ layer's provenance (no card is issued for an update the confirm cannot execute);
 confirmed update; the issue tools code
 `reserved_metadata` and the identity collision (`constraint`, issue #275); the read tools and the guard tools never code, except for the one class below. Every write tool
 (`store`, `store_batch`, `update`, `archive`, `guard_resolve`, the issue tools) can answer `write_conflict` for a write that lost to concurrent
-writes of its rows and wrote nothing (issue #547; the same call can be sent again), and any tool can
+writes of its rows and wrote nothing (issue #547; the same call can be sent again); every tool that puts a row into a
+scope (`store`, `store_batch`, `blob_store`, the issue tools) and every stage answers `unauthorized` when the key the
+call authenticated with was deleted, or lost a scope, while it ran — a tenant it belongs to or names is being deleted — and nothing was written (issue #555); and any tool can
 additionally answer `internal` for a server fault (below).
 
 **Server faults.** A panic while a tool call runs — in its handler or anywhere below it

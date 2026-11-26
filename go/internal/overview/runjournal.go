@@ -8,7 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GottZ/ctx/internal/pgxdb"
+	"github.com/GottZ/ctx/internal/store"
 )
 
 // Das Lauf-Journal (Achse 04 / S2, Migration 130, design/04 §3.2 + §4.10).
@@ -40,6 +44,8 @@ type RunStart struct {
 	CandidateN  int
 	MaxNodesEff int
 	ParentRSSKb int64
+	// Tenant is the run's tenant (Options.RunTenant): the row holds its gate.
+	Tenant string
 }
 
 // StartRun legt die 'running'-Zeile an und gibt ihre run_id zurück.
@@ -62,15 +68,23 @@ func StartRun(ctx context.Context, pool *pgxpool.Pool, s RunStart) (string, erro
 		engine = EngineGonum
 	}
 	var runID string
-	err := pool.QueryRow(ctx, `
+	err := pgxdb.Write(ctx, pool, pgxdb.At("overview: opening run journal row"), func(tx pgx.Tx) error {
+		// The run tenant's gate first (issue #555): the row names the
+		// tenant's scopes, and a run that read them before the tenant's
+		// delete began opens no row after it (store.ErrRunTenantGone).
+		if err := store.HoldRunTenant(ctx, tx, s.Tenant); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `
 		INSERT INTO graph_overview_run
 		    (scope_set, scope_key, engine, resolution, outcome,
 		     candidate_n, max_nodes_eff, parent_rss_kb)
 		VALUES ($1, $2, $3, $4, 'running', $5, $6, $7)
 		RETURNING run_id::text`,
-		scopes, lockKeyForScopes(s.ScopeSet), engine, s.Resolution,
-		nullIfZero(s.CandidateN), nullIfZero(s.MaxNodesEff), nullIfZero64(s.ParentRSSKb),
-	).Scan(&runID)
+			scopes, lockKeyForScopes(s.ScopeSet), engine, s.Resolution,
+			nullIfZero(s.CandidateN), nullIfZero(s.MaxNodesEff), nullIfZero64(s.ParentRSSKb),
+		).Scan(&runID)
+	})
 	if err != nil {
 		return "", fmt.Errorf("overview: opening run journal row: %w", err)
 	}

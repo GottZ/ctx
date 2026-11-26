@@ -113,6 +113,14 @@ func PutSecret(ctx context.Context, tx pgx.Tx, name, scope string, nonce, cipher
 	if err := setTxActor(ctx, tx, by); err != nil {
 		return false, err
 	}
+	// The request's key before the secret's row (issue #555,
+	// holdRequestKey): the rotation of an existing secret locks its row and
+	// takes the key share of rotated_by at the end of its statement, and the
+	// tenant-delete's key step, deleting the creator's key, sets created_by
+	// NULL on that row — a cycle if the step held the rotating key already.
+	if err := holdRequestKey(ctx, tx); err != nil {
+		return false, err
+	}
 
 	// (xmax = 0) distinguishes insert (true) from conflict-update (false).
 	// One statement on purpose: the row trigger then fires as INSERT or
@@ -133,7 +141,9 @@ func PutSecret(ctx context.Context, tx pgx.Tx, name, scope string, nonce, cipher
 		name, scope, ciphertext, nonce, keyVersion, by,
 	).Scan(&created)
 	if err != nil {
-		return false, fmt.Errorf("secrets: put %s: %w", name, err)
+		// A creator key the insert names is gone (issue #555): its tenant is
+		// being deleted, the foreign key's key share found no row.
+		return false, fmt.Errorf("secrets: put %s: %w", name, requestKeyGoneOr(err))
 	}
 	return created, nil
 }

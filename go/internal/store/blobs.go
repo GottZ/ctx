@@ -101,7 +101,14 @@ func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filena
 	}
 
 	bm := &BlobMeta{}
-	err := pool.QueryRow(ctx,
+	// In a transaction with the request's key held first (issue #555,
+	// holdRequestKey): a blob written after its tenant's delete passed its
+	// scope would stay in a scope no tenant owns.
+	err := pgxdb.Write(ctx, pool, pgxdb.At("store: upsert blob"), func(tx pgx.Tx) error {
+		if err := holdRequestKey(ctx, tx); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx,
 		`INSERT INTO context_blobs (category, title, filename, mime_type, file_size, data, checksum, tags, metadata, scope, context_block_id)
 		VALUES ($1, $2, $3, $4, $5, $6::bytea, encode(digest($6::bytea, 'sha256'), 'hex'), $7, $8, $9, NULLIF($10, '')::uuid)
 		ON CONFLICT (category, title, scope) DO UPDATE SET
@@ -122,6 +129,10 @@ func UpsertBlob(ctx context.Context, pool *pgxpool.Pool, category, title, filena
 		&bm.FileSize, &bm.Checksum, &bm.StorageType, &bm.Tags, &bm.Metadata,
 		&bm.Scope, &bm.CreatedAt, &bm.UpdatedAt,
 	)
+	})
+	if errors.Is(err, ErrRequestKeyGone) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, fmt.Errorf("store: upsert blob: %w", err)
 	}

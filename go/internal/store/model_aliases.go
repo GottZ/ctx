@@ -153,6 +153,10 @@ func modelAliasPolicy(p json.RawMessage) json.RawMessage {
 // STATEMENT with ErrModelAliasScope, nothing written. A duplicate (scope,
 // name) is ErrModelAliasExists.
 func CreateModelAlias(ctx context.Context, tx pgx.Tx, a ModelAlias, scopes []string, w ModelAliasWrite) (ModelAlias, error) {
+	// The request's key first (issue #555, holdRequestKey): the row names a scope.
+	if err := holdRequestKey(ctx, tx); err != nil {
+		return ModelAlias{}, err
+	}
 	if err := stampModelAliasWrite(ctx, tx, w); err != nil {
 		return ModelAlias{}, err
 	}

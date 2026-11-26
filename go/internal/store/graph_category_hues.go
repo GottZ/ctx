@@ -86,6 +86,10 @@ func UpsertCategoryHue(ctx context.Context, tx pgx.Tx, scope, category string, h
 	if hue < 0 || hue > 359 {
 		return fmt.Errorf("graph hues: hue must be 0..359, got %d", hue)
 	}
+	// The request's key first (issue #555, holdRequestKey): the row names a scope.
+	if err := holdRequestKey(ctx, tx); err != nil {
+		return err
+	}
 	if err := setTxActor(ctx, tx, by); err != nil {
 		return err
 	}

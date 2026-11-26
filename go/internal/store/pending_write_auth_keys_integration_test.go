@@ -622,9 +622,10 @@ func TestPendingWriteNoStageOutlivesItsPrunedKey(t *testing.T) {
 			opErr := <-opDone
 			switch {
 			case opErr == nil, errors.Is(opErr, store.ErrPendingWriteKeyGone), errors.Is(opErr, store.ErrPendingWriteNotFound):
-			case code(opErr) == "23503" && op.name == "re-arm in a batch":
+			case errors.Is(opErr, store.ErrRequestKeyGone) && op.name == "re-arm in a batch":
 				// The batch's budget booking after the key delete: its foreign
-				// key on the gone key refuses it, nothing is staged.
+				// key on the gone key refuses it (23503, answered as the key
+				// gone since issue #555), nothing is staged.
 			case deadlock(opErr):
 				deadlocks++
 			default:

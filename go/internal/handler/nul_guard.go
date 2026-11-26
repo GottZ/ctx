@@ -178,7 +178,7 @@ func bodyNULField(r *http.Request, body NULBody, limit int64) (string, bool) {
 	if body == NULBodyForm {
 		return formNULField(r, joinChunks(chunks, n))
 	}
-	if !chunksCarry(chunks, []byte(`\u0000`)) {
+	if !chunksCarry(chunks, []byte(`\u0000`)) || !chunksMayEscapeNUL(chunks) {
 		return "", false
 	}
 	path, found := jsonNULPath(joinChunks(chunks, n), nulBodySkip[key])
@@ -324,6 +324,50 @@ func chunksCarry(chunks [][]byte, esc []byte) bool {
 		e = append(e, c...)
 		if bytes.Contains(e, esc) {
 			return true
+		}
+	}
+	return false
+}
+
+// nulEscapeTail is what follows the backslash of a NUL escape.
+const nulEscapeTail = "u0000"
+
+// chunksMayEscapeNUL is the walk's NUL test without the walk (issue #555): a
+// raw NUL byte anywhere, or the text backslash-u-0000 after an ODD run of
+// backslashes — the escape itself. After an even run every backslash is
+// escaped by the one before it, and the text is text (a source file that
+// writes the escape, say). Scanned chunk by chunk, the run's parity and a
+// partial match carried over each edge, so a body that only quotes the
+// escape is not joined into one more copy (joinChunks) to learn that it
+// carries none. Every NUL the walk finds is such an odd run inside a string
+// — inside a string a run of backslashes cannot reach back past its opening
+// quote — so false here means the walk finds none; true sends the body to
+// the walk, which decides (an odd run outside a string is invalid JSON, and
+// the walk refuses nothing for it).
+func chunksMayEscapeNUL(chunks [][]byte) bool {
+	odd, match := false, 0 // the run of backslashes just before is odd; bytes of nulEscapeTail matched after it
+	for _, c := range chunks {
+		if bytes.IndexByte(c, 0) >= 0 {
+			return true
+		}
+		for _, b := range c {
+			if match > 0 {
+				if b == nulEscapeTail[match] {
+					if match++; match == len(nulEscapeTail) {
+						return true
+					}
+					continue
+				}
+				match = 0
+			}
+			switch {
+			case b == '\\':
+				odd = !odd
+			case b == 'u' && odd:
+				odd, match = false, 1
+			default:
+				odd = false
+			}
 		}
 	}
 	return false

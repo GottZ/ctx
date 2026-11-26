@@ -127,15 +127,26 @@ func CreateSession(ctx context.Context, pool *pgxpool.Pool, scope string, readSc
 	if createdByKeyID != "" {
 		createdBy = &createdByKeyID
 	}
-	row := pool.QueryRow(ctx,
-		`INSERT INTO context_chat_sessions (scope, read_scopes, created_by, title, created_by_principal)
-		 VALUES ($1, $2, $3, $4,
-		         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $3::uuid))
-		 RETURNING `+sessionColumns,
-		scope, readScopes, createdBy, title)
-	s, err := scanSession(row)
+	var s *ChatSession
+	err := pgxdb.Write(ctx, pool, pgxdb.At("store: create chat session"), func(tx pgx.Tx) error {
+		// The request's key first (issue #555, holdRequestKey): a session
+		// carries its scope and read scopes.
+		if err := holdRequestKey(ctx, tx); err != nil {
+			return err
+		}
+		var err error
+		s, err = scanSession(tx.QueryRow(ctx,
+			`INSERT INTO context_chat_sessions (scope, read_scopes, created_by, title, created_by_principal)
+			 VALUES ($1, $2, $3, $4,
+			         (SELECT k.principal_id FROM context_api_keys k WHERE k.id = $3::uuid))
+			 RETURNING `+sessionColumns,
+			scope, readScopes, createdBy, title))
+		return err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("store: create chat session: %w", err)
+		// The creating key is gone (issue #555): its gate, or its foreign key
+		// on a path without one, found no row.
+		return nil, fmt.Errorf("store: create chat session: %w", requestKeyGoneOr(err))
 	}
 	return s, nil
 }

@@ -25,6 +25,7 @@ import (
 	"gonum.org/v1/gonum/graph/simple"
 
 	"github.com/GottZ/ctx/internal/pgxdb"
+	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/visibility"
 )
 
@@ -249,6 +250,12 @@ type Options struct {
 	// loadEdges, both edge endpoints); the persist input-purity guard stays
 	// as the fail-loud backstop against an out-of-filter input.
 	ScopeFilter []string
+	// RunTenant is the tenant whose partition the run builds (issue #555).
+	// The persist transaction holds its gate first (store.HoldRunTenant), so
+	// a run that loaded the partition before the tenant's delete began writes
+	// nothing after it. It crosses the worker boundary with the filter. ""
+	// (the global run, the tenant-less fallback) holds nothing.
+	RunTenant string
 	// TombstoneRetention is the window in which a RETIRED topic can still be
 	// re-attached by a re-appearing community (W3, decision E2-01 / amendment
 	// A01-2). It has to cross the worker boundary because the re-attach probe
@@ -1170,10 +1177,18 @@ UPDATE graph_overview_meta m
 // existing rows, creates none). attemptStart is this attempt's start time and
 // discards a stamp that a concurrent, SUCCESSFUL run has already overtaken.
 //
-// Deliberately exported and pool-based (not tx-bound): the caller is the
-// scheduler, and on the timeout path it must stamp with the OUTER context —
-// the rebuild's own context is expired exactly then.
-func StampAttempt(ctx context.Context, pool *pgxpool.Pool, scopes []string, reason string, candidates map[string]int, attemptStart time.Time) error {
+// Deliberately exported and pool-based (not bound to a caller's transaction):
+// the caller is the scheduler, and on the timeout path it must stamp with the
+// OUTER context — the rebuild's own context is expired exactly then.
+//
+// tenant is the run's tenant ("" for a run without one): the scoped stamp
+// creates the rows of its scopes, so it holds the tenant's gate as the run's
+// other writes do (store.HoldRunTenant, issue #555) — a stamp that comes after
+// the tenant's delete began writes nothing and answers
+// store.ErrRunTenantGone. Without the gate a stamp of a run that outlived its
+// tenant's delete left graph_overview_meta rows in scope names the next owner
+// gets.
+func StampAttempt(ctx context.Context, pool *pgxpool.Pool, tenant string, scopes []string, reason string, candidates map[string]int, attemptStart time.Time) error {
 	candScopes, candNs := candidateArrays(candidates)
 	if len(scopes) == 0 {
 		if _, err := pool.Exec(ctx, stampAttemptGlobalSQL, reason, candScopes, candNs, attemptStart); err != nil {
@@ -1181,7 +1196,13 @@ func StampAttempt(ctx context.Context, pool *pgxpool.Pool, scopes []string, reas
 		}
 		return nil
 	}
-	if _, err := pool.Exec(ctx, stampAttemptScopedSQL, scopes, reason, candScopes, candNs, attemptStart); err != nil {
+	if err := pgxdb.Write(ctx, pool, pgxdb.At("overview: stamping rebuild attempt"), func(tx pgx.Tx) error {
+		if err := store.HoldRunTenant(ctx, tx, tenant); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, stampAttemptScopedSQL, scopes, reason, candScopes, candNs, attemptStart)
+		return err
+	}); err != nil {
 		return fmt.Errorf("overview: stamping rebuild attempt (%s) for %v: %w", reason, scopes, err)
 	}
 	return nil
@@ -1442,6 +1463,10 @@ func persist(ctx context.Context, pool *pgxpool.Pool, cl clustering, opts Option
 		// value is a code-owned constant, never input.
 		if _, err := tx.Exec(ctx, fmt.Sprintf(`SET LOCAL temp_buffers = '%s'`, persistTempBuffers)); err != nil {
 			return fmt.Errorf("temp_buffers: %w", err)
+		}
+		// The run tenant's gate, the first lock of the tx (issue #555).
+		if err := store.HoldRunTenant(ctx, tx, opts.RunTenant); err != nil {
+			return err
 		}
 
 		// S9a: ov_new wird VOR dem Lock-Erwerb gefuellt (design/04 §4.8 Punkt 1).

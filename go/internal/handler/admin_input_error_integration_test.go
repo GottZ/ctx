@@ -306,8 +306,9 @@ func TestAdminWriteInputErrorsEmbedMigrationRoutes(t *testing.T) {
 // time a later statement of PruneTenant fails, earlier ones have committed:
 // every failure it returns is the server's, 500 with the ERROR line and
 // write_outcome=unknown, whatever its SQLSTATE — here a class-22 refusal of
-// a server value in the audit stamp (the actor key id, the request id) after
-// the tenant's blocks are gone.
+// a server value in the audit stamp (the actor key id, the request id) in the
+// key step, after the tenant was marked offboarding (since #555 the key step
+// comes before the data passes, so the blocks are still there).
 func TestTenantDeleteFailureKeepsItsLine(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -335,13 +336,14 @@ func TestTenantDeleteFailureKeepsItsLine(t *testing.T) {
 				!strings.Contains(lines[0].text(), c.code) {
 				t.Errorf("lines %+v, want one ERROR naming %s with write_outcome=%s", logs.all(), c.code, writeUnknown)
 			}
-			var blocks, tenants int
+			var blocks int
+			var tstatus string
 			if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM context_blocks WHERE id = $1::uuid),
-				(SELECT count(*) FROM context_tenants WHERE id = $2::uuid)`, block, tn.id).Scan(&blocks, &tenants); err != nil {
+				(SELECT status FROM context_tenants WHERE id = $2::uuid)`, block, tn.id).Scan(&blocks, &tstatus); err != nil {
 				t.Fatal(err)
 			}
-			if blocks != 0 || tenants != 1 {
-				t.Errorf("after the failure: %d blocks of the tenant, %d tenant rows, want 0 and 1 — the fixture did not fail after a committed step", blocks, tenants)
+			if blocks != 1 || tstatus != "offboarding" {
+				t.Errorf("after the failure: %d blocks of the tenant, tenant %q, want 1 and offboarding — the fixture did not fail after a committed step", blocks, tstatus)
 			}
 		})
 	}

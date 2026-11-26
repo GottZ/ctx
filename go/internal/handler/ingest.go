@@ -366,6 +366,11 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 			chunk.Category, chunk.Title, chunk.Content,
 			chunk.Tags, chunk.Metadata, scope,
 		)
+		if rej := requestKeyGoneReject(err); rej != nil {
+			// The key was deleted while the request ran (issue #555):
+			// nothing written, no line.
+			return IngestResult{Index: index, Status: "failed", Error: rej.Msg}
+		}
 		if errors.Is(err, store.ErrChunkNotWritable) {
 			// Absent source, foreign source and a slot held by another scope's
 			// chunk are ONE answer (no oracle, §9e); nothing was written.
@@ -398,6 +403,9 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 			if errors.Is(err, store.ErrProvenanceProtected) {
 				return IngestResult{Index: index, Status: "failed",
 					Error: "block carries derived provenance — not client-writable"}
+			}
+			if rej := requestKeyGoneReject(err); rej != nil {
+				return IngestResult{Index: index, Status: "failed", Error: rej.Msg} // issue #555
 			}
 			logRequestError(ctx, "ingest: upsert block error",
 				"error", err, "index", index, "request_id", reqID, "write_outcome", writeOutcome(err))
@@ -434,7 +442,9 @@ func (h *IngestHandler) processChunk(ctx context.Context, reqID string, chunk In
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if logErr := store.LogAccess(bgCtx, h.pool, apiKeyID, block.ID, "write"); logErr != nil {
+		// The key gone with its tenant's delete after the write (issue #555):
+		// nothing to book on, no fault.
+		if logErr := store.LogAccess(bgCtx, h.pool, apiKeyID, block.ID, "write"); logErr != nil && !errors.Is(logErr, store.ErrRequestKeyGone) {
 			slog.Error("ingest: write log error", "error", logErr, "block_id", block.ID, "request_id", reqID)
 		}
 	}()
@@ -479,6 +489,10 @@ func (h *IngestHandler) ingestRateLimited(w http.ResponseWriter, ctx context.Con
 		return true
 	}
 	if err := store.LogAccess(ctx, h.pool, apiKeyID, "", ingestBucket); err != nil {
+		if rej := requestKeyGoneReject(err); rej != nil {
+			writeJSONReject(w, rej) // the key was deleted while the request ran (issue #555)
+			return true
+		}
 		// Fail closed: an unbooked request would not count against the limit.
 		logRequestError(ctx, "ingest: rate limit booking failed", "error", err, "request_id", RequestIDFromContext(ctx))
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "Internal server error"})

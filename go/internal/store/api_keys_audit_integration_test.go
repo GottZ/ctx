@@ -753,12 +753,13 @@ func kaStr(p *string) string {
 }
 
 // Hardening 2 (CodeRabbit on PR #76): PruneTenant hard-deletes the tenant's
-// keys (step 7) in a transaction stamped via='offboarding'. PruneTenant does
-// not drain context_settings, so a setting whose updated_by names one of those
-// keys is still there; the FK ON DELETE SET NULL updates it inside the stamped
-// transaction and fires the settings audit of 051 (audit_settings_write). That
-// row must carry the stamped channel, the stamped actor and the request id —
-// not the api/sql derivation from the actor alone.
+// keys (step 7) in a transaction stamped via='offboarding'. A setting outside
+// the tenant's scopes whose updated_by names one of those keys stays (since
+// #555 the prune drains the settings of the tenant's own scopes, with their
+// audit); the FK ON DELETE SET NULL updates it inside the stamped transaction
+// and fires the settings audit of 051 (audit_settings_write). That row must
+// carry the stamped channel, the stamped actor and the request id — not the
+// api/sql derivation from the actor alone.
 func TestSettingsAuditOffboardingVia(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -785,7 +786,7 @@ func TestSettingsAuditOffboardingVia(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := store.UpsertSetting(ctx, tx, settingKey, scope, json.RawMessage(`{"probe": true}`), &member.ID); err != nil {
+	if err := store.UpsertSetting(ctx, tx, settingKey, "private", json.RawMessage(`{"probe": true}`), &member.ID); err != nil {
 		t.Fatalf("upsert setting as the tenant key: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -812,13 +813,16 @@ func TestSettingsAuditOffboardingVia(t *testing.T) {
 			r.Action, r.Meta["via"], kaStr(r.APIKeyID), kaStr(r.Label), r.Meta["request_id"], admin.ID, reqID, r.Meta)
 	}
 
-	// Not a gate: context_settings.scope has no FK to context_tenant_scopes and
-	// PruneTenant does not drain it, so the setting outlives its tenant.
-	var left int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM context_settings WHERE scope = $1`, scope).Scan(&left); err != nil {
+	// The setting outside the tenant's scopes outlives the tenant (only its
+	// updated_by went); nothing is left in the pruned scope.
+	var kept, left int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM context_settings WHERE key = $1 AND scope = 'private' AND updated_by IS NULL)::int,
+		(SELECT count(*) FROM context_settings WHERE scope = $2)::int`, settingKey, scope).Scan(&kept, &left); err != nil {
 		t.Fatalf("count settings: %v", err)
 	}
-	t.Logf("context_settings rows left in the pruned scope %s: %d", scope, left)
+	if kept != 1 || left != 0 {
+		t.Fatalf("settings after the prune: %d of the setting outside the tenant (want 1, updated_by cleared), %d in the pruned scope %s (want 0)", kept, left, scope)
+	}
 }
 
 // Hardening 2 (Copilot on PR #76): stampAudit casts the actor to uuid when it

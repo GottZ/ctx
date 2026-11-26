@@ -413,11 +413,23 @@ func RunGuardBatch(ctx context.Context, pool interface {
 	pgxdb.Beginner
 	pgxdb.Execer
 }, set *blocktype.Set, limit int, search Search) (int, error) {
+	processed, _, err := RunGuardBatchDeferring(ctx, pool, set, limit, search)
+	return processed, err
+}
+
+// RunGuardBatchDeferring is RunGuardBatch that also returns how many verdicts
+// the committed run deferred (0 for a run that failed): the scheduler keeps
+// the guard pending while a run defers any, so the deferred blocks get their
+// verdict at a later tick without waiting for another write (issue #555).
+func RunGuardBatchDeferring(ctx context.Context, pool interface {
+	pgxdb.Beginner
+	pgxdb.Execer
+}, set *blocktype.Set, limit int, search Search) (int, int64, error) {
 	if set == nil {
-		return 0, fmt.Errorf("guard: nil block-type policy set (registry not wired?)")
+		return 0, 0, fmt.Errorf("guard: nil block-type policy set (registry not wired?)")
 	}
 	if search.EfSearch < EfSearchMin || search.EfSearch > EfSearchMax || search.ExactMaxCandidates < 0 {
-		return 0, fmt.Errorf("guard: search %+v outside hnsw.ef_search [%d, %d] or a negative exact limit (guard.* settings not wired?)",
+		return 0, 0, fmt.Errorf("guard: search %+v outside hnsw.ef_search [%d, %d] or a negative exact limit (guard.* settings not wired?)",
 			search, EfSearchMin, EfSearchMax)
 	}
 	if limit <= 0 {
@@ -495,7 +507,7 @@ func RunGuardBatch(ctx context.Context, pool interface {
 	})
 
 	if err != nil {
-		return processed, err
+		return processed, 0, err
 	}
 	if len(blocks) > 0 {
 		recordDeferrals(deferred) // an empty run leaves last_run to the last run that checked blocks
@@ -511,7 +523,7 @@ func RunGuardBatch(ctx context.Context, pool interface {
 	if len(blocks) > 0 {
 		slog.Info("guard: batch complete", "processed", processed, "total_pending", len(blocks))
 	}
-	return processed, nil
+	return processed, deferred, nil
 }
 
 // savepointName builds a PG-safe SAVEPOINT identifier from a block UUID.

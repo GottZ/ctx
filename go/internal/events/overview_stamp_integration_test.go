@@ -196,7 +196,7 @@ func TestOverviewStamp_BootProbeSurvivesStamp(t *testing.T) {
 	}
 
 	// A stamp-only row — exactly the "fresh deploy above the cap" case.
-	if err := overview.StampAttempt(ctx, pool, []string{"private"}, "node-cap",
+	if err := overview.StampAttempt(ctx, pool, "", []string{"private"}, "node-cap",
 		map[string]int{"private": 1204331}, time.Now()); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestOverviewStamp_ContentionRaceKeepsSuccess(t *testing.T) {
 	winner := readStamp(t, pool, "private")
 
 	// …and only THEN does B's advisory-lock skip come back to stamp.
-	if err := overview.StampAttempt(ctx, pool, []string{"private"}, "advisory-lock", nil, attemptStart); err != nil {
+	if err := overview.StampAttempt(ctx, pool, "", []string{"private"}, "advisory-lock", nil, attemptStart); err != nil {
 		t.Fatalf("loser stamp: %v", err)
 	}
 
@@ -261,7 +261,7 @@ func TestOverviewStamp_ContentionRaceKeepsSuccess(t *testing.T) {
 
 	// Red-probe symmetry: a stamp whose attempt started AFTER the success is
 	// a genuinely newer attempt and MUST land.
-	if err := overview.StampAttempt(ctx, pool, []string{"private"}, "node-cap",
+	if err := overview.StampAttempt(ctx, pool, "", []string{"private"}, "node-cap",
 		map[string]int{"private": 2000000}, time.Now()); err != nil {
 		t.Fatalf("later stamp: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestOverviewStamp_GlobalRunTouchesOnlyExistingRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := overview.StampAttempt(ctx, pool, nil, "timeout", nil, time.Now()); err != nil {
+	if err := overview.StampAttempt(ctx, pool, "", nil, "timeout", nil, time.Now()); err != nil {
 		t.Fatalf("global stamp: %v", err)
 	}
 

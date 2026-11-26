@@ -22,10 +22,14 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -225,16 +229,65 @@ func tenantUpdateCmd(getClient func() (*Client, error)) *cobra.Command {
 	return cmd
 }
 
+// tenantDeleteCallBudget is the client budget of `ctx tenant delete`: none
+// (issue #555), as for `ctx manage purge`. The delete runs to its end on the
+// server whatever the client does, for minutes at the target scale (a
+// 100 000-block tenant took 9 s); the CLI's 120 s ended the request first,
+// and the answer of the delete was lost. A variable for tests.
+var tenantDeleteCallBudget time.Duration
+
+// tenantDeleteLeftMsg is what the CLI adds when the request ended after it
+// was sent and before the answer, or a proxy gave up waiting for it: a delete
+// that has begun is not stopped by that.
+const tenantDeleteLeftMsg = "the delete may still be running on the server: once begun it runs to its end, and the tenant stays offboarding " +
+	"(its keys, sessions and OAuth tokens are refused) until then; `ctx tenant get <id>` answers not found once it has ended — run the delete again to see how it ended"
+
+// requestNotSent reports whether err ended a request before it reached the
+// server: a connection that could not be made (refused, no route, a name
+// that does not resolve) or a base URL the client cannot use.
+func requestNotSent(err error) bool {
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return true
+	}
+	var dns *net.DNSError
+	return errors.As(err, &dns) || strings.Contains(err.Error(), "CTX_BASE_URL is not a usable URL")
+}
+
 func tenantDeleteCmd(getClient func() (*Client, error)) *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <tenant-id>",
 		Short: "Delete a tenant: full prune of its scoped data and keys (server-admin)",
 		Long: "IRREVERSIBLE full prune: every block in the tenant's scopes, its keys,\n" +
-			"then the tenant row. The default tenant is refused server-side (400).",
+			"then the tenant row. The default tenant is refused server-side (400).\n" +
+			"The call waits for the server's answer without the 120 s client timeout:\n" +
+			"the delete runs to its end on the server either way. From its first step\n" +
+			"the tenant is offboarding and its keys are refused.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			resp, err := tenantManage(getClient, map[string]any{"action": "tenant-delete", "id": args[0]})
+			get := func() (*Client, error) {
+				c, err := getClient()
+				if err != nil {
+					return nil, err
+				}
+				return c.withTimeout(tenantDeleteCallBudget), nil
+			}
+			c, err := get()
 			if err != nil {
+				return err
+			}
+			resp, status, err := c.Do(http.MethodPost, "/api/manage", map[string]any{"action": "tenant-delete", "id": args[0]})
+			switch {
+			case err != nil && requestNotSent(err):
+				return err // the server never saw it: nothing runs
+			case err != nil:
+				return fmt.Errorf("%w — %s", err, tenantDeleteLeftMsg)
+			case status == http.StatusBadGateway || status == http.StatusGatewayTimeout:
+				// A reverse proxy's answer: it gave up on the server (its
+				// read timeout), the server did not.
+				return fmt.Errorf("the proxy in front of the server answered %d before the delete did — %s", status, tenantDeleteLeftMsg)
+			}
+			if err := checkEnvelope(resp, envelopeRequired); err != nil {
 				return err
 			}
 			PrintJSON(resp)

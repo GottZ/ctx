@@ -103,6 +103,10 @@ func GetDisableProfile(ctx context.Context, pool *pgxpool.Pool, scope, name stri
 // an error (the handler already resolved names → ids against the pool snapshot,
 // so this is the last-line integrity guard).
 func CreateDisableProfile(ctx context.Context, tx pgx.Tx, p *DisableProfile, memberIDs []string, by *string) (string, error) {
+	// The request's key first (issue #555, holdRequestKey): the row names a scope.
+	if err := holdRequestKey(ctx, tx); err != nil {
+		return "", err
+	}
 	if err := setTxActor(ctx, tx, by); err != nil {
 		return "", err
 	}

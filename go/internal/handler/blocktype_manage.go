@@ -432,6 +432,10 @@ func (h *ManageHandler) writeTypeStoreError(w http.ResponseWriter, action string
 // PUT/DELETE surface (design/03 §4.1): a status divergence between the two
 // transports is impossible by construction.
 func writeBlockTypeStoreError(w http.ResponseWriter, action string, err error, reqID string) {
+	if rej := requestKeyGoneReject(err); rej != nil {
+		writeJSONReject(w, rej) // the key was deleted while the request ran (issue #555)
+		return
+	}
 	var inUse *store.BlockTypeInUseError
 	switch {
 	case errors.Is(err, store.ErrBlockTypeExists),
