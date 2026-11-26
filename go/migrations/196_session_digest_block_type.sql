@@ -48,7 +48,12 @@
 -- five (1.0 did), and either pattern list let a digest take it at every factor
 -- — a lifted type leaves the damping entirely. Questions only a digest or a
 -- fact answers found it among the ten sources in 73 % of the cases at 0.8
--- (33 % at 0.6, 91 % at 1.0). A tuned factor is a registry data update.
+-- (33 % at 0.6, 91 % at 1.0). A tuned factor is a registry data update that
+-- names the WHOLE config: type-update and PUT /api/types replace the stored
+-- config, and an axis left out decodes to its default — retrieval.untrusted to
+-- false, guard/dream/digest/overview to their defaults (the registry warns on
+-- every reload while the mark is missing). Copy this row's config and change
+-- damping_factor alone.
 --
 -- WHY guard/dream/digest/overview all false (the tool-overview posture):
 -- check=false — the plugin deduplicates its facts itself (fact ledger and the

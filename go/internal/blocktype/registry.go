@@ -302,19 +302,22 @@ func warnWorkflowForgeMap(p Policy) {
 	}
 }
 
-// warnUntrustedDropped logs a WARN when a builtin type's name is served from an
-// operator's own row (builtin=false) without the untrusted mark its compiled-in
-// definition carries (#289 review). The row wins: a seed migration inserts with
-// ON CONFLICT DO NOTHING and never overwrites a tuned row, so the blocks of that
-// type reach every read surface without the foreign-text frame. Once per Reload
-// and name — a name has one _global row. The row is served as stored.
+// warnUntrustedDropped logs a WARN when a builtin type's name is served from a
+// row without the untrusted mark its compiled-in definition carries (#289
+// review). Any row: an operator's own (builtin=false) wins over the seed, which
+// inserts with ON CONFLICT DO NOTHING; the builtin row itself loses the mark
+// when type-update or PUT /api/types writes a config that leaves it out (they
+// replace the whole config, and an absent axis decodes to its default). Either
+// way the blocks of that type reach every read surface without the
+// foreign-text frame. Once per Reload and name — a name has one _global row.
+// The row is served as stored.
 func warnUntrustedDropped(p Policy, compiled map[string]Policy) {
 	b, ok := compiled[p.Name]
-	if !ok || p.Builtin || !b.Retrieval.Untrusted || p.Retrieval.Untrusted {
+	if !ok || !b.Retrieval.Untrusted || p.Retrieval.Untrusted {
 		return
 	}
-	slog.Warn("blocktype: an operator row serves a builtin type without its untrusted mark — its blocks are read without the foreign-text frame until the row sets retrieval.untrusted",
-		"name", p.Name, "scope", p.Scope)
+	slog.Warn("blocktype: a registry row serves a builtin type without its untrusted mark — its blocks are read without the foreign-text frame until the row sets retrieval.untrusted",
+		"name", p.Name, "scope", p.Scope, "builtin_row", p.Builtin)
 }
 
 // InvalidateTenant drops exactly one tenant's cached generation; the next

@@ -101,3 +101,56 @@ func TestOperatorRowOfAnUntrustedBuiltin_Integration(t *testing.T) {
 		t.Fatal("the marked operator row is not untrusted")
 	}
 }
+
+// TestBuiltinRowWithoutTheUntrustedMark_Integration (#289 review, round 2):
+// the builtin row itself loses the mark when a config that leaves it out is
+// written over it (type-update and PUT /api/types replace the whole config;
+// an absent retrieval.untrusted decodes to false) — every Reload warns for it,
+// as for an operator row. A trusted builtin name never warns, whatever its
+// row says. RED probes: the WARN narrowed to builtin=false rows again; the
+// WARN widened to every builtin name.
+func TestBuiltinRowWithoutTheUntrustedMark_Integration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := testdb.SetupTestDB(t)
+	for _, q := range []string{
+		`UPDATE context_block_types SET config = '{"v":1,"retrieval":{"policy":"damped","damping_factor":0.9}}'::jsonb
+		  WHERE name = 'session-digest' AND scope = '_global' AND builtin`,
+		`UPDATE context_block_types SET config = '{"v":1,"retrieval":{"policy":"full-pass"}}'::jsonb
+		  WHERE name = 'knowledge' AND scope = '_global' AND builtin`,
+	} {
+		tag, err := pool.Exec(ctx, q)
+		if err != nil || tag.RowsAffected() != 1 {
+			t.Fatalf("update builtin row: %v (%v)", err, tag)
+		}
+	}
+	capture := installCapture(t)
+	reg := blocktype.NewRegistry()
+	for i := 0; i < 2; i++ {
+		if err := reg.Reload(ctx, pool); err != nil {
+			t.Fatalf("reload %d: %v", i, err)
+		}
+	}
+	counts := map[string]int{}
+	capture.mu.Lock()
+	for _, r := range capture.records {
+		if r.level == slog.LevelWarn && strings.Contains(r.msg, "without its untrusted mark") {
+			counts[r.attrs["name"]]++
+		}
+	}
+	capture.mu.Unlock()
+	if counts["session-digest"] != 2 {
+		t.Errorf("WARN records for the builtin session-digest row without the mark after two Reloads = %d, want 2", counts["session-digest"])
+	}
+	if counts["knowledge"] != 0 {
+		t.Errorf("WARN records for the trusted builtin knowledge = %d, want 0", counts["knowledge"])
+	}
+	if len(counts) != 1 {
+		t.Errorf("WARN records name %v, want session-digest only", counts)
+	}
+	if reg.Snapshot().IsUntrusted("session-digest") {
+		t.Fatal("the builtin row is not served as stored")
+	}
+}
