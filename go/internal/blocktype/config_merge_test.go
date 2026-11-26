@@ -354,3 +354,58 @@ func TestUpdateConfig565_ShippedRetrievalIsRequired(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateConfig565_ShippedFieldsNamed: over a stored config that does not
+// decode, a replacement for a builtin must name each field its compiled
+// definition sets, with a value — left out, named null, or dropped with its
+// section named null, the field would take the decoder default and the type
+// lose what it ships with (session-digest trusted again, insight claimable).
+// Named false on purpose it is written. A type with no compiled definition is
+// not affected. RED on 9c701044: a whole config whose retrieval left out
+// untrusted, or was {}, repaired the row and the registry served the type
+// untrusted=false.
+func TestUpdateConfig565_ShippedFieldsNamed(t *testing.T) {
+	const whole = `{"v":1,"retrieval":{"policy":"damped","damping_factor":0.8,"untrusted":true},"guard":{"check":false,"candidate":false},"dream":{"linkable":false},"digest":{"include":false},"overview":{"include":false}}`
+	insight, _ := json.Marshal(map[string]any{"v": 1,
+		"retrieval": map[string]any{"policy": "excluded", "intent_patterns": insightPatterns, "untrusted": true},
+		"guard":     map[string]any{"check": false, "candidate": false}, "dream": map[string]any{"linkable": false},
+		"digest": map[string]any{"include": false}, "overview": map[string]any{"include": false},
+		"write":    map[string]any{"internal_only": true},
+		"classify": map[string]any{"priority": 17, "title_patterns": []string{"session insights "}}})
+	for _, stored := range []string{`[]`, strings.Replace(whole, `{"v":1,`, `{"v":1,"zz_legacy":{"x":1},`, 1)} {
+		for _, tc := range []struct {
+			label, name, update, want string
+		}{
+			{"untrusted left out", "session-digest", strings.Replace(whole, `,"untrusted":true`, ``, 1), "retrieval.untrusted"},
+			{"retrieval empty", "session-digest", strings.Replace(whole, `{"policy":"damped","damping_factor":0.8,"untrusted":true}`, `{}`, 1), "retrieval.damping_factor, retrieval.policy, retrieval.untrusted"},
+			{"untrusted null", "session-digest", strings.Replace(whole, `"untrusted":true`, `"untrusted":null`, 1), "retrieval.untrusted"},
+			{"retrieval null", "session-digest", strings.Replace(whole, `{"policy":"damped","damping_factor":0.8,"untrusted":true}`, `null`, 1), "retrieval.untrusted"},
+			{"guard.candidate left out", "session-digest", strings.Replace(whole, `,"candidate":false`, ``, 1), "guard.candidate"},
+			{"insight without its write section", "insight", strings.Replace(string(insight), `,"write":{"internal_only":true}`, ``, 1), "write.internal_only"},
+			{"untrusted false on purpose", "session-digest", strings.Replace(whole, `"untrusted":true`, `"untrusted":false`, 1), ""},
+			{"the whole config", "session-digest", whole, ""},
+			{"insight whole", "insight", string(insight), ""},
+			{"own type, envelope only", "opsx", `{"v":1}`, ""},
+		} {
+			t.Run(tc.label+" over "+stored[:2], func(t *testing.T) {
+				if tc.name == "opsx" && stored != `[]` {
+					t.Skip("an own type's row names its sections")
+				}
+				out, err := UpdateConfig(tc.name, globalScope, tc.name != "opsx", false, []byte(stored), []byte(tc.update))
+				if tc.want != "" {
+					if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "shipped definition") ||
+						!strings.Contains(err.Error(), "false") {
+						t.Fatalf("%s: %s, %v — want a refusal naming %q and how to switch a field off", tc.label, out, err, tc.want)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("%s: %v", tc.label, err)
+				}
+				if !jsonSame(out, strings.Replace(tc.update, `,"zz_legacy":{"x":1}`, ``, 1)) {
+					t.Fatalf("%s: wrote %s, want the request as sent", tc.label, out)
+				}
+			})
+		}
+	}
+}

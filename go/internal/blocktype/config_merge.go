@@ -106,13 +106,24 @@ func marshalConfig(v any) ([]byte, error) {
 // with its nulls dropped (null means "absent" when nothing is kept).
 //
 // A partial config must still not pass as a whole one, or the silent reset of
-// issue #565 returns through the broken row: the replacement must name every
-// section the stored config names — in any spelling, since a misspelled key
-// still says which section the row meant; a section named null is named, it
-// resets the section — and, for a builtin name, every
-// section its shipped definition sets (shippedSections). Otherwise 422, naming
-// the broken stored config and the sections. A row that names no section, of a
-// name with no shipped definition, has nothing a partial config could drop.
+// issue #565 returns through the broken row. So the replacement must name
+//
+//   - every section the stored config names — in any spelling, since a
+//     misspelled key still says which section the row meant; a section named
+//     null is named, it resets the section;
+//   - for a name with a compiled definition, every FIELD that definition sets
+//     away from the decoder's default (shippedFields), with a value. A field
+//     left out or named null — itself or through its section — takes that
+//     default, and for these fields the default undoes what the type ships
+//     with: session-digest trusted, full-pass, guard-checked; insight
+//     claimable. Measured on 9c701044: a whole config whose retrieval did not
+//     name untrusted repaired the row and the registry served session-digest
+//     untrusted=false (PR #567 review, R2-1). An operator who wants such a field
+//     off names it so ("untrusted": false).
+//
+// Otherwise 422, naming the broken stored config, the sections and the
+// fields. A row that names no section, of a name with no compiled definition,
+// has nothing a partial config could drop.
 func UpdateConfig(name, scope string, builtin, isDefault bool, stored, update []byte) ([]byte, error) {
 	_, storedErr := DecodePolicy(name, scope, builtin, isDefault, stored)
 	if storedErr == nil {
@@ -131,10 +142,15 @@ func UpdateConfig(name, scope string, builtin, isDefault bool, stored, update []
 	}
 	// A section named null is named: it resets the section (PR #567 review).
 	// So the request's own keys are read before its nulls are dropped.
-	var missing []string
-	for _, key := range requiredSections(name, stored) {
+	var missing, unset []string
+	for _, key := range requiredSections(stored) {
 		if _, ok := patch[key]; !ok {
 			missing = append(missing, key)
+		}
+	}
+	for _, path := range shippedFields(name) {
+		if !namesValue(patch, path) {
+			unset = append(unset, path)
 		}
 	}
 	for key, val := range patch {
@@ -157,33 +173,36 @@ func UpdateConfig(name, scope string, builtin, isDefault bool, stored, update []
 	if _, err := decodeEnvelope(name, whole); err != nil {
 		return nil, err
 	}
-	if len(missing) > 0 {
+	if len(missing)+len(unset) > 0 {
+		var must []string
+		if len(missing) > 0 {
+			must = append(must, strings.Join(missing, ", "))
+		}
+		if len(unset) > 0 {
+			must = append(must, "with a value each, the fields its shipped definition sets: "+strings.Join(unset, ", ")+
+				" (left out or null they take the decoder default, which undoes the definition — name a field false to switch it off)")
+		}
 		return nil, fmt.Errorf("blocktype %q: the stored config does not decode (%v), so an update cannot keep its "+
 			"other fields — send the whole config, which replaces the stored one; it must name %s",
-			name, storedErr, strings.Join(missing, ", "))
+			name, storedErr, strings.Join(must, "; and, "))
 	}
 	return whole, nil
 }
 
 // requiredSections are the top-level keys a replacement of a broken stored
 // config must name (UpdateConfig): the sections the stored config names,
-// matched to the envelope's keys without regard to case, and the sections the
-// shipped definition of a builtin name sets. Sorted; v is not a section.
-func requiredSections(name string, stored []byte) []string {
-	keys := map[string]bool{}
-	for _, k := range shippedSections(name) {
-		keys[k] = true
-	}
+// matched to the envelope's keys without regard to case. Sorted; v is not a
+// section.
+func requiredSections(stored []byte) []string {
+	var out []string
 	if m, err := decodeConfigObject(stored); err == nil {
+		seen := map[string]bool{}
 		for k := range m {
-			if lk := strings.ToLower(k); envelopeKeys()[lk] && lk != "v" {
-				keys[lk] = true
+			if lk := strings.ToLower(k); envelopeKeys()[lk] && lk != "v" && !seen[lk] {
+				seen[lk] = true
+				out = append(out, lk)
 			}
 		}
-	}
-	out := make([]string, 0, len(keys))
-	for k := range keys {
-		out = append(out, k)
 	}
 	sort.Strings(out)
 	return out
@@ -201,10 +220,32 @@ func envelopeKeys() map[string]bool {
 	return keys
 }
 
-// shippedSections are the sections in which the compiled definition of a
-// builtin name differs from what an absent section decodes to — the settings
-// a partial config would silently reset. nil for a name that is not builtin.
-func shippedSections(name string) []string {
+// namesValue reports whether a config object gives the field at path
+// ("section.field", or a top-level key) a value other than null.
+func namesValue(config map[string]any, path string) bool {
+	key, field, inSection := strings.Cut(path, ".")
+	v, ok := config[key]
+	if !inSection || !ok {
+		return ok && v != nil
+	}
+	section, _ := v.(map[string]any)
+	fv, ok := section[field]
+	return ok && fv != nil
+}
+
+// policyFieldAlias names the Policy field an envelope field fills where the
+// two Go names differ. Every other envelope field fills the Policy field of
+// its own name (TestShippedFields565 pins that each one has one).
+var policyFieldAlias = map[string]string{"retrieval.policy": "Kind"}
+
+// shippedFields are the fields in which the compiled definition of a builtin
+// name differs from what DecodePolicy fills in when the field is absent —
+// every setting a config that leaves the field out would silently reset. One
+// rule derived per field from the two policies, no list to keep: a section
+// field as "section.field", the top-level structural_link_classes by its key.
+// Sorted; nil for a name with no compiled definition. An envelope field
+// without a Policy field to compare counts as set (fail closed).
+func shippedFields(name string) []string {
 	b, ok := BuiltinPolicy(name)
 	if !ok {
 		return nil
@@ -213,26 +254,42 @@ func shippedSections(name string) []string {
 	if err != nil {
 		return nil
 	}
+	shipped, empty := reflect.ValueOf(b), reflect.ValueOf(d)
 	var out []string
-	for _, s := range []struct {
-		key            string
-		shipped, empty any
-	}{
-		{"retrieval", b.Retrieval, d.Retrieval},
-		{"guard", b.Guard, d.Guard},
-		{"dream", b.Dream, d.Dream},
-		{"digest", b.Digest, d.Digest},
-		{"overview", b.Overview, d.Overview},
-		{"parent", b.Parent, d.Parent},
-		{"write", b.Write, d.Write},
-		{"workflow", b.Workflow, d.Workflow},
-		{"structural_link_classes", b.StructuralLinkClasses, d.StructuralLinkClasses},
-		{"classify", b.Classify, d.Classify},
-	} {
-		if !reflect.DeepEqual(s.shipped, s.empty) {
-			out = append(out, s.key)
+	for i := 0; i < configEnvelopeType.NumField(); i++ {
+		ef := configEnvelopeType.Field(i)
+		key, _, _ := strings.Cut(ef.Tag.Get("json"), ",")
+		if key == "v" {
+			continue
+		}
+		sv, dv := shipped.FieldByName(ef.Name), empty.FieldByName(ef.Name)
+		st := ef.Type
+		if st.Kind() == reflect.Pointer {
+			st = st.Elem()
+		}
+		switch {
+		case !sv.IsValid():
+			out = append(out, key)
+		case st.Kind() != reflect.Struct:
+			if !reflect.DeepEqual(sv.Interface(), dv.Interface()) {
+				out = append(out, key)
+			}
+		default:
+			for j := 0; j < st.NumField(); j++ {
+				fkey, _, _ := strings.Cut(st.Field(j).Tag.Get("json"), ",")
+				path := key + "." + fkey
+				goName := st.Field(j).Name
+				if alias, ok := policyFieldAlias[path]; ok {
+					goName = alias
+				}
+				a, z := sv.FieldByName(goName), dv.FieldByName(goName)
+				if !a.IsValid() || !reflect.DeepEqual(a.Interface(), z.Interface()) {
+					out = append(out, path)
+				}
+			}
 		}
 	}
+	sort.Strings(out)
 	return out
 }
 

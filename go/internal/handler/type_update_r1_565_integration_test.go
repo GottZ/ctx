@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -127,6 +128,106 @@ func TestTypeUpdate565_BrokenStoredConfig(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// TestTypeUpdate565_BrokenBuiltinNamesShippedFields: over a '_global' row of a
+// builtin whose stored config does not decode, the repair must name every field
+// the compiled definition sets — for each builtin marked untrusted, its
+// retrieval.untrusted. A whole config whose retrieval leaves the mark out, is
+// {} or is null is refused 422 and the row stays as it was; the healthy config
+// repairs it and the registry serves the type untrusted; named false on purpose
+// it is written and served so. Both transports, every builtin the compiled set
+// marks untrusted, the healthy config read off the seeded row.
+//
+// RED on 9c701044: the three partial forms answered 200 and the registry served
+// the type untrusted=false (PR #567 review, R2-1).
+func TestTypeUpdate565_BrokenBuiltinNamesShippedFields(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	pool, reg, serverAdmin, _ := t565Fixture(t)
+	ctx := context.Background()
+	rows, err := pool.Query(ctx, `SELECT name FROM context_block_types WHERE scope = $1 AND builtin ORDER BY name`, store.GlobalScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if b, ok := blocktype.BuiltinPolicy(n); ok && b.Retrieval.Untrusted {
+			names = append(names, n)
+		}
+	}
+	rows.Close()
+	if len(names) < 5 {
+		t.Fatalf("fixture premise: %d builtin rows marked untrusted (%v), want at least 5", len(names), names)
+	}
+	withRetrieval := func(t *testing.T, cfg string, edit func(map[string]any) any) string {
+		t.Helper()
+		var m map[string]any
+		if err := json.Unmarshal([]byte(cfg), &m); err != nil {
+			t.Fatal(err)
+		}
+		m["retrieval"] = edit(m["retrieval"].(map[string]any))
+		out, _ := json.Marshal(m)
+		return string(out)
+	}
+	served := func(t *testing.T, name string) (blocktype.Policy, bool) {
+		t.Helper()
+		if err := reg.Reload(ctx, pool); err != nil {
+			return blocktype.Policy{}, false
+		}
+		return reg.Snapshot().Resolve(name)
+	}
+	for _, tr := range t565Transports(pool, reg) {
+		for _, name := range names {
+			healthy := t565Stored(t, pool, name, store.GlobalScope)
+			partials := map[string]string{
+				"untrusted left out": withRetrieval(t, healthy, func(r map[string]any) any { delete(r, "untrusted"); return r }),
+				"retrieval {}":       withRetrieval(t, healthy, func(map[string]any) any { return map[string]any{} }),
+				"retrieval null":     withRetrieval(t, healthy, func(map[string]any) any { return nil }),
+			}
+			for label, body := range partials {
+				t.Run(tr.label+" "+name+" "+label, func(t *testing.T) {
+					if _, err := pool.Exec(ctx, `UPDATE context_block_types SET config = config || '{"zz_legacy":{"x":1}}'::jsonb WHERE name = $1 AND scope = $2`, name, store.GlobalScope); err != nil {
+						t.Fatal(err)
+					}
+					broken := t565Stored(t, pool, name, store.GlobalScope)
+					rec := tr.send(t, serverAdmin, name, body)
+					if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "retrieval.untrusted") {
+						p, ok := served(t, name)
+						t.Fatalf("%s over the broken row: %d %s — want 422 naming retrieval.untrusted (served now: ok=%v untrusted=%v)",
+							label, rec.Code, rec.Body.String(), ok, p.Retrieval.Untrusted)
+					}
+					if got := t565Stored(t, pool, name, store.GlobalScope); !jsonEqual(got, broken) {
+						t.Fatalf("refused write changed the row: %s", got)
+					}
+					if rec := tr.send(t, serverAdmin, name, healthy); rec.Code != http.StatusOK {
+						t.Fatalf("the healthy config over the broken row: %d %s", rec.Code, rec.Body.String())
+					}
+					if p, ok := served(t, name); !ok || !p.Retrieval.Untrusted {
+						t.Fatalf("after the repair: served ok=%v untrusted=%v, want the mark", ok, p.Retrieval.Untrusted)
+					}
+				})
+			}
+			t.Run(tr.label+" "+name+" untrusted false on purpose", func(t *testing.T) {
+				if _, err := pool.Exec(ctx, `UPDATE context_block_types SET config = config || '{"zz_legacy":{"x":1}}'::jsonb WHERE name = $1 AND scope = $2`, name, store.GlobalScope); err != nil {
+					t.Fatal(err)
+				}
+				off := withRetrieval(t, healthy, func(r map[string]any) any { r["untrusted"] = false; return r })
+				if rec := tr.send(t, serverAdmin, name, off); rec.Code != http.StatusOK {
+					t.Fatalf("untrusted named false over the broken row: %d %s, want 200", rec.Code, rec.Body.String())
+				}
+				if p, ok := served(t, name); !ok || p.Retrieval.Untrusted {
+					t.Fatalf("served ok=%v untrusted=%v, want the type served without the mark it was deliberately given", ok, p.Retrieval.Untrusted)
+				}
+				t565Restore(t, pool, reg, serverAdmin, name, store.GlobalScope, healthy)
+			})
 		}
 	}
 }
