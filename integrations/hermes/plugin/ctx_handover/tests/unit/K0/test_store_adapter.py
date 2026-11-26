@@ -53,7 +53,7 @@ def test_adapter_shapes_equal_hermes_own_stand_in(session_db, make_session, herm
     """``get_session``, ``get_messages`` (every view the engine reads) and ``list_sessions_rich`` answer exactly what
     Hermes' stand-in answers for the same store: the adapter reproduces the old shapes, not an approximation."""
     if not is_store_host():
-        return
+        pytest.skip("the adapter exists on a storage-interface host only")
     tip = build(make_session)
     root = session_db.get_compression_lineage(tip)[0]
     core = _stand_in(hermes_home)
@@ -78,7 +78,7 @@ def test_rows_the_engine_writes_are_fresh_inserts(session_db, make_session):
 
     Mutant: ``_new_messages`` keeps ``_row_id`` → the stored row is repaired and nothing is appended."""
     if not is_store_host():
-        return
+        pytest.skip("the adapter exists on a storage-interface host only")
     sid = make_session.create()
     make_session.turns(sid, 1)
     rows = session_db.get_messages(sid)
@@ -96,7 +96,7 @@ def test_a_busy_store_in_a_lease_call_is_not_acquired(session_db, make_session, 
 
     Mutant: the adapter lets ``TransientStoreError`` through → ``acquire`` and ``refresh`` raise it."""
     if not is_store_host():
-        return
+        pytest.skip("the adapter exists on a storage-interface host only")
     from persistence import StoreContention
 
     tip = build(make_session, drivers=False)
@@ -115,3 +115,48 @@ def test_a_busy_store_in_a_lease_call_is_not_acquired(session_db, make_session, 
         lock.acquire(session_db, ledger, info, JOB + "2", ttl_s=120, wait_s=0, cancelled=lambda: False)
     with pytest.raises(sqlite3.OperationalError):
         session_db.try_acquire_session_turn_lease(tip, "pid=1:x", ttl_seconds=10, patience_s=0.1)
+
+
+def test_any_store_error_in_a_lease_refresh_is_a_lost_lease(session_db, make_session, ledger, monkeypatch):
+    """A store error that is not contention (a corrupt or replaced store) in a lease refresh reaches ``lock`` as a
+    ``sqlite3.Error`` too, as the old class's ``DatabaseError`` did: ``refresh`` reports the lease lost, which the
+    conductor counts, instead of raising the interface's error into the lease beat.
+
+    Mutant: the adapter maps only ``TransientStoreError`` → ``refresh`` raises ``CorruptStoreError``."""
+    if not is_store_host():
+        pytest.skip("the adapter exists on a storage-interface host only")
+    from persistence import CorruptStoreError
+
+    tip = build(make_session, drivers=False)
+    info = describe(session_db, tip)
+    holder = lock.acquire(session_db, ledger, info, JOB, ttl_s=120, wait_s=0, cancelled=lambda: False)
+    coordination = session_db.store.coordination
+
+    def corrupt(self, **kw):
+        raise CorruptStoreError("state.db is corrupt")
+
+    monkeypatch.setattr(type(coordination), "refresh_compression_lock", corrupt)
+    assert lock.refresh(session_db, info, holder, ttl_s=120) is False
+    with pytest.raises(sqlite3.DatabaseError):
+        session_db.refresh_compression_lock(tip, holder, ttl_seconds=120)
+    monkeypatch.undo()
+    lock.release(session_db, ledger, info, holder, JOB)
+
+
+def test_an_import_counts_only_the_sessions_it_wrote(session_db, make_session):
+    """``import_sessions`` names a payload id that already exists under ``skipped_ids``, never under
+    ``imported_ids`` — the engine discards and re-mints only what is not its own (``session_import._import_a``).
+
+    Mutant: the adapter reports every payload id as imported."""
+    if not is_store_host():
+        pytest.skip("the adapter exists on a storage-interface host only")
+    taken = make_session.create(title="Already here")
+    fresh = make_session.mint_id()
+    payload = [
+        {"id": taken, "source": "cli", "messages": []},
+        {"id": fresh, "source": "cli", "messages": [{"role": "user", "content": "hi"}]},
+    ]
+    result = session_db.engine_db.import_sessions(payload)
+    assert result["ok"] is True
+    assert result["imported_ids"] == [fresh] and result["skipped_ids"] == [taken]
+    assert session_db.get_session(taken)["title"] == "Already here"

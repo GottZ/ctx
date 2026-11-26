@@ -1501,7 +1501,9 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
                 )
                 if feats.session_db_ok
                 else "this Hermes version lacks parts the plugin needs; missing: " + ", ".join(feats.missing),
-                "remedy": "update Hermes to 0.22.6 or newer",
+                "remedy": "update Hermes to the newest release"
+                if feats.session_store == hostcompat.SESSION_STORE_PERSISTENCE
+                else "update Hermes to 0.22.6 or newer",
             }
         )
         checks.append(

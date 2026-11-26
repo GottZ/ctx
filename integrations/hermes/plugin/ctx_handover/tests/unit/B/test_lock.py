@@ -316,10 +316,10 @@ def test_probe_busy_store_failure_is_a_warning(session_db, make_session, hermes_
     """On a host with the storage interface the queued prompts and delegations come from the store
     (``StoreSessionDB.busy_signals``), never from the database file: a store that cannot answer is a warning, not
     an abort and not "busy" (the SQL path's rule, O8); on a ``SessionDB`` host the file is read (below)."""
-    tip = build(make_session, drivers=False)
     if not is_store_host():
         assert not hasattr(session_db, "busy_signals")
-        return
+        pytest.skip("the store path exists on a storage-interface host only")
+    tip = build(make_session, drivers=False)
 
     def broken(lineage):
         raise RuntimeError("store unavailable")
@@ -639,21 +639,22 @@ def test_reclaim_after_an_unanswered_message(session_db, make_session, ledger, p
     index = index_for(tmp_path, ledger.path)
     unanswered = make_session.user(tip, "a question nobody answered")
     before_active = len(session_db.get_messages(tip))
-    vetoed_turn(session_db, tip, provider_url, index, "typed 0")
+    for i in range(2):  # the second attempt is a turn of its own: a rewind of only it must not pass for the whole run
+        vetoed_turn(session_db, tip, provider_url, index, f"typed {i}")
     assert chat_requests() == []
-    assert len(session_db.get_messages(tip)) == before_active + 2
+    assert len(session_db.get_messages(tip)) == before_active + 4
     out = lock.reclaim(session_db, ledger, tip, force=False)
-    assert out["state"] == "reclaimed" and out["withheld"] == ["typed 0"]
+    assert out["state"] == "reclaimed" and out["withheld"] == ["typed 0", "typed 1"]
     live_ids = {int(m["id"]) for m in session_db.get_messages(tip)}
     assert unanswered in live_ids
     if is_store_host():
         assert out["rewound"] == 0
-        assert len(live_ids) == before_active + 2
+        assert len(live_ids) == before_active + 4
         assert any("the unanswered message before it" in w for w in out["warnings"])
-        assert any("1 blocked message(s) stay in this session's history;" in w for w in out["warnings"])
+        assert any("2 blocked message(s) stay in this session's history;" in w for w in out["warnings"])
         assert not any("Hermes compacted the session" in w for w in out["warnings"])
     else:
-        assert out["rewound"] == 2
+        assert out["rewound"] == 4
         assert len(live_ids) == before_active
     index.refresh_now()
     index.stop()

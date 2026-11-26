@@ -109,6 +109,7 @@ REQUIRED_STORE_VERBS: dict[str, tuple[str, ...]] = {
     "lineage": ("lineage", "resolve_resume_target"),
     "messages": (
         "read_transcript",
+        "read_conversation",
         "append_batch",
         "compact",
         "conversation_revision",
@@ -305,8 +306,8 @@ class StoreSessionDB:
     per-thread instance, ``jobs._db_factory``) has it released on a reaper thread, as Hermes' own ``SessionDB``
     stand-in does — a finalizer may run on a thread that holds a lock the release takes, so it only queues the
     handle. Each method takes the old arguments and returns the old shape (the session row dict, wire rows, the
-    revision tuple), and raises what the engine catches where the interface raises something else: a busy store in a
-    lease call as ``sqlite3.OperationalError`` (``lock`` reads it as not acquired / not refreshed), a title an import
+    revision tuple), and raises what the engine catches where the interface raises something else: a store error in a
+    lease call as the old ``sqlite3`` error (``lock`` reads it as not acquired / not refreshed), a title an import
     cannot take as ``sqlite3.IntegrityError`` naming the title (``session_import._import_a``), a rewind no turn
     starts at as ``ValueError`` (``lock._rewind_placeholders`` warns). Reads and writes go through repository verbs
     only; nothing here opens the database file itself.
@@ -567,13 +568,23 @@ class StoreSessionDB:
         return {"rewound_count": int(outcome.rewound_count)}
 
     # -- leases --------------------------------------------------------------------------------------------------
-    def try_acquire_session_turn_lease(
-        self, session_id: str, holder: str, ttl_seconds: float = 300.0, patience_s: float | None = None
-    ) -> bool:
-        """``coordination.try_acquire_turn_lease``; a busy store raises ``sqlite3.OperationalError``."""
+    @staticmethod
+    def _old_store_error(exc: Exception) -> Exception:
+        """The ``sqlite3`` error the old class raised for a store error of the interface: a busy store as
+        ``OperationalError`` (``lock.acquire`` reads it as not acquired), any other store error as ``DatabaseError``
+        (``lock.refresh`` reads every ``sqlite3.Error`` as a lost lease)."""
         import sqlite3
 
         from persistence import TransientStoreError
+
+        kind = sqlite3.OperationalError if isinstance(exc, TransientStoreError) else sqlite3.DatabaseError
+        return kind(f"{type(exc).__name__}: {exc}")
+
+    def try_acquire_session_turn_lease(
+        self, session_id: str, holder: str, ttl_seconds: float = 300.0, patience_s: float | None = None
+    ) -> bool:
+        """``coordination.try_acquire_turn_lease``; store errors as old ``sqlite3`` errors."""
+        from persistence import PersistenceError
 
         try:
             return bool(
@@ -581,16 +592,14 @@ class StoreSessionDB:
                     session_id=session_id, holder=holder, ttl_seconds=ttl_seconds, patience_s=patience_s
                 )
             )
-        except TransientStoreError as exc:
-            raise sqlite3.OperationalError(str(exc)) from exc
+        except PersistenceError as exc:
+            raise self._old_store_error(exc) from exc
 
     def refresh_session_turn_lease(
         self, session_id: str, holder: str, ttl_seconds: float = 300.0, patience_s: float | None = None
     ) -> bool:
-        """``coordination.refresh_turn_lease``; a busy store raises ``sqlite3.OperationalError``."""
-        import sqlite3
-
-        from persistence import TransientStoreError
+        """``coordination.refresh_turn_lease``; store errors as old ``sqlite3`` errors."""
+        from persistence import PersistenceError
 
         try:
             return bool(
@@ -598,18 +607,16 @@ class StoreSessionDB:
                     session_id=session_id, holder=holder, ttl_seconds=ttl_seconds, patience_s=patience_s
                 )
             )
-        except TransientStoreError as exc:
-            raise sqlite3.OperationalError(str(exc)) from exc
+        except PersistenceError as exc:
+            raise self._old_store_error(exc) from exc
 
     def release_session_turn_lease(self, session_id: str, holder: str) -> None:
         """``coordination.release_turn_lease`` (this holder's row only)."""
         self._store.coordination.release_turn_lease(session_id=session_id, holder=holder)
 
     def try_acquire_compression_lock(self, session_id: str, holder: str, ttl_seconds: float = 300.0) -> bool:
-        """``coordination.try_acquire_compression_lock``; a busy store raises ``sqlite3.OperationalError``."""
-        import sqlite3
-
-        from persistence import TransientStoreError
+        """``coordination.try_acquire_compression_lock``; store errors as old ``sqlite3`` errors."""
+        from persistence import PersistenceError
 
         try:
             return bool(
@@ -617,14 +624,12 @@ class StoreSessionDB:
                     session_id=session_id, holder=holder, ttl_seconds=ttl_seconds
                 )
             )
-        except TransientStoreError as exc:
-            raise sqlite3.OperationalError(str(exc)) from exc
+        except PersistenceError as exc:
+            raise self._old_store_error(exc) from exc
 
     def refresh_compression_lock(self, session_id: str, holder: str, ttl_seconds: float = 300.0) -> bool:
-        """``coordination.refresh_compression_lock``; a busy store raises ``sqlite3.OperationalError``."""
-        import sqlite3
-
-        from persistence import TransientStoreError
+        """``coordination.refresh_compression_lock``; store errors as old ``sqlite3`` errors."""
+        from persistence import PersistenceError
 
         try:
             return bool(
@@ -632,8 +637,8 @@ class StoreSessionDB:
                     session_id=session_id, holder=holder, ttl_seconds=ttl_seconds
                 )
             )
-        except TransientStoreError as exc:
-            raise sqlite3.OperationalError(str(exc)) from exc
+        except PersistenceError as exc:
+            raise self._old_store_error(exc) from exc
 
     def release_compression_lock(self, session_id: str, holder: str) -> None:
         """``coordination.release_compression_lock`` (this holder's row only)."""
