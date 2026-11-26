@@ -203,3 +203,15 @@ def test_the_rest_client_excludes_the_other_types_it_lists_once(monkeypatch):
     }
     assert client.query_types("x", ["not-listed"], limit=2) == {"success": True, "answer": "", "sources": []}
     assert len(sent) == 3  # a type the server does not list is not queried
+
+
+def test_a_query_without_sources_still_gets_the_session_digests(make_provider, typed_server):
+    """A question only digests and facts answer can leave the first query empty: the second one still
+    adds its blocks."""
+    p, client = make_provider()
+    _known(p)
+    client.query_result = {"success": True, "sources": []}
+    context = p.prefetch("when does the queue drain?")
+    assert _titles(context) == [s["title"] for s in TYPED[:3]]
+    assert client.typed_calls[0]["limit"] == 3
+    p.shutdown()

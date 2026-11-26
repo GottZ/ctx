@@ -510,3 +510,20 @@ def test_a_digest_scheduled_before_a_rebinding_answers_for_the_entry_it_was_sche
     assert old_entry.type_to_send(SESSION_DIGEST_TYPE) == ""  # the refusal is the old entry's
     assert new_entry.type_to_send(SESSION_DIGEST_TYPE) == _cp.TYPE_ASK  # the new entry was never answered
     p.shutdown()
+
+
+def test_each_way_to_a_write_without_the_type_warns_on_its_own(caplog, monkeypatch):
+    """A refusal, then (after it expired) a failed read before the next ask: two WARNINGs, one each."""
+    monkeypatch.setattr(_cp, "TYPE_REFUSAL_TTL_S", 0.1)
+    entry = _cp.EntryState()
+    store = _store_on({"knows": False, "calls": []})
+
+    def failing_read():
+        raise CtxApiError("connection error: simulated", code="timeout")
+
+    with caplog.at_level("WARNING"):
+        _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, title="w0")
+        threading.Event().wait(0.15)
+        _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, before_ask=failing_read, title="w1")
+    assert len(_warnings(caplog, "does not know block type")) == 1
+    assert len(_warnings(caplog, "got no answer")) == 1
