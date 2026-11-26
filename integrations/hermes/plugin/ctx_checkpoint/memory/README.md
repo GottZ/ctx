@@ -513,9 +513,13 @@ the plugin and runs over either transport.
   answer, behind the others, each labelled as untrusted text; the first five are never
   changed. It is sent only to a server entry that took a write naming the type in this
   process (a server without the type refuses it — over MCP an error answer Hermes counts),
-  within its own bound (2 s) and only while Hermes' wait for the prefetch (8 s) leaves
-  1.75 s after the first query; a failure or timeout keeps the five, logs at DEBUG and
-  counts toward nothing of the entry's own state (Hermes counts it like a failed recall).
+  within its own bound (2 s) and only while what Hermes' wait for the prefetch (8 s)
+  leaves after the first query covers its worst case (0.75 s over REST; 2.5 s over MCP,
+  where a call through Hermes' `call_mcp` takes at least 1 s and is waited for 1 s past
+  its bound); a failure or timeout keeps the five, logs at DEBUG and counts toward nothing
+  of the plugin's entry state (over MCP Hermes counts it toward its breaker, as a failed
+  recall). A block the first answer holds but the recall does not show
+  (`max_prefetch_results` below five) can come from the second query.
   Measured on a test rig (a hashing embedder, three corpora of 432–656 blocks): no block
   of the first five changed, every added block untrusted, the question's embedding
   cached for the second query, 22 ms median and 33 ms p95 for it.

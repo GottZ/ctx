@@ -57,6 +57,7 @@ from .config import (
     untrusted_origin,
     untrusted_origin_note,
 )
+from .mcp_client import HOST_CALL_GRACE_S, HOST_CALL_MIN_TIMEOUT_S
 from .status import display_url
 
 # Host features newer than the MemoryProvider ABC itself; older hosts get plain fallbacks.
@@ -93,12 +94,13 @@ _PREFETCH_CACHE_TTL_S = 60.0
 # The recall's second query (GottZ/ctx#289, ``prefetch_session_digest_results``): Hermes waits
 # ``_EXTERNAL_PREFETCH_TIMEOUT_S`` (8 s, agent/memory_manager.py) for a provider's prefetch and
 # drops all of it after that, so the second query gets its own bound and only what that wait leaves
-# after the first one, less a margin (the grace of a bounded MCP call through Hermes, 1 s, and
-# 0.5 s); with less than the minimum left it is not sent and the recall is the first query's.
-# Measured on the test rig: 22 ms median, 33 ms p95 (the question's embedding is cached).
+# after the first one, less a margin; over MCP also less the grace a bounded call through Hermes'
+# call_mcp is waited for past its timeout, and at least that call's floor (mcp_client
+# HOST_CALL_GRACE_S, HOST_CALL_MIN_TIMEOUT_S). With less left it is not sent and the recall is the
+# first query's. Measured on the test rig: 22 ms median, 33 ms p95 (the question's embedding is cached).
 HOST_PREFETCH_WAIT_S = 8.0
 SESSION_DIGEST_RECALL_TIMEOUT_S = 2.0
-SESSION_DIGEST_RECALL_MARGIN_S = 1.5
+SESSION_DIGEST_RECALL_MARGIN_S = 0.5
 SESSION_DIGEST_RECALL_MIN_S = 0.25
 # Key values an earlier binding of this provider used, kept for redaction after a re-initialization
 # (a write scheduled through the old client redacts when its thread runs; a later text may still
@@ -706,7 +708,10 @@ class CtxMemoryProvider(MemoryProvider):
             data = client.query(text, synthesize=False, include_content=True, types_exclude=types_exclude)
             if data.get("success"):
                 sources = data.get("sources") or []
-                extra = self._session_digest_sources(text, client, entry, sources, started)
+                shown: list[dict[str, Any]] = []
+                if entry is not None:
+                    self._prefetch_items(sources, shown=shown)
+                extra = self._session_digest_sources(text, client, entry, shown, started)
                 if sources or extra:
                     return self._format_sources(sources, extra)
             return "", 0
@@ -733,7 +738,7 @@ class CtxMemoryProvider(MemoryProvider):
         text: str,
         client: Any,
         entry: _cp.EntryState | None,
-        sources: list[dict[str, Any]],
+        shown: list[dict[str, Any]],
         started: float,
     ) -> list[dict[str, Any]]:
         """Up to ``prefetch_session_digest_results`` blocks of type ``session-digest`` that the recall's
@@ -747,18 +752,26 @@ class CtxMemoryProvider(MemoryProvider):
         this process (a server without the type refuses the query — over MCP an error answer Hermes
         counts), or with less than :data:`SESSION_DIGEST_RECALL_MIN_S` left of Hermes' wait. Bounded by
         its own time; a failure or a timeout keeps the recalled blocks and is logged at DEBUG, as a
-        failed recall is (it counts toward nothing of the entry's own state)."""
+        failed recall is. It counts toward nothing of the plugin's entry state; over MCP Hermes counts a
+        failed call toward its breaker, as it counts a failed recall (which costs two: query, search).
+
+        ``shown``: the blocks of the first answer the recall renders — a block it holds but does not
+        show (``max_prefetch_results`` below the server's five) may still come from this query."""
         want = self._session_digest_recall_results()
         if entry is None or want <= 0 or not entry.type_known(SESSION_DIGEST_TYPE):
             return []
         left = HOST_PREFETCH_WAIT_S - SESSION_DIGEST_RECALL_MARGIN_S - (self._now() - started)
+        floor = SESSION_DIGEST_RECALL_MIN_S
+        if getattr(client, "transport", "") == "mcp":
+            left -= HOST_CALL_GRACE_S
+            floor = max(floor, HOST_CALL_MIN_TIMEOUT_S)
         timeout = min(SESSION_DIGEST_RECALL_TIMEOUT_S, left)
-        if timeout < SESSION_DIGEST_RECALL_MIN_S:
+        if timeout < floor:
             return []
-        seen = {str(s.get("id")) for s in sources if isinstance(s, dict) and s.get("id")}
-        # The answer carries no type; every block of the type among it is marked untrusted, so this
-        # many more places leave room for ``want`` blocks the first answer does not hold.
-        overlap = sum(1 for s in sources if isinstance(s, dict) and s.get("untrusted") is True)
+        seen = {str(s.get("id")) for s in shown if isinstance(s, dict) and s.get("id")}
+        # The answer carries no type; every block of the type among the shown ones is marked
+        # untrusted, so this many more places leave room for ``want`` blocks not shown yet.
+        overlap = sum(1 for s in shown if isinstance(s, dict) and s.get("untrusted") is True)
         try:
             data = client.query_types(text, [SESSION_DIGEST_TYPE], limit=want + overlap, timeout=timeout)
         except Exception as exc:
@@ -774,12 +787,15 @@ class CtxMemoryProvider(MemoryProvider):
                     break
         return out
 
-    def _prefetch_items(self, items: list[dict[str, Any]], limit: int | None = None) -> list[str]:
+    def _prefetch_items(
+        self, items: list[dict[str, Any]], limit: int | None = None, shown: list[dict[str, Any]] | None = None
+    ) -> list[str]:
         """Render hits as bullet lines. Defense in depth: hits whose ``type`` is in
         ``prefetch_types_exclude`` are dropped client-side too (older servers ignore
         the request filter); ``untrusted: true`` hits are labelled (or dropped with
         ``prefetch_untrusted: drop``); a hit with an ``untrusted_origin`` record gets its note line
-        under the label (#295) — a hit without one renders as before."""
+        under the label (#295) — a hit without one renders as before. ``shown`` collects the hits
+        rendered."""
         excluded = set(self._types_exclude())
         drop_untrusted = self._config.get("prefetch_untrusted") == "drop"
         if limit is None:
@@ -807,6 +823,8 @@ class CtxMemoryProvider(MemoryProvider):
             if content:
                 lines.append(f"  {shorten(content, 500)}")
             parts.append("\n".join(lines))
+            if shown is not None:
+                shown.append(item)
             if len(parts) >= limit:
                 break
         if skipped:

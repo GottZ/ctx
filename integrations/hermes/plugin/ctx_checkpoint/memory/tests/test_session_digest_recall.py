@@ -215,3 +215,45 @@ def test_a_query_without_sources_still_gets_the_session_digests(make_provider, t
     assert _titles(context) == [s["title"] for s in TYPED[:3]]
     assert client.typed_calls[0]["limit"] == 3
     p.shutdown()
+
+
+class McpTypedQueryServer(TypedQueryServer):
+    """The same double, reached over MCP: a bounded call through Hermes' call_mcp takes at least
+    ``HOST_CALL_MIN_TIMEOUT_S`` and is waited for ``HOST_CALL_GRACE_S`` past its timeout."""
+
+    transport = "mcp"
+
+
+@pytest.mark.parametrize(("elapsed", "sent"), [(5.0, True), (6.1, False)])
+def test_over_mcp_the_second_query_fits_hermes_wait_with_the_grace_of_a_host_call(
+    make_provider, monkeypatch, fake_client_cls, elapsed, sent
+):
+    """Over MCP the worst case of the second query is max(floor, timeout) + grace: it is sent only when
+    that fits in what Hermes' wait leaves after the first query."""
+    from ctx_plugin.mcp_client import HOST_CALL_GRACE_S, HOST_CALL_MIN_TIMEOUT_S
+
+    McpTypedQueryServer.typed_raises = None
+    monkeypatch.setattr(provider_mod, "CtxClient", McpTypedQueryServer)
+    p, client = make_provider()
+    _known(p)
+    clock = iter([100.0, 100.0 + elapsed])
+    monkeypatch.setattr(p, "_now", lambda: next(clock))
+    p.prefetch("when does the queue drain?")
+    assert bool(client.typed_calls) is sent
+    if sent:
+        timeout = client.typed_calls[0]["timeout"]
+        assert timeout >= HOST_CALL_MIN_TIMEOUT_S
+        worst = elapsed + max(HOST_CALL_MIN_TIMEOUT_S, timeout) + HOST_CALL_GRACE_S
+        assert worst < provider_mod.HOST_PREFETCH_WAIT_S
+    p.shutdown()
+
+
+def test_a_block_the_first_answer_holds_but_does_not_show_may_come_from_the_second_query(make_provider, typed_server):
+    """With ``max_prefetch_results`` below the server's five, a digest the first answer holds at a place
+    the recall does not render is not taken as shown."""
+    p, client = make_provider(config={"max_prefetch_results": 4})
+    _known(p)
+    context = p.prefetch("when does the queue drain?")  # MAIN's fifth block, d0, is not rendered
+    assert _titles(context) == [s["title"] for s in MAIN[:4]] + [s["title"] for s in TYPED[:3]]
+    assert client.typed_calls[0]["limit"] == 3  # no untrusted block among the four shown
+    p.shutdown()
