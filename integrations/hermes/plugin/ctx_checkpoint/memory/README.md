@@ -108,7 +108,7 @@ are clamped, unknown values fall back to the default.
 | `ctx_base_url` | — | REST transport only: CTX server base URL (also `CTX_BASE_URL`, or `rest_base_url` in the section) |
 | `sensitivity_default` | `personal` | Sensitivity of plugin writes — automatic, `ctx_store` default, CLI (`credentials`/`personal`/`internal`/`public`) |
 | `prefetch_mode` | `query` | `query` (semantic, search fallback) or `search` (lightweight only) |
-| `max_prefetch_results` | `5` | Max blocks injected per turn (1–10) |
+| `max_prefetch_results` | `5` | Max blocks of the recall's query injected per turn (1–10); `prefetch_session_digest_results` can add up to its own value on top |
 | `prefetch_session_digest_results` | `3` | After the recall's query, a second one that sees only blocks of type `session-digest` adds up to this many of them that the first did not answer, behind the others (0–5; `0` = off). Sent only to a server that took a digest or fact write naming the type in this process, and not with `prefetch_untrusted: drop` or the type in `prefetch_types_exclude` |
 | `auto_recall` | `true` | Inject recalled context before each turn |
 | `prefetch_types_exclude` | `["checkpoint","tool-evidence","tool-overview"]` | Block types never recalled (prefetch, tools and CLI default); `[]` = off |
