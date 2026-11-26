@@ -44,7 +44,9 @@ What the ctx MCP tools answer (``go/internal/handler/mcp.go``) and how it is map
   (or a structured ``id``), never another UUID in the text: the title in front of it can
   carry a UUID-shaped session id. Rejections come back as ``{"error": "..."}`` from the
   dispatcher; ctx's rate-limit answer (the whole text ``Rate limit exceeded: max <n> … per 60
-  seconds``) maps to ``code="rate_limit"`` so the chain writer's backoff applies. A
+  seconds``) maps to ``code="rate_limit"`` so the chain writer's backoff applies, and ctx's refusal of a
+  type a store names but the server does not know (the whole text ``type: unknown block type "<name>" (see
+  manage type-list)``) maps to ``code="unknown_type"``, as REST reports it (0.19.0, GottZ/ctx#289). A
   ``confirm_writes`` key gets the write STAGED instead (``mcp_confirm.go``), which also arrives
   as an error envelope starting with ``STAGED — NOT``; it maps to ``code="confirm_writes"`` and
   is refused — writes from this plugin run unattended and are never confirmed on the
@@ -133,6 +135,11 @@ _TYPES_ARG_RE = re.compile(r"\btypes\b")
 # tool names only a name of the search's ``types`` there (``handler/mcp.go`` ``resolveMCPKnownTypes``), so the words
 # decide and the name is not read: Hermes' error handling can mask it (a name holding ``sk-``) or cut it.
 _UNKNOWN_TYPE_RE = re.compile(r"\bunknown block type\b")
+# The whole answer of a ctx server to a store naming a block type it does not know (``handler/stage_gates.go``
+# ``validateTypeNameAgainstSet``; REST answers it with code ``unknown_type``, Hermes hands the MCP text alone): read
+# into that code for a store that sent a ``type`` (GottZ/ctx#289), so a server without the type is told apart from
+# any other refusal of the write. The name is not compared: a store names one type.
+_STORE_UNKNOWN_TYPE_RE = re.compile(r'type: unknown block type "[^"\n]*" \(see manage type-list\)')
 # The tools a ctx server stages for a key with confirm_writes (``mcpStageStore`` and its update, archive and blob
 # twins); of them this client sends store. A read tool is never staged, so its error is never taken for a staged
 # write, whatever it echoes (a type named ``confirm_writes``).
@@ -239,7 +246,7 @@ def _find_value(value: Any, key: str) -> str | None:
     return None
 
 
-def _code_for_error(tool: str, text: str) -> str:
+def _code_for_error(tool: str, text: str, args: dict[str, Any] | None = None) -> str:
     """The code of a tool error, read from the form of ctx's own answer about the call, never from words
     anywhere in the text: an error can repeat what the caller sent (a type, a title), and Hermes' text for
     a transport failure can name anything (GottZ/ctx#354). Hermes passes a tool error's text alone, without
@@ -249,6 +256,8 @@ def _code_for_error(tool: str, text: str) -> str:
         return "confirm_writes"
     if _RATE_LIMIT_ANSWER_RE.fullmatch(answer):
         return "rate_limit"
+    if tool == "store" and (args or {}).get("type") and _STORE_UNKNOWN_TYPE_RE.fullmatch(answer):
+        return "unknown_type"
     return ""
 
 
@@ -463,7 +472,7 @@ class McpClient:
             error = payload.get("error")
             if error:
                 text = str(error)
-                code = _code_for_error(tool, text)
+                code = _code_for_error(tool, text, args)
                 if code == "confirm_writes":
                     # Guidance and hash first: the chain writer keeps only the first 200
                     # characters of this message, and the server name is the variable part.
@@ -486,6 +495,13 @@ class McpClient:
             if "result" in payload and isinstance(payload["result"], str):
                 return payload, payload["result"]
         return payload, raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
+
+    def bounded_through_host(self, tool: str) -> bool:
+        """Whether a bounded call of ``tool`` goes through Hermes' ``call_mcp`` (the operator's grant):
+        Hermes cancels it at its timeout and the entry is free again. Through the tool dispatch an
+        abandoned call keeps the entry's RPC lock until the entry's own tool timeout, and the next call
+        to the entry waits behind it (``tools/mcp_tool_handlers.py`` ``_rpc_lock``)."""
+        return self._granted_host_call(tool) is not None
 
     def forget_host_refusal(self) -> None:
         """A new checkpoint starts (GottZ/ctx#289): Hermes' refusal of the grant held for the
@@ -683,6 +699,24 @@ class McpClient:
                     if key in block and key not in source:
                         source[key] = block[key]
         return {"success": True, "answer": answer, "sources": sources}
+
+    def query_types(self, text: str, types: list[str], *, limit: int, timeout: float | None = None) -> dict[str, Any]:
+        """Retrieval-only ``query`` that sees only blocks of ``types`` (GottZ/ctx#289; the tool folds them
+        into ``types_exclude``), bounded by ``timeout``. A server that does not know a type refuses the
+        call (an error answer Hermes counts): the caller asks only an entry that took the type."""
+        args: dict[str, Any] = {
+            "question": text,
+            "synthesize": False,
+            "include_content": True,
+            "limit": int(limit),
+            "types": list(types),
+        }
+        _payload, body = self._call("query", args, timeout)
+        answer = self._as_json(body)
+        rows = answer.get("sources") if isinstance(answer, dict) else None
+        if not isinstance(answer, dict) or not (rows is None or isinstance(rows, list)):
+            raise CtxApiError(f"mcp query: the retrieval-only answer is not a sources document ({len(body)} chars)")
+        return {"success": True, "answer": "", "sources": [row for row in rows or [] if isinstance(row, dict)]}
 
     def _retrieval_via_query(
         self,

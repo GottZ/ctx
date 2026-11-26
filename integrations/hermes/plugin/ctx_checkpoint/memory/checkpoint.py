@@ -50,7 +50,7 @@ from .client import (
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.18.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
+PLUGIN_VERSION = "0.19.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
 UPSTREAM_REF = "GottZ/ctx integrations/hermes/plugin/ctx_checkpoint 0.4.3 @ 38fdb74 (MPL-2.0)"
 
 CATEGORY_CHECKPOINT = "compaction-checkpoints"
@@ -119,6 +119,19 @@ ENTRY_HOLD_RECHECK_S = 5.0
 # Any answer ends the run, so the read needs no hit. The index is migration 195's (ctx v5.83.0);
 # an older server walks the category's rows for it (not measured).
 PROBE_QUERY = ""
+# What a server entry answered to a block type the writes of this process named (EntryState.type_to_send,
+# GottZ/ctx#289): one write asks, the type is known, or the server refused it as unknown.
+_TYPE_ASKING, _TYPE_KNOWN, _TYPE_REFUSED = "asking", "known", "refused"
+TYPE_ASK = "ask"
+"""EntryState.type_to_send: this write asks whether the server knows the type (the first one of the process)."""
+TYPE_ASK_WAIT_S = 25.0
+"""How long (real seconds) a write that would name a block type waits for the answer to the write that asks
+about it, before it goes without the type: the ask is a read and a write, each within the client's default
+bound of a call (10 s), plus margin. A required fact waits at most until its run's deadline."""
+TYPE_REFUSAL_TTL_S = 3600.0
+"""How long (real seconds) a server's refusal of a block type holds for the writes of this process: after
+it, one write asks again (a server updated meanwhile then gets the type). One hour: a server without the
+type sees at most one refused write per hour from a process and entry, each asked like the first one."""
 # Hermes calls on_pre_compress in the compaction worker before the summary call, and its wait for
 # that worker counts from the worker's last progress, which only the summary stream reports
 # (agent/conversation_compression.py _await_worker_within_budget; the window comes from
@@ -280,6 +293,11 @@ _PROBE_FALLBACK_API = 2
 
 class CtxCheckpointError(RuntimeError):
     """Raised when a durable ctx checkpoint cannot be completed."""
+
+
+class BlockTypeRefused(CtxCheckpointError):
+    """A write of the chain writer named a block type its server does not know (``unknown_type``,
+    GottZ/ctx#289): :func:`store_typed` sends it once more without the type."""
 
 
 def _load_host_module(name: str):
@@ -954,6 +972,95 @@ class EntryState:
         # The registered runs, in the order they started (Reservation.order).
         self._runs: list[Reservation] = []
         self._next_order = 0
+        # What the entry's server answered to the block types the writes of this process named
+        # (GottZ/ctx#289, :meth:`type_to_send`): name -> _TYPE_ASKING / _TYPE_KNOWN / _TYPE_REFUSED,
+        # and when a refusal came (time.monotonic(); it holds for TYPE_REFUSAL_TTL_S).
+        self._block_types: dict[str, str] = {}
+        self._type_refused_at: dict[str, float] = {}
+        # (name, way) of the fallbacks to a write without the type already logged (:meth:`warn_once`).
+        self._type_warned: set[tuple[str, str]] = set()
+        # Until when (time.monotonic()) the recall's second query stays off for this entry: one of
+        # them was abandoned while it held the entry (the provider's _session_digest_sources).
+        self._recall_extra_off_until = 0.0
+
+    def type_to_send(self, name: str, wait_s: float = 0.0) -> str:
+        """Whether a write names the block type ``name`` (GottZ/ctx#289): :data:`TYPE_ASK` (this write
+        asks — the first of the process), ``"known"`` (the server took the type), or ``""`` (without
+        it). A server without the type refuses such a write (``unknown_type``), so one write asks alone;
+        the others wait for its answer (:meth:`type_answered`) up to ``wait_s`` real seconds and go
+        without the type when it does not come — that one write only: no verdict is taken from a wait.
+        After a refusal no write of the process names the type for :data:`TYPE_REFUSAL_TTL_S`; then one
+        write asks again — at most one refused write per process and entry and hour."""
+        end = time.monotonic() + max(0.0, float(wait_s))
+        waited_out = False
+        with self._cond:
+            while self._block_types.get(name) == _TYPE_ASKING:
+                left = end - time.monotonic()
+                if left <= 0:
+                    waited_out = True
+                    break
+                self._cond.wait(left)
+            state = self._block_types.get(name)
+            if waited_out:
+                state = _TYPE_ASKING
+            elif (
+                state == _TYPE_REFUSED and time.monotonic() - self._type_refused_at.get(name, 0.0) >= TYPE_REFUSAL_TTL_S
+            ):
+                state = None
+            if state is None:
+                self._block_types[name] = _TYPE_ASKING
+                return TYPE_ASK
+        if waited_out:
+            self.warn_once(
+                name,
+                "wait",
+                "ctx: a write waited %.0fs for the answer to the write that asks whether the server knows block "
+                "type %s and is stored without the type; later writes name it once that answer says so",
+                float(wait_s),
+                name,
+            )
+            return ""
+        return _TYPE_KNOWN if state == _TYPE_KNOWN else ""
+
+    def type_answered(self, name: str, known: bool | None) -> None:
+        """The answer to a write that named ``name``: True (stored or confirmed, so the server knows the
+        type), False (refused as unknown — only ctx's ``unknown_type`` answer is one), None (no verdict:
+        another error, an abandoned call — the next write asks again unless the type is known)."""
+        with self._cond:
+            if known is True:
+                self._block_types[name] = _TYPE_KNOWN
+            elif known is False:
+                self._block_types[name] = _TYPE_REFUSED
+                self._type_refused_at[name] = time.monotonic()
+            elif self._block_types.get(name) == _TYPE_ASKING:
+                del self._block_types[name]
+            self._cond.notify_all()
+
+    def pause_recall_extra(self, seconds: float) -> None:
+        """Keep the recall's second query off for this entry for ``seconds`` (GottZ/ctx#289)."""
+        with self._cond:
+            self._recall_extra_off_until = time.monotonic() + max(0.0, float(seconds))
+
+    def recall_extra_paused(self) -> bool:
+        """Whether the recall's second query is off for this entry (:meth:`pause_recall_extra`)."""
+        with self._cond:
+            return time.monotonic() < self._recall_extra_off_until
+
+    def type_known(self, name: str) -> bool:
+        """Whether a write of this process naming ``name`` was taken by the entry's server (GottZ/ctx#289:
+        the recall's second query asks only such an entry — a server without the type refuses it)."""
+        with self._cond:
+            return self._block_types.get(name) == _TYPE_KNOWN
+
+    def warn_once(self, name: str, way: str, message: str, *args: Any) -> None:
+        """Log ``message`` as a WARNING the first time this process stores a write of type ``name`` to this
+        entry without the type by the fallback ``way`` (GottZ/ctx#289); later ones of that way are silent.
+        The message carries no server text."""
+        with self._cond:
+            if (name, way) in self._type_warned:
+                return
+            self._type_warned.add((name, way))
+        logger.warning(message, *args)
 
     @property
     def errors_in_row(self) -> int:
@@ -1188,6 +1295,95 @@ def reset_entry_states() -> None:
     """Forget every entry's state (test isolation: each test starts a fresh process's state)."""
     with _ENTRY_STATES_LOCK:
         _ENTRY_STATES.clear()
+
+
+def _unanswered(read: Callable[[], Any]) -> str:
+    """``""`` when ``read()`` got an answer, else how it failed — the error's class and code, no server
+    text (a failure envelope, anything raised)."""
+
+    def shown(code: Any) -> str:
+        text = code if isinstance(code, str) else ""
+        return f" [{text}]" if text in REJECT_CODES or text in _CLIENT_CODES else (" [other code]" if text else "")
+
+    try:
+        data = read()
+    except Exception as exc:
+        return f"{type(exc).__name__}{shown(getattr(exc, 'code', ''))}"
+    return f"failure envelope{shown(response_code(data))}" if is_failure_envelope(data) else ""
+
+
+def _refuses_type(error: BaseException) -> bool:
+    """The server's refusal of the block type a store named: ``unknown_type`` (REST 422; over MCP the
+    client reads it from the whole text of ctx's answer, ``mcp_client._code_for_error``), or the chain
+    writer's :class:`BlockTypeRefused` for the same answer."""
+    return isinstance(error, BlockTypeRefused) or (isinstance(error, CtxApiError) and error.code == "unknown_type")
+
+
+def store_typed(
+    entry: EntryState,
+    block_type: str | None,
+    store: Callable[..., Any],
+    *,
+    wait_s: float = 0.0,
+    before_ask: Callable[[], Any] | None = None,
+    **kwargs: Any,
+) -> Any:
+    """``store(**kwargs)`` naming ``block_type`` while the server entry may know it (GottZ/ctx#289).
+
+    The entry decides whether this write names it (:meth:`EntryState.type_to_send`, waiting up to
+    ``wait_s`` for a write that asks). A server without the type refuses the write before anything is
+    stored or booked (ctx checks the type before its write limit); the entry then remembers the refusal
+    and the write is sent once more without the type, which is what every write before the type did —
+    the server classifies it as before. Any other outcome of the write is returned or raised as it is.
+
+    ``before_ask``: a read sent before the write that asks, which has to be answered first (a write
+    outside the chain writer, over MCP): its answer ends the run of error answers Hermes counts for the
+    entry — calls this process cannot see (the agent's tools, recall) may have left two — so the
+    refusal is never the third. A read that fails leaves the question open and this one write goes
+    without the type; the next one asks again (no verdict is taken from a failed read)."""
+    ask = entry.type_to_send(block_type, wait_s) if block_type else ""
+    if not ask:
+        return store(**kwargs)
+    try:
+        failed = _unanswered(before_ask) if ask == TYPE_ASK and before_ask is not None else ""
+    except BaseException:
+        # A cancel or an interrupt in the read (no Exception, so _unanswered lets it through): the
+        # ask is taken back, or the entry would stay asking and every later write go without the type.
+        entry.type_answered(block_type, None)
+        raise
+    if failed:
+        entry.type_answered(block_type, None)
+        entry.warn_once(
+            block_type,
+            "read",
+            "ctx: the read before the write that asks whether the server knows block type %s got no answer "
+            "(%s); that write is stored without the type, the next one asks again",
+            block_type,
+            failed,
+        )
+        return store(**kwargs)
+    try:
+        data = store(type=block_type, **kwargs)
+    except BaseException as exc:
+        if not _refuses_type(exc):
+            entry.type_answered(block_type, None)
+            raise
+    else:
+        refused = is_failure_envelope(data) and response_code(data) == "unknown_type"
+        if not refused:
+            entry.type_answered(block_type, True if not is_failure_envelope(data) else None)
+            return data
+    # Out of the handler: the refusal is not the implicit context of an error of the second write (#304).
+    entry.type_answered(block_type, False)
+    entry.warn_once(
+        block_type,
+        "refused",
+        "ctx: the server does not know block type %s (a ctx server before migration 196); the write is sent "
+        "without it, no write of this process names it for %.0f minutes, then one asks again",
+        block_type,
+        TYPE_REFUSAL_TTL_S / 60,
+    )
+    return store(**kwargs)
 
 
 # -- Chain writer ----------------------------------------------------------------------
@@ -1619,6 +1815,7 @@ class ChainWriter:
         write: bool = False,
         retry_refused: bool = True,
         ticket: _Ticket | None = None,
+        type_refusable: bool = False,
         **kwargs,
     ) -> dict[str, Any]:
         """One call within the deadline, admitted by the server entry and counted there: an error
@@ -1626,7 +1823,9 @@ class ChainWriter:
         a write ctx booked takes a slot of the entry's window (a confirmed one books none). A
         refused write waits for a slot and is sent again (``retry_refused``; the required facts
         stop at their first refusal, as before 0.17.0). ``ticket``: the call was admitted already
-        (the probe, :meth:`_probe`); it is released on every way out."""
+        (the probe, :meth:`_probe`); it is released on every way out. ``type_refusable``: a write
+        whose ``type`` the server does not know raises :class:`BlockTypeRefused` (the required
+        facts, :meth:`store_paced`, #289)."""
         refusals = answers_seen = 0
         admitted = ticket
         while True:
@@ -1647,8 +1846,16 @@ class ChainWriter:
                 data = fn(timeout=max(0.5, min(self.api_timeout, remaining)), **kwargs)
             except CtxApiError as exc:
                 refused = exc.code == "rate_limit" or exc.status == 429
-                answers = run.entry.release(ticket, error=True, booked=write and not refused, now=self.monotonic())
-                if refused:
+                # #289: ctx refuses a type it does not know before its write limit (stage_gates.go,
+                # claimReject before the rate check): an error answer Hermes counts, no slot of the
+                # window, the write planned again — store_typed sends it without the type, admitted anew.
+                type_refused = type_refusable and write and bool(kwargs.get("type")) and exc.code == "unknown_type"
+                answers = run.entry.release(
+                    ticket, error=True, booked=write and not refused and not type_refused, now=self.monotonic()
+                )
+                if type_refused:
+                    failure = BlockTypeRefused(f"ctx checkpoint {what}: {redact_error_text(exc, self.secret)[:200]}")
+                elif refused:
                     run.rate_limited += 1
                     # Refusals of this write in a row: an answer of the entry to any call of the
                     # process since the last one (another chain's write, a read) ends them, as it
@@ -1708,11 +1915,22 @@ class ChainWriter:
                 # reads it — is_failure_envelope) is an error answer; a write answered that way may
                 # still be stored and keeps its slot, unless ctx refused it for the write limit.
                 answered = not is_failure_envelope(data)
+                # The same refusal of the type as a returned envelope: no slot, sent again without it.
+                type_refused = (
+                    not answered
+                    and type_refusable
+                    and write
+                    and bool(kwargs.get("type"))
+                    and response_code(data) == "unknown_type"
+                )
                 if answered:
                     booked = write and store_action(data) != "noop"
                 else:
-                    booked = write and response_code(data) != "rate_limit"
+                    booked = write and response_code(data) != "rate_limit" and not type_refused
                 run.entry.release(ticket, error=not answered, booked=booked, now=self.monotonic())
+                if type_refused:
+                    detail = redact_error_text(data.get("error") or "unknown_type", self.secret)[:200]
+                    failure = BlockTypeRefused(f"ctx checkpoint {what}: {detail}")
             if failure is not None:
                 # Raised after the handler, not in it: there the error would keep the original (the
                 # server's or the client's text, unredacted) as its implicit ``__context__``, which
@@ -1773,9 +1991,22 @@ class ChainWriter:
         :meth:`new_run` — so it enters the same windows, is paced against the entry's booked
         writes, counts in its error answers in a row and ends by the run's deadline. A refusal ends
         it (no wait, no retry: a fact is secondary to the chain, and its claim goes back for a later
-        compaction). ``store`` are the client's store arguments; raises ``CtxCheckpointError``."""
-        self._enter_window(what, run)
-        data = self._call(what, run, self.client.store, write=True, retry_refused=False, **store)
+        compaction). ``store`` are the client's store arguments; raises ``CtxCheckpointError``.
+
+        A ``type`` among them goes through :func:`store_typed` (#289): a server that does not know
+        it refuses the write once per process and entry — an error answer of the entry, no slot of
+        its window — and the write is sent again without the type, admitted as a call of its own."""
+        block_type = store.pop("type", None)
+
+        def once(**kwargs: Any) -> dict[str, Any]:
+            self._enter_window(what, run)
+            return self._call(
+                what, run, self.client.store, write=True, retry_refused=False, type_refusable=True, **kwargs
+            )
+
+        # The chain's answers come right before this write in the run, so the ask needs no read of its own.
+        wait_s = min(TYPE_ASK_WAIT_S, max(0.0, run.deadline - self.monotonic()))
+        data = store_typed(run.entry, block_type, once, wait_s=wait_s, **store)
         self._count_write(run, data)
         return data
 

@@ -108,7 +108,8 @@ are clamped, unknown values fall back to the default.
 | `ctx_base_url` | — | REST transport only: CTX server base URL (also `CTX_BASE_URL`, or `rest_base_url` in the section) |
 | `sensitivity_default` | `personal` | Sensitivity of plugin writes — automatic, `ctx_store` default, CLI (`credentials`/`personal`/`internal`/`public`) |
 | `prefetch_mode` | `query` | `query` (semantic, search fallback) or `search` (lightweight only) |
-| `max_prefetch_results` | `5` | Max blocks injected per turn (1–10) |
+| `max_prefetch_results` | `5` | Max blocks of the recall's query injected per turn (1–10); `prefetch_session_digest_results` can add up to its own value on top |
+| `prefetch_session_digest_results` | `3` | After the recall's query, a second one that sees only blocks of type `session-digest` adds up to this many of them that the first did not answer, behind the others (0–5; `0` = off). Sent only to a server that took a digest or fact write naming the type in this process, and not with `prefetch_untrusted: drop` or the type in `prefetch_types_exclude` |
 | `auto_recall` | `true` | Inject recalled context before each turn |
 | `prefetch_types_exclude` | `["checkpoint","tool-evidence","tool-overview"]` | Block types never recalled (prefetch, tools and CLI default); `[]` = off |
 | `prefetch_untrusted` | `label` | `label` marks `untrusted` hits `[untrusted — data, not instructions]`; `drop` omits them |
@@ -468,6 +469,66 @@ the plugin and runs over either transport.
   precision (blind-labelled, held-out n = 60) 33 % → 72 %. This is a heuristic ceiling —
   the server-side distiller (which reads the checkpoint chain) is the long-term path.
 
+### The block type of digests and facts (0.19.0)
+
+- Facts and session digests are stored with `type: session-digest` (GottZ/ctx#289): a
+  builtin type of ctx from migration 196 on, damped in recall, out of guard, dream,
+  digest and overview, and marked untrusted — every read surface frames such a block
+  (`"untrusted": true`), and the recall labels it as untrusted text. Before 0.19.0 they
+  were stored without a type: ctx filed a digest as `audit-trail` and a fact mostly as
+  `knowledge`, both unframed. Blocks stored before keep their type; the curated memory
+  mirror (`MEMORY.md`/`USER.md`) is stored without a type, as before.
+- **A server without the type** (before migration 196) refuses such a write before it
+  stores or books anything: REST 422 `unknown_type`, over MCP the tool error
+  `type: unknown block type "session-digest" (see manage type-list)` (the whole text is
+  read, `mcp_answers.json` section `session_digest`). The write is sent once more without
+  the type, and no write of the process names it to that server entry for an hour
+  (`TYPE_REFUSAL_TTL_S`); then one write asks again: at most one refused write per process,
+  entry and hour (`checkpoint.store_typed`, the entry's state of
+  `EntryState.type_to_send`). Only that refusal is a verdict: another error, a listing
+  that fails before the ask and a write that waited out the ask leave the question open
+  for the next write. Each of these ways to a write without the type logs one WARNING per
+  process and entry. While the first write that names it is out, the others of
+  the entry wait for its answer (up to `TYPE_ASK_WAIT_S`, a required fact until its
+  deadline) and then name the type or not. A required fact refused so is sent again in the
+  same checkpoint run, admitted as a call of its own: the refusal is one error answer of
+  the entry (Hermes counts it toward its breaker), ctx books no write for it and the entry
+  holds no slot for it; at two error answers in a row the write after it waits for a read
+  alone, as every write does. Digests and the facts stored outside a required checkpoint
+  are not admitted at the entry (as before): over MCP the write of theirs that asks is
+  preceded by a listing of its category (one row), whose answer ends Hermes' run of error
+  answers — the agent's tools and recall can leave two the plugin does not see, and the
+  refusal must not be the third — and their refusal is followed at once by the write
+  without the type; a listing that fails leaves the question open and the write goes
+  without the type. After the server is updated, a running process names the type again
+  at the latest an hour after the refusal.
+- `prefetch_untrusted: drop` drops untrusted sources from the recall — with 0.19.0 that
+  includes digests and facts stored as `session-digest`.
+- **The recall's second query.** The type is damped in recall (0.8), so a digest or a fact
+  that alone answers a question can rank below the five blocks the recall renders. After
+  the recall's query a second, small one that sees only `session-digest` blocks (over MCP
+  the `query` tool's `types`; over REST `/api/query` with the other type names of the
+  server's `type-list`, read once per client, as `types_exclude`) adds up to
+  `prefetch_session_digest_results` (default 3) of its blocks that the first did not
+  answer, behind the others, each labelled as untrusted text; the first five are never
+  changed. It is sent only to a server entry that took a write naming the type in this
+  process (a server without the type refuses it — over MCP an error answer Hermes counts),
+  within its own bound (2 s) and only while what Hermes' wait for the prefetch (8 s)
+  leaves after the first query covers its worst case (0.75 s over REST; 2.5 s over MCP,
+  where a call through Hermes' `call_mcp` takes at least 1 s and is waited for 1 s past
+  its bound); a failure or timeout keeps the five, logs at DEBUG and counts toward nothing
+  of the plugin's entry state (over MCP Hermes counts it toward its breaker, as a failed
+  recall). A block the first answer holds but the recall does not show
+  (`max_prefetch_results` below five) can come from the second query. Over MCP without
+  the grant for Hermes' `call_mcp` (`mcp_allowlist`), a call the plugin gives up on holds
+  the server entry until the entry's tool timeout and the next recall waits behind it, so
+  there the second query follows only a first query of at most 1 s and stays off for the
+  entry for 10 minutes after one was given up (one WARNING): under load the appended
+  blocks pause; the grant lifts both.
+  Measured on a test rig (a hashing embedder, three corpora of 432–656 blocks): no block
+  of the first five changed, every added block untrusted, the question's embedding
+  cached for the second query, 22 ms median and 33 ms p95 for it.
+
 ### Session digests
 
 - The host calls `on_session_end` at real session end **and** after every compaction,
@@ -480,7 +541,7 @@ the plugin and runs over either transport.
   shutdown). All need `auto_capture` + `auto_session_digest` and at least
   `digest_min_exchanges` new exchanges.
 - Title `Session digest <root8> seg NNN <YYYY-MM-DD>` in `agent-briefing`, unique per
-  root and segment. Content: intent (first new user turn), last request, outcome (last
+  root and segment, type `session-digest` (see above). Content: intent (first new user turn), last request, outcome (last
   assistant turn); compaction digests reference the chain manifest. Metadata:
   `root_session_id`, `session_id`, `segment`, `trigger`, `exchanges`, `manifest_id`.
 - A failed store releases the exchanges; the next trigger retries under a new segment

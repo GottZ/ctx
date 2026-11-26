@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_SENSITIVITY = "personal"
 VALID_SENSITIVITIES = ("credentials", "personal", "internal", "public")
 DEFAULT_MAX_PREFETCH_RESULTS = 5
+# GottZ/ctx#289: after the recall's own query, a second one that sees only blocks of type
+# ``session-digest`` adds up to this many of them behind the recalled blocks (0 = off). The type is
+# damped (0.8), so a digest or fact that alone answers a question can rank below the five.
+DEFAULT_PREFETCH_SESSION_DIGEST_RESULTS = 3
 DEFAULT_API_TIMEOUT = 10.0
 DEFAULT_SYNTHESIS_TIMEOUT = 90.0
 
@@ -109,6 +113,10 @@ CATEGORY_MEMORY = "agent-briefing"  # Hermes built-in memory (MEMORY.md)
 CATEGORY_USER = "reference"  # Hermes user profile (USER.md)
 CATEGORY_LEARNINGS = "learnings"  # pre-compress extraction
 CATEGORY_DIGEST = "agent-briefing"  # session-end digests
+# The block type of the session digests and the facts (GottZ/ctx#289, ctx migration 196): damped in
+# recall and marked untrusted, so every read surface frames their transcript text. A server without
+# it refuses the write (``unknown_type``); the plugin then stores without the type (store_typed).
+SESSION_DIGEST_TYPE = "session-digest"
 
 # Saliency heuristic thresholds (on_pre_compress)
 SALIENT_MIN_LEN = 60
@@ -137,6 +145,7 @@ def _default_config() -> dict[str, Any]:
         "sensitivity_default": DEFAULT_SENSITIVITY,
         "prefetch_mode": "query",  # "query" | "search"
         "max_prefetch_results": DEFAULT_MAX_PREFETCH_RESULTS,
+        "prefetch_session_digest_results": DEFAULT_PREFETCH_SESSION_DIGEST_RESULTS,
         "auto_recall": True,
         "auto_capture": True,  # master switch for mirror + digest
         "auto_memory_mirror": True,  # on_memory_write → CTX (needs auto_capture)
@@ -214,6 +223,16 @@ def load_ctx_config(
         )
     except Exception:
         config["max_prefetch_results"] = DEFAULT_MAX_PREFETCH_RESULTS
+    try:
+        config["prefetch_session_digest_results"] = max(
+            0,
+            min(
+                5,
+                int(config.get("prefetch_session_digest_results", DEFAULT_PREFETCH_SESSION_DIGEST_RESULTS)),
+            ),
+        )
+    except Exception:
+        config["prefetch_session_digest_results"] = DEFAULT_PREFETCH_SESSION_DIGEST_RESULTS
     config["auto_recall"] = _as_bool(config.get("auto_recall"), True)
     config["auto_capture"] = _as_bool(config.get("auto_capture"), True)
     config["auto_memory_mirror"] = _as_bool(config.get("auto_memory_mirror"), True)

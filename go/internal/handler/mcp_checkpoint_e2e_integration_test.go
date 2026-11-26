@@ -35,6 +35,13 @@
 // see that, copy that release's plugin directories into a checkout of this test
 // and run it there with the same variable.
 //
+// The driver also stores a fact as the plugin does (#289): with the block type
+// session-digest, which comes back framed, and with a type the server does not
+// know, which Hermes' MCP client hands back as ctx's refusal and the plugin
+// stores without. CTX_E2E_SERVER=before-196 says the endpoint does not know
+// session-digest either (a checkout before migration 196, the driver and the
+// plugin directories copied into it, as above).
+//
 // It needs a Python with hermes-agent's dependencies and the hermes-agent
 // checkout: CTX_CHECKPOINT_E2E_PYTHON names the interpreter, HERMES_REPO the
 // checkout. Without CTX_CHECKPOINT_E2E_PYTHON the test skips — the ci.yml

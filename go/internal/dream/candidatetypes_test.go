@@ -100,7 +100,8 @@ func TestDreamCandidateTypes_BehaviourMatchesContract(t *testing.T) {
 // three retrievable-but-not-linkable types of the shipped registry, and each
 // carried 0 active blocks on the live corpus when this test was written, so the
 // wave's behavioural delta on the current corpus is zero blocks — the change
-// closes a channel, it does not move today's rankings.
+// closes a channel, it does not move today's rankings. M196 adds session-digest
+// to them (agent session text, dream.linkable=false).
 func TestDreamCandidateTypes_BuiltinSet_BehaviourMatchesContract(t *testing.T) {
 	// An un-booted registry serves exactly the compiled-in fallback set
 	// (NewRegistry stores builtinSet in base; Snapshot returns base).
@@ -121,10 +122,12 @@ func TestDreamCandidateTypes_BuiltinSet_BehaviourMatchesContract(t *testing.T) {
 	for n := range dropped {
 		names = append(names, n)
 	}
-	if len(names) != 3 {
-		t.Errorf("visible-but-not-candidate types = %v, want the three known ones (comment, tool-evidence, tool-overview)", names)
+	// session-digest (M196): agent session text, dream.linkable=false like the
+	// tool types — retrievable, but never a dream candidate.
+	if len(names) != 4 {
+		t.Errorf("visible-but-not-candidate types = %v, want the four known ones (comment, session-digest, tool-evidence, tool-overview)", names)
 	}
-	for _, n := range []string{"comment", "tool-evidence", "tool-overview"} {
+	for _, n := range []string{"comment", "session-digest", "tool-evidence", "tool-overview"} {
 		if !dropped[n] {
 			t.Errorf("%s must leave the dream candidate allowlist", n)
 		}

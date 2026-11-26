@@ -1,9 +1,9 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 195,
-    "migration_count": 83,
-    "migration_chain_sha256": "f24183417376224819c5098893d6555efafe2ef958d898f2e52f23b7e67f43bf",
+    "migration_max": 196,
+    "migration_count": 84,
+    "migration_chain_sha256": "df392ea0f70eb16d7cf0c60d46a0ad16b92a152c89321fcd0b592914cdcb4e27",
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },

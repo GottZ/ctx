@@ -41,6 +41,7 @@ from .config import (
     CATEGORY_MEMORY,
     CATEGORY_USER,
     ORIGIN_NOTE_PREFIX,
+    SESSION_DIGEST_TYPE,
     UNTRUSTED_LABEL,
     FactLedger,
     derive_profile_name,
@@ -56,6 +57,7 @@ from .config import (
     untrusted_origin,
     untrusted_origin_note,
 )
+from .mcp_client import HOST_CALL_GRACE_S, HOST_CALL_MIN_TIMEOUT_S
 from .status import display_url
 
 # Host features newer than the MemoryProvider ABC itself; older hosts get plain fallbacks.
@@ -89,6 +91,25 @@ _CONTEXT_TAG = "<ctx-context>"
 # the frame is the model's only cue that what follows is data. Escape it (case-insensitive).
 _CONTEXT_TAG_RE = re.compile(r"</?\s*ctx-context\s*>", re.IGNORECASE)
 _PREFETCH_CACHE_TTL_S = 60.0
+# The recall's second query (GottZ/ctx#289, ``prefetch_session_digest_results``): Hermes waits
+# ``_EXTERNAL_PREFETCH_TIMEOUT_S`` (8 s, agent/memory_manager.py) for a provider's prefetch and
+# drops all of it after that, so the second query gets its own bound and only what that wait leaves
+# after the first one, less a margin; over MCP also less the grace a bounded call through Hermes'
+# call_mcp is waited for past its timeout, and at least that call's floor (mcp_client
+# HOST_CALL_GRACE_S, HOST_CALL_MIN_TIMEOUT_S). With less left it is not sent and the recall is the
+# first query's. Measured on the test rig: 22 ms median, 33 ms p95 (the question's embedding is cached).
+HOST_PREFETCH_WAIT_S = 8.0
+SESSION_DIGEST_RECALL_TIMEOUT_S = 2.0
+SESSION_DIGEST_RECALL_MARGIN_S = 0.5
+SESSION_DIGEST_RECALL_MIN_S = 0.25
+# Over MCP without the operator's grant the second query goes through Hermes' tool dispatch, where a
+# call the plugin abandons keeps the entry's RPC lock until the entry's tool timeout and the NEXT
+# recall waits behind it (measured through Hermes' MCP client: every query at 5 s, every second
+# recall past Hermes' 8 s wait and dropped whole). There it is sent only after a first query that
+# took at most SESSION_DIGEST_RECALL_FAST_MAIN_S, and after one abandoned it stays off for the entry
+# for SESSION_DIGEST_RECALL_PAUSE_S — a hanging second read costs at most one later recall per pause.
+SESSION_DIGEST_RECALL_FAST_MAIN_S = 1.0
+SESSION_DIGEST_RECALL_PAUSE_S = 600.0
 # Key values an earlier binding of this provider used, kept for redaction after a re-initialization
 # (a write scheduled through the old client redacts when its thread runs; a later text may still
 # carry the old key). At most this many, the most recent first kept; the current keys come on top.
@@ -129,13 +150,17 @@ class _PacedFactStore:
         sensitivity: str | None = None,
         tags: list[str] | None = None,
         *,
+        type: str | None = None,
         metadata: dict[str, Any] | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
         # ``timeout`` is the caller's bound of the call; the writer bounds it the same way
-        # (what is left of the run's deadline, at most api_timeout).
+        # (what is left of the run's deadline, at most api_timeout). ``type`` goes to the writer,
+        # which sends a write the server refuses for it again without it (#289).
         self._stored += 1
         extra: dict[str, Any] = {"metadata": metadata} if metadata else {}
+        if type:
+            extra["type"] = type
         return self._writer.store_paced(
             f"required fact {self._stored}",
             self._run,
@@ -146,6 +171,16 @@ class _PacedFactStore:
             tags=tags,
             **extra,
         )
+
+
+def _bounded_through_host(client: Any) -> bool:
+    """Whether ``client``'s bounded MCP query goes through Hermes' call_mcp (the grant), which frees the
+    entry when it gives up; False for any other client."""
+    check = getattr(client, "bounded_through_host", None)
+    try:
+        return bool(check("query")) if callable(check) else False
+    except Exception:
+        return False
 
 
 def _count_noise_rows(messages: list[dict[str, Any]]) -> tuple:
@@ -610,6 +645,7 @@ class CtxMemoryProvider(MemoryProvider):
         client = self._client
         if not self._active or not self._config.get("auto_recall", True) or not client:
             return ""
+        entry = self._recall_entry()
         q = (query or "").strip()
         if not q:
             return ""
@@ -620,7 +656,7 @@ class CtxMemoryProvider(MemoryProvider):
                 self._last_recall_count = cached[2]
                 return cached[1]
         try:
-            context, self._last_recall_count = self._recall(q, client)
+            context, self._last_recall_count = self._recall(q, client, entry)
             return context
         except Exception as exc:
             logger.debug("CTX prefetch failed (non-fatal): %s", self._error_text(exc))
@@ -648,10 +684,11 @@ class CtxMemoryProvider(MemoryProvider):
         client = self._client
         if client is None:
             return
+        entry = self._recall_entry()
 
         def _warm() -> None:
             try:
-                context, count = self._recall(q, client)
+                context, count = self._recall(q, client, entry)
                 with self._prefetch_lock:
                     # A re-init or session switch since the start invalidated this warm-up.
                     if generation == self._prefetch_generation:
@@ -667,15 +704,21 @@ class CtxMemoryProvider(MemoryProvider):
     def _types_exclude(self) -> list[str]:
         return list(self._config.get("prefetch_types_exclude") or [])
 
-    def _recall(self, text: str, client: CtxClient | None = None) -> tuple[str, int]:
+    def _recall(
+        self, text: str, client: CtxClient | None = None, entry: _cp.EntryState | None = None
+    ) -> tuple[str, int]:
         """Retrieval-only recall → ``(context block, hit count)``. Query path with search
         fallback (embedding backfill can make /api/query time out right after stores). Both
         paths send ``types_exclude`` (P2: checkpoints are browseable on /api/search).
-        ``client`` pins the call to a binding (prefetch, warm-ups); default: the current client."""
+        ``client`` pins the call to a binding (prefetch, warm-ups); default: the current client.
+        ``entry``: that binding's server entry (:meth:`_recall_entry`) — with it, after an answer of
+        the query path, the second query of :meth:`_session_digest_sources` may add digests and facts
+        behind the recalled blocks."""
         if client is None:
             client = self._client
         if not client:
             return "", 0
+        started = self._now()
         types_exclude = self._types_exclude()
         if self._config.get("prefetch_mode") == "search":
             return self._format_search_results(client.search(text, types_exclude=types_exclude))
@@ -683,8 +726,12 @@ class CtxMemoryProvider(MemoryProvider):
             data = client.query(text, synthesize=False, include_content=True, types_exclude=types_exclude)
             if data.get("success"):
                 sources = data.get("sources") or []
-                if sources:
-                    return self._format_sources(sources)
+                shown: list[dict[str, Any]] = []
+                if entry is not None:
+                    self._prefetch_items(sources, shown=shown)
+                extra = self._session_digest_sources(text, client, entry, shown, started)
+                if sources or extra:
+                    return self._format_sources(sources, extra)
             return "", 0
         except Exception:
             try:
@@ -692,15 +739,109 @@ class CtxMemoryProvider(MemoryProvider):
             except Exception:
                 return "", 0
 
-    def _prefetch_items(self, items: list[dict[str, Any]]) -> list[str]:
+    def _session_digest_recall_results(self) -> int:
+        """How many blocks the recall's second query adds (``prefetch_session_digest_results``); 0 when
+        they would be dropped anyway (``prefetch_untrusted: drop``, the type in ``prefetch_types_exclude``)."""
+        if self._config.get("prefetch_untrusted") == "drop" or SESSION_DIGEST_TYPE in self._types_exclude():
+            return 0
+        return int(self._config.get("prefetch_session_digest_results") or 0)
+
+    def _recall_entry(self) -> _cp.EntryState | None:
+        """The current binding's server entry for the recall's second query, taken with its client;
+        None while that query is off (no lookup of the entry then)."""
+        return _cp.entry_state(self._entry_key()) if self._session_digest_recall_results() > 0 else None
+
+    def _session_digest_sources(
+        self,
+        text: str,
+        client: Any,
+        entry: _cp.EntryState | None,
+        shown: list[dict[str, Any]],
+        started: float,
+    ) -> list[dict[str, Any]]:
+        """Up to ``prefetch_session_digest_results`` blocks of type ``session-digest`` that the recall's
+        query did not answer (GottZ/ctx#289): the type is damped, so a digest or a fact that alone
+        answers a question can rank below the recalled blocks. A second, small query that sees only
+        that type finds it; its blocks come after the recalled ones, which stay as they are, each with
+        the untrusted label of its type.
+
+        Not sent when it would be dropped anyway (``prefetch_untrusted: drop``, the type in
+        ``prefetch_types_exclude``), to an entry whose server has not taken a write naming the type in
+        this process (a server without the type refuses the query — over MCP an error answer Hermes
+        counts), or with less than :data:`SESSION_DIGEST_RECALL_MIN_S` left of Hermes' wait. Bounded by
+        its own time; a failure or a timeout keeps the recalled blocks and is logged at DEBUG, as a
+        failed recall is. It counts toward nothing of the plugin's entry state; over MCP Hermes counts a
+        failed call toward its breaker, as it counts a failed recall (which costs two: query, search).
+
+        Over MCP without the grant (Hermes' tool dispatch) a call given up on holds the entry until its
+        tool timeout and the next recall waits behind it: there it follows only a fast first query
+        (:data:`SESSION_DIGEST_RECALL_FAST_MAIN_S`) and stays off for the entry for
+        :data:`SESSION_DIGEST_RECALL_PAUSE_S` after one was given up.
+
+        ``shown``: the blocks of the first answer the recall renders — a block it holds but does not
+        show (``max_prefetch_results`` below the server's five) may still come from this query."""
+        want = self._session_digest_recall_results()
+        if entry is None or want <= 0 or not entry.type_known(SESSION_DIGEST_TYPE):
+            return []
+        elapsed = self._now() - started
+        # Through Hermes' dispatch (MCP without the grant) an abandoned call holds the entry.
+        holds = getattr(client, "transport", "") == "mcp" and not _bounded_through_host(client)
+        if holds and (entry.recall_extra_paused() or elapsed > SESSION_DIGEST_RECALL_FAST_MAIN_S):
+            return []
+        left = HOST_PREFETCH_WAIT_S - SESSION_DIGEST_RECALL_MARGIN_S - elapsed
+        floor = SESSION_DIGEST_RECALL_MIN_S
+        if getattr(client, "transport", "") == "mcp":
+            left -= HOST_CALL_GRACE_S
+            floor = max(floor, HOST_CALL_MIN_TIMEOUT_S)
+        timeout = min(SESSION_DIGEST_RECALL_TIMEOUT_S, left)
+        if timeout < floor:
+            return []
+        seen = {str(s.get("id")) for s in shown if isinstance(s, dict) and s.get("id")}
+        # The answer carries no type; every block of the type among the shown ones is marked
+        # untrusted, so this many more places leave room for ``want`` blocks not shown yet.
+        overlap = sum(1 for s in shown if isinstance(s, dict) and s.get("untrusted") is True)
+        try:
+            data = client.query_types(text, [SESSION_DIGEST_TYPE], limit=want + overlap, timeout=timeout)
+        except Exception as exc:
+            # Read the way again: Hermes can refuse the grant during the call, and the client then sends
+            # it again through the dispatch, where the call given up on holds the entry as well.
+            mcp = getattr(client, "transport", "") == "mcp"
+            if getattr(exc, "code", "") == "timeout" and (holds or (mcp and not _bounded_through_host(client))):
+                entry.pause_recall_extra(SESSION_DIGEST_RECALL_PAUSE_S)
+                entry.warn_once(
+                    SESSION_DIGEST_TYPE,
+                    "recall-abandoned",
+                    "ctx: the recall's second query (blocks of type %s) got no answer within its bound and was "
+                    "abandoned; without the grant for Hermes' call_mcp it holds the server entry until the "
+                    "entry's tool timeout, so it is not sent to this entry for %.0f minutes (mcp_allowlist lifts this)",
+                    SESSION_DIGEST_TYPE,
+                    SESSION_DIGEST_RECALL_PAUSE_S / 60,
+                )
+            logger.debug("CTX recall of session digests failed (non-fatal): %s", self._error_text(exc))
+            return []
+        rows = (data or {}).get("sources") if (data or {}).get("success") else None
+        out: list[dict[str, Any]] = []
+        for row in rows or []:
+            if isinstance(row, dict) and row.get("id") and str(row["id"]) not in seen:
+                seen.add(str(row["id"]))
+                out.append(row)
+                if len(out) >= want:
+                    break
+        return out
+
+    def _prefetch_items(
+        self, items: list[dict[str, Any]], limit: int | None = None, shown: list[dict[str, Any]] | None = None
+    ) -> list[str]:
         """Render hits as bullet lines. Defense in depth: hits whose ``type`` is in
         ``prefetch_types_exclude`` are dropped client-side too (older servers ignore
         the request filter); ``untrusted: true`` hits are labelled (or dropped with
         ``prefetch_untrusted: drop``); a hit with an ``untrusted_origin`` record gets its note line
-        under the label (#295) — a hit without one renders as before."""
+        under the label (#295) — a hit without one renders as before. ``shown`` collects the hits
+        rendered."""
         excluded = set(self._types_exclude())
         drop_untrusted = self._config.get("prefetch_untrusted") == "drop"
-        limit = int(self._config.get("max_prefetch_results", 5))
+        if limit is None:
+            limit = int(self._config.get("max_prefetch_results", 5))
         parts: list[str] = []
         skipped = 0
         for item in items:
@@ -724,6 +865,8 @@ class CtxMemoryProvider(MemoryProvider):
             if content:
                 lines.append(f"  {shorten(content, 500)}")
             parts.append("\n".join(lines))
+            if shown is not None:
+                shown.append(item)
             if len(parts) >= limit:
                 break
         if skipped:
@@ -749,12 +892,18 @@ class CtxMemoryProvider(MemoryProvider):
         closing = "</" + _CONTEXT_TAG.strip("<>") + ">"
         return f"{_CONTEXT_TAG}\n{intro}\n\n" + "\n\n".join(escaped) + "\n" + closing
 
-    def _format_sources(self, sources: list[dict[str, Any]]) -> tuple[str, int]:
+    def _format_sources(
+        self, sources: list[dict[str, Any]], extra: list[dict[str, Any]] | None = None
+    ) -> tuple[str, int]:
+        """``extra``: the second query's blocks (:meth:`_session_digest_sources`), after the others and
+        outside their ``max_prefetch_results``."""
         intro = (
             "Relevant knowledge from CTX long-term memory. Use silently when relevant; "
             "do not force it into the conversation."
         )
         parts = self._prefetch_items(sources or [])
+        if extra:
+            parts += self._prefetch_items(extra, limit=len(extra))
         return self._wrap_context(parts, intro), len(parts)
 
     def _format_search_results(self, data: dict[str, Any]) -> tuple[str, int]:
@@ -779,9 +928,14 @@ class CtxMemoryProvider(MemoryProvider):
         title: str,
         content: str,
         sensitivity: str | None,
+        *,
+        block_type: str | None = None,
+        entry: _cp.EntryState | None = None,
     ) -> bool:
         """One automatic store with provenance tags + result logging. Never raises."""
-        return self._auto_store_result(client, hook, category, title, content, sensitivity)[0]
+        return self._auto_store_result(
+            client, hook, category, title, content, sensitivity, block_type=block_type, entry=entry
+        )[0]
 
     def _auto_store_result(
         self,
@@ -794,9 +948,12 @@ class CtxMemoryProvider(MemoryProvider):
         metadata: dict[str, Any] | None = None,
         *,
         timeout: float | None = None,
+        block_type: str | None = None,
+        entry: _cp.EntryState | None = None,
     ) -> tuple:
         """Like ``_auto_store`` but returns ``(ok, block_id)``. Never raises. ``timeout`` bounds the
         store (the required facts pass the time their deadline leaves); without it the client's own.
+        ``block_type``: the type the block is stored as while the server knows it (:meth:`_store_typed`).
 
         Success → INFO (hook, profile, category/title, action, id); failure →
         WARNING. Only the (shortened) title is logged, never the content.
@@ -814,7 +971,17 @@ class CtxMemoryProvider(MemoryProvider):
         if timeout is not None:
             extra["timeout"] = timeout
         try:
-            data = client.store(category, title, content, sensitivity=sensitivity, tags=tags, **extra)
+            data = self._store_typed(
+                client,
+                block_type,
+                entry=entry,
+                category=category,
+                title=title,
+                content=content,
+                sensitivity=sensitivity,
+                tags=tags,
+                **extra,
+            )
         except CtxApiError as exc:
             if exc.code:
                 logger.warning(
@@ -872,6 +1039,44 @@ class CtxMemoryProvider(MemoryProvider):
             block_id or "?",
         )
         return True, block_id
+
+    def _store_typed(
+        self, client: Any, block_type: str | None, *, entry: _cp.EntryState | None = None, **store: Any
+    ) -> dict[str, Any]:
+        """``client.store`` naming ``block_type`` (GottZ/ctx#289) through :func:`checkpoint.store_typed` with
+        the process-wide state of the server entry: one write asks, a server without the type refuses it
+        once and the write is sent again without it. The required facts' client takes the type itself:
+        the chain writer admits that second write as a call of its own (``ChainWriter.store_paced``).
+
+        Over MCP the write that asks is preceded by a listing of its category (one row): these writes do
+        not go through the entry's admission, and Hermes counts error answers this process cannot see
+        (the agent's tools, recall) — after two of them the refusal would open Hermes' breaker for the
+        server, where the same write without the type ended the run (a fresh reviewer ran exactly that).
+        REST has no such breaker.
+
+        ``entry``: the state of ``client``'s server entry, taken together with the client when the write
+        was scheduled — a re-initialization in between can bind another server, whose entry must neither
+        take this write's verdict nor decide it. Default: the current binding's."""
+        if not block_type:
+            return client.store(**store)
+        if isinstance(client, _PacedFactStore):
+            return client.store(type=block_type, **store)
+        before_ask = None
+        if getattr(client, "transport", "") == "mcp":
+            timeout = float(self._config.get("api_timeout") or 10.0)
+            category = store.get("category")
+
+            def before_ask() -> Any:
+                return client.search(_cp.PROBE_QUERY, category=category, limit=1, timeout=timeout)
+
+        return _cp.store_typed(
+            entry if entry is not None else _cp.entry_state(self._entry_key()),
+            block_type,
+            client.store,
+            wait_s=_cp.TYPE_ASK_WAIT_S,
+            before_ask=before_ask,
+            **store,
+        )
 
     def on_memory_write(self, action: str, target: str, content: str, metadata: dict[str, Any] | None = None) -> None:
         """Mirror Hermes' curated MEMORY.md/USER.md writes to CTX (async).
@@ -997,7 +1202,7 @@ class CtxMemoryProvider(MemoryProvider):
         client = self._client
         # #299: the chain and the required facts after it write against the process-wide state of
         # this server entry (its error answers in a row, its booked writes of the window).
-        self._chain().entry = _cp.entry_state(self._entry_key())
+        entry = self._chain().entry = _cp.entry_state(self._entry_key())
 
         # P4: select facts BEFORE the chain write so their dedupe keys ride in the head/
         # manifest metadata (``fact_hashes``); keys already stored for this root are skipped.
@@ -1126,7 +1331,7 @@ class CtxMemoryProvider(MemoryProvider):
             return chain_text
 
         def _run() -> None:
-            self._store_facts(client, facts, sensitivity, ledger=ledger)
+            self._store_facts(client, facts, sensitivity, ledger=ledger, entry=entry)
 
         self._spawn_write(_run)
         lines = "\n".join(f"- {shorten(self._redacted(f) or '', 300)}" for f in facts)
@@ -1309,6 +1514,7 @@ class CtxMemoryProvider(MemoryProvider):
                     safe,
                     sensitivity,
                     timeout=max(0.5, min(api_timeout, remaining)),
+                    block_type=SESSION_DIGEST_TYPE,
                 )
                 if safe is not None
                 else (False, "")
@@ -1346,13 +1552,28 @@ class CtxMemoryProvider(MemoryProvider):
         )
 
     def _store_facts(
-        self, client: CtxClient | None, facts: list[str], sensitivity: str | None, ledger: FactLedger | None = None
+        self,
+        client: CtxClient | None,
+        facts: list[str],
+        sensitivity: str | None,
+        ledger: FactLedger | None = None,
+        *,
+        entry: _cp.EntryState | None = None,
     ) -> dict[str, int]:
+        """``entry``: the server entry of ``client``, taken with it when the write was scheduled
+        (:meth:`_store_typed`)."""
         stored = failed = 0
         for fact in facts:
             safe = self._redacted(fact)
             if safe is not None and self._auto_store(
-                client, "pre_compress", CATEGORY_LEARNINGS, derive_title(safe, prefix="fact: "), safe, sensitivity
+                client,
+                "pre_compress",
+                CATEGORY_LEARNINGS,
+                derive_title(safe, prefix="fact: "),
+                safe,
+                sensitivity,
+                block_type=SESSION_DIGEST_TYPE,
+                entry=entry,
             ):
                 stored += 1
             else:
@@ -1521,6 +1742,7 @@ class CtxMemoryProvider(MemoryProvider):
             metadata["manifest_id"] = manifest_id
         sensitivity = self._config.get("sensitivity_default")
         client = self._client
+        entry = _cp.entry_state(self._entry_key())
         logger.info(
             "CTX %s digest scheduled (profile=%s, trigger=%s, root=%s, seg=%d, exchanges=%d)",
             hook,
@@ -1534,7 +1756,17 @@ class CtxMemoryProvider(MemoryProvider):
         def _run() -> None:
             safe = self._redacted(digest)
             ok, _bid = (
-                self._auto_store_result(client, hook, CATEGORY_DIGEST, title, safe, sensitivity, metadata=metadata)
+                self._auto_store_result(
+                    client,
+                    hook,
+                    CATEGORY_DIGEST,
+                    title,
+                    safe,
+                    sensitivity,
+                    metadata=metadata,
+                    block_type=SESSION_DIGEST_TYPE,
+                    entry=entry,
+                )
                 if safe is not None
                 else (False, "")
             )

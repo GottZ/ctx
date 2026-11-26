@@ -23,7 +23,9 @@ func TestBuiltinSetShape(t *testing.T) {
 	// derived knowledge layers insight/catalog (blocks written ABOUT other
 	// blocks; excluded until the E-4 visibility switch, out of every autonomous
 	// pipeline permanently).
-	want := []string{"audit-trail", "catalog", "checkpoint", "comment", "insight", "issue", "knowledge", "reference", "system-meta", "tool-evidence", "tool-overview"}
+	// + session-digest (M196): the plugin's digests and facts, damped and
+	// untrusted, claimable by a client.
+	want := []string{"audit-trail", "catalog", "checkpoint", "comment", "insight", "issue", "knowledge", "reference", "session-digest", "system-meta", "tool-evidence", "tool-overview"}
 	if got := s.Names(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Names() = %v, want %v", got, want)
 	}
@@ -39,8 +41,9 @@ func TestBuiltinSetShape(t *testing.T) {
 	// too and therefore absent: M143 seeds them that way on purpose (K7/E-4,
 	// excluded until the pilots), which is what makes that wave deployable —
 	// p_types_visible stays byte-identical and ctx_rrf sees no change.
-	if got := s.VisibleTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "comment", "issue", "knowledge", "reference", "tool-evidence", "tool-overview"}) {
-		t.Errorf("VisibleTypes() = %v (system-meta + checkpoint must be excluded; comment is aggregate-visible, the tool types damped-visible)", got)
+	// session-digest (M196) is damped and therefore visible: recall is its point.
+	if got := s.VisibleTypes(); !reflect.DeepEqual(got, []string{"audit-trail", "comment", "issue", "knowledge", "reference", "session-digest", "tool-evidence", "tool-overview"}) {
+		t.Errorf("VisibleTypes() = %v (system-meta + checkpoint must be excluded; comment is aggregate-visible, the tool types and session-digest damped-visible)", got)
 	}
 	// guard.check: the 4 builtins + issue; comment, checkpoint and the two M136
 	// tool types are OUT (guard.check=false — consecutive evidence blocks of one
