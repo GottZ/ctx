@@ -147,13 +147,14 @@ func canon532(r *TemporalResult) string {
 // holdout532Right reports whether answer, written by canon532, fits the
 // expectation spec: some alternative (split by " | ") names the same set of
 // dates (a window of one day is that day), and every date of it with an hour
-// mark carries that hour ("@-": none); NONE fits only no answer.
+// mark carries that hour each time the answer names it ("@-": none); NONE
+// fits only no answer.
 func holdout532Right(spec, answer string) bool {
-	got := map[string]string{}
+	got := map[string][]string{}
 	if answer != "NIL" {
 		for _, it := range strings.Split(answer, ";") {
 			key, hour, _ := strings.Cut(it, "@")
-			got[oneDay532(key)] = hour
+			got[oneDay532(key)] = append(got[oneDay532(key)], hour)
 		}
 	}
 	for _, alt := range strings.Split(spec, " | ") {
@@ -170,14 +171,16 @@ func holdout532Right(spec, answer string) bool {
 		fits := true
 		for _, it := range items {
 			key, want, marked := strings.Cut(it, "@")
-			hour, ok := got[oneDay532(key)]
-			switch {
-			case !ok:
+			hours, ok := got[oneDay532(key)]
+			if !ok {
 				fits = false
-			case marked && want == "-":
-				fits = fits && hour == ""
-			case marked:
-				fits = fits && hour == want
+				continue
+			}
+			if want == "-" {
+				want = ""
+			}
+			for _, hour := range hours {
+				fits = fits && (!marked || hour == want)
 			}
 		}
 		if fits {
@@ -185,6 +188,32 @@ func holdout532Right(spec, answer string) bool {
 		}
 	}
 	return false
+}
+
+// TestHoldout532RightHoldsEveryHour: an expectation with an hour mark fits
+// only an answer whose every hour of that date is the marked one, in either
+// order; the same date twice with the same hour, and an expectation without a
+// mark, fit as before.
+func TestHoldout532RightHoldsEveryHour(t *testing.T) {
+	for _, c := range []struct {
+		spec, answer string
+		want         bool
+	}{
+		{"D:2026-11-23@9", "D:2026-11-23@17;D:2026-11-23@9", false},
+		{"D:2026-11-23@9", "D:2026-11-23@9;D:2026-11-23@17", false},
+		{"D:2026-11-23@-", "D:2026-11-23;D:2026-11-23@9", false},
+		{"D:2026-11-23@-", "D:2026-11-23@9;D:2026-11-23", false},
+		{"D:2026-11-23@9", "D:2026-11-23@9;D:2026-11-23@9", true},
+		{"D:2026-11-23@9", "W:2026-11-23..2026-11-23@9;D:2026-11-23@9", true},
+		{"D:2026-11-23", "D:2026-11-23@17;D:2026-11-23@9", true},
+		{"D:2026-11-23@-", "D:2026-11-23", true},
+		{"D:2026-11-23@9;D:2026-11-24", "D:2026-11-24@19;D:2026-11-23@9", true},
+		{"NONE", "NIL", true},
+	} {
+		if got := holdout532Right(c.spec, c.answer); got != c.want {
+			t.Errorf("holdout532Right(%q, %q) = %v, want %v", c.spec, c.answer, got, c.want)
+		}
+	}
 }
 
 // oneDay532 writes a window of one day as that day.
