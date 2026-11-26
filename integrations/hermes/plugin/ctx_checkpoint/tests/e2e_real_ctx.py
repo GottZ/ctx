@@ -240,8 +240,10 @@ def _session_digest_type(client) -> dict:
             _fail(f"{label}: stored as {block.get('type')!r}, want {want!r}")
         if (block.get("untrusted") is True) == refused:
             _fail(f"{label}: untrusted={block.get('untrusted')!r} for a block of type {block.get('type')!r}")
-        if entry.type_to_send(block_type) == refused:
-            _fail(f"{label}: the entry's verdict on {block_type!r} is not {'refused' if refused else 'known'}")
+        verdict = entry.type_to_send(block_type)
+        want_verdict = "" if refused else "known"
+        if verdict != want_verdict:
+            _fail(f"{label}: the entry's verdict on {block_type!r} is {verdict!r}, want {want_verdict!r}")
         out[label] = {"type": block.get("type"), "untrusted": bool(block.get("untrusted")), "refused": refused}
     return out
 
