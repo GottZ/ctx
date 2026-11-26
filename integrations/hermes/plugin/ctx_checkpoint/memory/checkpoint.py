@@ -128,6 +128,10 @@ TYPE_ASK_WAIT_S = 25.0
 """How long (real seconds) a write that would name a block type waits for the answer to the write that asks
 about it, before it goes without the type: the ask is a read and a write, each within the client's default
 bound of a call (10 s), plus margin. A required fact waits at most until its run's deadline."""
+TYPE_REFUSAL_TTL_S = 3600.0
+"""How long (real seconds) a server's refusal of a block type holds for the writes of this process: after
+it, one write asks again (a server updated meanwhile then gets the type). One hour: a server without the
+type sees at most one refused write per hour from a process and entry, each asked like the first one."""
 # Hermes calls on_pre_compress in the compaction worker before the summary call, and its wait for
 # that worker counts from the worker's last progress, which only the summary stream reports
 # (agent/conversation_compression.py _await_worker_within_budget; the window comes from
@@ -969,42 +973,75 @@ class EntryState:
         self._runs: list[Reservation] = []
         self._next_order = 0
         # What the entry's server answered to the block types the writes of this process named
-        # (GottZ/ctx#289, :meth:`type_to_send`): name -> _TYPE_ASKING / _TYPE_KNOWN / _TYPE_REFUSED.
+        # (GottZ/ctx#289, :meth:`type_to_send`): name -> _TYPE_ASKING / _TYPE_KNOWN / _TYPE_REFUSED,
+        # and when a refusal came (time.monotonic(); it holds for TYPE_REFUSAL_TTL_S).
         self._block_types: dict[str, str] = {}
+        self._type_refused_at: dict[str, float] = {}
+        # (name, way) of the fallbacks to a write without the type already logged (:meth:`warn_once`).
+        self._type_warned: set[tuple[str, str]] = set()
 
     def type_to_send(self, name: str, wait_s: float = 0.0) -> str:
         """Whether a write names the block type ``name`` (GottZ/ctx#289): :data:`TYPE_ASK` (this write
         asks — the first of the process), ``"known"`` (the server took the type), or ``""`` (without
         it). A server without the type refuses such a write (``unknown_type``), so one write asks alone;
         the others wait for its answer (:meth:`type_answered`) up to ``wait_s`` real seconds and go
-        without the type when it does not come. After a refusal no write of the process names the type
-        again — at most one refused write per process and entry. A server updated meanwhile is asked
-        again by the next process."""
+        without the type when it does not come — that one write only: no verdict is taken from a wait.
+        After a refusal no write of the process names the type for :data:`TYPE_REFUSAL_TTL_S`; then one
+        write asks again — at most one refused write per process and entry and hour."""
         end = time.monotonic() + max(0.0, float(wait_s))
+        waited_out = False
         with self._cond:
             while self._block_types.get(name) == _TYPE_ASKING:
                 left = end - time.monotonic()
                 if left <= 0:
-                    return ""
+                    waited_out = True
+                    break
                 self._cond.wait(left)
             state = self._block_types.get(name)
+            if waited_out:
+                state = _TYPE_ASKING
+            elif (
+                state == _TYPE_REFUSED and time.monotonic() - self._type_refused_at.get(name, 0.0) >= TYPE_REFUSAL_TTL_S
+            ):
+                state = None
             if state is None:
                 self._block_types[name] = _TYPE_ASKING
                 return TYPE_ASK
-            return _TYPE_KNOWN if state == _TYPE_KNOWN else ""
+        if waited_out:
+            self.warn_once(
+                name,
+                "wait",
+                "ctx: a write waited %.0fs for the answer to the write that asks whether the server knows block "
+                "type %s and is stored without the type; later writes name it once that answer says so",
+                float(wait_s),
+                name,
+            )
+            return ""
+        return _TYPE_KNOWN if state == _TYPE_KNOWN else ""
 
     def type_answered(self, name: str, known: bool | None) -> None:
         """The answer to a write that named ``name``: True (stored or confirmed, so the server knows the
-        type), False (refused as unknown), None (no verdict: another error, an abandoned call — the next
-        write asks again unless the type is known)."""
+        type), False (refused as unknown — only ctx's ``unknown_type`` answer is one), None (no verdict:
+        another error, an abandoned call — the next write asks again unless the type is known)."""
         with self._cond:
             if known is True:
                 self._block_types[name] = _TYPE_KNOWN
             elif known is False:
                 self._block_types[name] = _TYPE_REFUSED
+                self._type_refused_at[name] = time.monotonic()
             elif self._block_types.get(name) == _TYPE_ASKING:
                 del self._block_types[name]
             self._cond.notify_all()
+
+    def warn_once(self, name: str, way: str, message: str, *args: Any) -> None:
+        """Log ``message`` as a WARNING the first time this process stores a write of type ``name`` to this
+        entry without the type by the fallback ``way`` (GottZ/ctx#289); later ones of that way are silent.
+        The message carries no server text."""
+        with self._cond:
+            if (name, way) in self._type_warned:
+                return
+            self._type_warned.add((name, way))
+        logger.warning(message, *args)
 
     @property
     def errors_in_row(self) -> int:
@@ -1241,12 +1278,19 @@ def reset_entry_states() -> None:
         _ENTRY_STATES.clear()
 
 
-def _answered(read: Callable[[], Any]) -> bool:
-    """Whether ``read()`` got an answer (no failure envelope, nothing raised)."""
+def _unanswered(read: Callable[[], Any]) -> str:
+    """``""`` when ``read()`` got an answer, else how it failed — the error's class and code, no server
+    text (a failure envelope, anything raised)."""
+
+    def shown(code: Any) -> str:
+        text = code if isinstance(code, str) else ""
+        return f" [{text}]" if text in REJECT_CODES or text in _CLIENT_CODES else (" [other code]" if text else "")
+
     try:
-        return not is_failure_envelope(read())
-    except Exception:
-        return False
+        data = read()
+    except Exception as exc:
+        return f"{type(exc).__name__}{shown(getattr(exc, 'code', ''))}"
+    return f"failure envelope{shown(response_code(data))}" if is_failure_envelope(data) else ""
 
 
 def _refuses_type(error: BaseException) -> bool:
@@ -1276,13 +1320,22 @@ def store_typed(
     ``before_ask``: a read sent before the write that asks, which has to be answered first (a write
     outside the chain writer, over MCP): its answer ends the run of error answers Hermes counts for the
     entry — calls this process cannot see (the agent's tools, recall) may have left two — so the
-    refusal is never the third. A read that fails leaves the question open and the write goes without
-    the type."""
+    refusal is never the third. A read that fails leaves the question open and this one write goes
+    without the type; the next one asks again (no verdict is taken from a failed read)."""
     ask = entry.type_to_send(block_type, wait_s) if block_type else ""
     if not ask:
         return store(**kwargs)
-    if ask == TYPE_ASK and before_ask is not None and not _answered(before_ask):
+    failed = _unanswered(before_ask) if ask == TYPE_ASK and before_ask is not None else ""
+    if failed:
         entry.type_answered(block_type, None)
+        entry.warn_once(
+            block_type,
+            "read",
+            "ctx: the read before the write that asks whether the server knows block type %s got no answer "
+            "(%s); that write is stored without the type, the next one asks again",
+            block_type,
+            failed,
+        )
         return store(**kwargs)
     try:
         data = store(type=block_type, **kwargs)
@@ -1297,10 +1350,13 @@ def store_typed(
             return data
     # Out of the handler: the refusal is not the implicit context of an error of the second write (#304).
     entry.type_answered(block_type, False)
-    logger.info(
-        "ctx: the server does not know block type %s (a ctx server before migration 196); the write is sent "
-        "without it, and no write of this process names it again",
+    entry.warn_once(
         block_type,
+        "refused",
+        "ctx: the server does not know block type %s (a ctx server before migration 196); the write is sent "
+        "without it, no write of this process names it for %.0f minutes, then one asks again",
+        block_type,
+        TYPE_REFUSAL_TTL_S / 60,
     )
     return store(**kwargs)
 

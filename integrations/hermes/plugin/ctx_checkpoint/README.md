@@ -215,8 +215,7 @@ every context (labelled via `metadata.agent_context`).
 session read, so they are stored as ctx's builtin type `session-digest` (migration 196):
 damped in recall and framed as untrusted on every read surface. A ctx server without
 the type refuses the first such write of the process; the plugin stores it without the
-type and does not name the type to that server again until it restarts — no checkpoint
-fails for it. Details in the [engine README](memory/README.md#the-block-type-of-digests-and-facts-0190).
+type and asks that server again at most once an hour — no checkpoint fails for it. Details in the [engine README](memory/README.md#the-block-type-of-digests-and-facts-0190).
 
 **Transport.** Over the default MCP dispatch, retrieval-only recall calls the ctx
 `query` tool with `synthesize: false, include_content: true` — the semantic hybrid

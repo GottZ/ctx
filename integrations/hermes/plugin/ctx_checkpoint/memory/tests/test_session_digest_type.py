@@ -165,8 +165,8 @@ def test_another_error_of_a_typed_write_is_no_verdict_on_the_type(make_provider)
 
 def test_one_write_asks_and_the_others_wait_for_its_verdict():
     """EntryState: the first write of a type asks; while it is out, the others wait for its answer (up to
-    ``wait_s``) and go without the type when it does not come; a refusal holds for the process, an answer
-    makes the type known, no verdict lets the next write ask."""
+    ``wait_s``) and go without the type when it does not come; a refusal holds (``TYPE_REFUSAL_TTL_S``), an
+    answer makes the type known, no verdict lets the next write ask."""
     name = SESSION_DIGEST_TYPE
     entry = _cp.EntryState()
     assert entry.type_to_send(name) == _cp.TYPE_ASK
@@ -363,3 +363,91 @@ def test_the_required_facts_wait_for_a_write_that_asks(make_provider):
     assert f"stored {len(FACTS)} fact block(s)" in receipt, receipt
     assert _typed(client.calls, CATEGORY_LEARNINGS) == [SESSION_DIGEST_TYPE] * len(FACTS)
     p.shutdown()
+
+
+# -- the ways a write goes without the type: one WARNING each, a verdict only from a refusal ---------
+
+
+def _store_on(server: dict):
+    """A store against a server that knows the type while ``server["knows"]``; it records every call."""
+
+    def store(**kwargs):
+        server["calls"].append(kwargs)
+        if kwargs.get("type") and not server["knows"]:
+            raise CtxApiError("HTTP 422 [unknown_type]: refused", status=422, code="unknown_type")
+        return {"success": True, "block": {"id": f"b{len(server['calls'])}"}}
+
+    return store
+
+
+def test_a_refusal_expires_and_one_write_asks_again(monkeypatch):
+    """A refusal holds for ``TYPE_REFUSAL_TTL_S``; then one write asks again — refused once more by a
+    server still without the type, taken by a server updated meanwhile."""
+    monkeypatch.setattr(_cp, "TYPE_REFUSAL_TTL_S", 0.2)
+    entry = _cp.EntryState()
+    server = {"knows": False, "calls": []}
+    store = _store_on(server)
+    for i in range(3):
+        _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, title=f"w{i}")
+    assert [c.get("type") for c in server["calls"]] == [SESSION_DIGEST_TYPE, None, None, None]
+    threading.Event().wait(0.3)
+    _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, title="after one expiry")
+    _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, title="right after")
+    refused = [c for c in server["calls"] if c.get("type")]
+    assert len(refused) == 2  # one refused write per expiry
+    assert server["calls"][-1].get("type") is None
+    threading.Event().wait(0.3)
+    server["knows"] = True  # the server was updated
+    _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, title="after the update")
+    _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, title="known")
+    assert [c.get("type") for c in server["calls"][-2:]] == [SESSION_DIGEST_TYPE, SESSION_DIGEST_TYPE]
+    assert entry.type_to_send(SESSION_DIGEST_TYPE) == "known"
+
+
+def _warnings(caplog, needle: str) -> list:
+    return [r for r in caplog.records if r.levelname == "WARNING" and needle in r.getMessage()]
+
+
+def test_a_failed_read_before_the_ask_warns_once_and_the_next_write_asks_again(caplog):
+    entry = _cp.EntryState()
+    server = {"knows": True, "calls": []}
+    store = _store_on(server)
+    reads = {"fail": True}
+
+    def before_ask():
+        if reads["fail"]:
+            raise CtxApiError("connection error: simulated", code="timeout")
+        return {"success": True, "results": []}
+
+    with caplog.at_level("WARNING"):
+        for i in range(2):
+            _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, before_ask=before_ask, title=f"w{i}")
+        reads["fail"] = False
+        _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, before_ask=before_ask, title="w2")
+    assert [c.get("type") for c in server["calls"]] == [None, None, SESSION_DIGEST_TYPE]
+    warned = _warnings(caplog, "got no answer")
+    assert len(warned) == 1 and "CtxApiError [timeout]" in warned[0].getMessage()
+    assert "simulated" not in warned[0].getMessage()  # no server or client text
+
+
+def test_a_write_that_waits_out_the_ask_warns_once_and_takes_no_verdict(caplog):
+    entry = _cp.EntryState()
+    assert entry.type_to_send(SESSION_DIGEST_TYPE) == _cp.TYPE_ASK  # an ask that does not come back
+    with caplog.at_level("WARNING"):
+        assert entry.type_to_send(SESSION_DIGEST_TYPE, wait_s=0.05) == ""
+        assert entry.type_to_send(SESSION_DIGEST_TYPE, wait_s=0.05) == ""
+    assert len(_warnings(caplog, "waited")) == 1
+    entry.type_answered(SESSION_DIGEST_TYPE, None)  # the ask ends without a verdict
+    assert entry.type_to_send(SESSION_DIGEST_TYPE) == _cp.TYPE_ASK  # the next write asks again
+
+
+def test_a_refusal_warns_once_per_process_and_entry(caplog, monkeypatch):
+    monkeypatch.setattr(_cp, "TYPE_REFUSAL_TTL_S", 0.1)
+    entry = _cp.EntryState()
+    store = _store_on({"knows": False, "calls": []})
+    with caplog.at_level("WARNING"):
+        _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, title="w0")
+        threading.Event().wait(0.15)
+        _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, title="w1")  # asks again, refused again
+        _cp.store_typed(_cp.EntryState(), SESSION_DIGEST_TYPE, store, title="other entry")
+    assert len(_warnings(caplog, "does not know block type")) == 2  # once for each entry

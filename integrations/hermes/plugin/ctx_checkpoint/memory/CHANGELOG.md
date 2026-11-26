@@ -21,11 +21,14 @@ Digests and facts are stored as ctx's block type `session-digest` (GottZ/ctx#289
   type-list)`, read into the code `unknown_type` for a store that named a type —
   `mcp_client._code_for_error`, shared fixture `mcp_answers.json` section `session_digest`). The
   write is sent once more without the type, and the server entry's process-wide state
-  (`EntryState.type_to_send`/`type_answered`, `checkpoint.store_typed`) keeps every later write of
-  the process from naming it: at most one refused write per process and entry. While the first
-  write that names it is out, other writes of the entry wait for its answer (`TYPE_ASK_WAIT_S`, a
-  required fact until its deadline); an error that is no refusal of the type leaves the question
-  open for the next write.
+  (`EntryState.type_to_send`/`type_answered`, `checkpoint.store_typed`) keeps the writes of the
+  process from naming it for an hour (`TYPE_REFUSAL_TTL_S`); then one write asks again, so a server
+  updated meanwhile gets the type and one without it sees at most one refused write per process,
+  entry and hour. While the first write that names it is out, other writes of the entry wait for
+  its answer (`TYPE_ASK_WAIT_S`, a required fact until its deadline); only ctx's `unknown_type`
+  answer is a verdict — any other error, a write that waited out the ask and a failed listing
+  before it leave the question open for the next write. Each way a write goes without the type
+  logs one WARNING per process and entry (a refusal, a failed listing, a wait run out).
 - **The required facts.** A required fact refused for its type is sent again in the same run by
   `ChainWriter.store_paced`, admitted as a call of its own: the refusal is released as an error
   answer of the entry (Hermes counts it), without a slot of the window (ctx checks the type before
@@ -39,9 +42,9 @@ Digests and facts are stored as ctx's block type `session-digest` (GottZ/ctx#289
   Hermes' run, so the refusal is not the third error answer in a row (a fresh reviewer reproduced
   that against v5.87.0 without the listing: two failed agent reads, the digest's refusal opened the
   breaker, the digest was lost and the next checkpoint failed). A failed listing leaves the question
-  open and the write goes without the type. One listing per process and entry, none once the
-  answer is known; REST has no breaker and sends none. A running process keeps storing without the
-  type after its server is updated, until it restarts.
+  open and that write goes without the type. One listing for each write that asks (after a
+  successful first listing: one per process and entry and hour on a server without the type, none
+  once the answer is known); REST has no breaker and sends none.
 
 ## [ctx_checkpoint 0.18.0] — 2026-11-26
 

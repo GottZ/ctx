@@ -481,9 +481,13 @@ the plugin and runs over either transport.
   stores or books anything: REST 422 `unknown_type`, over MCP the tool error
   `type: unknown block type "session-digest" (see manage type-list)` (the whole text is
   read, `mcp_answers.json` section `session_digest`). The write is sent once more without
-  the type, and no later write of the process names it to that server entry: at most one
-  refused write per process and entry (`checkpoint.store_typed`, the entry's state of
-  `EntryState.type_to_send`). While the first write that names it is out, the others of
+  the type, and no write of the process names it to that server entry for an hour
+  (`TYPE_REFUSAL_TTL_S`); then one write asks again: at most one refused write per process,
+  entry and hour (`checkpoint.store_typed`, the entry's state of
+  `EntryState.type_to_send`). Only that refusal is a verdict: another error, a listing
+  that fails before the ask and a write that waited out the ask leave the question open
+  for the next write. Each of these ways to a write without the type logs one WARNING per
+  process and entry. While the first write that names it is out, the others of
   the entry wait for its answer (up to `TYPE_ASK_WAIT_S`, a required fact until its
   deadline) and then name the type or not. A required fact refused so is sent again in the
   same checkpoint run, admitted as a call of its own: the refusal is one error answer of
@@ -495,8 +499,8 @@ the plugin and runs over either transport.
   answers — the agent's tools and recall can leave two the plugin does not see, and the
   refusal must not be the third — and their refusal is followed at once by the write
   without the type; a listing that fails leaves the question open and the write goes
-  without the type. After the server is updated, a running process keeps storing without
-  the type until it restarts.
+  without the type. After the server is updated, a running process names the type again
+  at the latest an hour after the refusal.
 - `prefetch_untrusted: drop` drops untrusted sources from the recall — with 0.19.0 that
   includes digests and facts stored as `session-digest`.
 

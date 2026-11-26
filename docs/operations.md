@@ -2327,7 +2327,7 @@ Issue #289. The Hermes plugin `ctx_checkpoint` stores, with `memory: true`, sess
 
 **Rolling deploy and way back.** Executed with v5.87.0 (the release before) on both images. While v5.87.0 runs and 196 is applied underneath, it reloads its registry on the notice: the type resolves from the row (`type-list`, a store with `type: session-digest` is accepted, search marks the blocks `untrusted`); its schema-contract recheck (every 60 s) then reports `schema_contract: attention`. Restarted on 196 it finds `_migrations:196` without an embedded file (`migration_integrity`, breaking): in mode `warn` (the default) it starts with `/health` `degraded` and `schema_contract: attention`, in mode `enforce` it refuses to start (`CTX_CONTRACT_MODE=off` is the escape hatch). A binary with 196 started on a database at 195 applies the migration at boot and serves `/health` `ok`. The row stays when rolling back: the older binary serves it as above.
 
-**Plugins before 0.19.0** write untyped as before. A plugin 0.19.0 against a server without the type is refused once per process and server entry and writes without the type from then on (plugin README).
+**Plugins before 0.19.0** write untyped as before. A plugin 0.19.0 against a server without the type is refused once per process and server entry, writes without the type for an hour and then asks once more (plugin README); each such fallback logs one WARNING per process and entry.
 
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
