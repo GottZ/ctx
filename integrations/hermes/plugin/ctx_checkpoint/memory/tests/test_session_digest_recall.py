@@ -257,3 +257,35 @@ def test_a_block_the_first_answer_holds_but_does_not_show_may_come_from_the_seco
     assert _titles(context) == [s["title"] for s in MAIN[:4]] + [s["title"] for s in TYPED[:3]]
     assert client.typed_calls[0]["limit"] == 3  # no untrusted block among the four shown
     p.shutdown()
+
+
+def test_the_rest_type_list_is_read_within_the_second_query_s_bound(monkeypatch):
+    """The one type-list of a REST client counts against the second query's bound: the query gets what
+    the listing left, and nothing is sent when it left nothing."""
+    import ctx_plugin.client as client_mod
+
+    now = {"t": 100.0}
+    monkeypatch.setattr(client_mod, "_monotonic", lambda: now["t"])
+    client = CtxClient("http://ctx.invalid", "test-key-not-real")
+    sent: list = []
+
+    def request(method, path, payload=None, timeout=None):
+        sent.append((payload.get("action") or "query", timeout))
+        if payload.get("action") == "type-list":
+            now["t"] += listing_takes
+            return {"success": True, "types": [{"name": n} for n in ("knowledge", SESSION_DIGEST_TYPE)]}
+        return {"success": True, "sources": []}
+
+    monkeypatch.setattr(client, "_request", request)
+    listing_takes = 0.6
+    client.query_types("when?", [SESSION_DIGEST_TYPE], limit=3, timeout=1.5)
+    assert sent[0] == ("type-list", 1.5)
+    assert sent[1][0] == "query" and sent[1][1] == pytest.approx(0.9)
+
+    other = CtxClient("http://ctx.invalid", "test-key-not-real")
+    sent.clear()
+    monkeypatch.setattr(other, "_request", request)
+    listing_takes = 2.0
+    with pytest.raises(CtxApiError):
+        other.query_types("when?", [SESSION_DIGEST_TYPE], limit=3, timeout=1.5)
+    assert [what for what, _ in sent] == ["type-list"]
