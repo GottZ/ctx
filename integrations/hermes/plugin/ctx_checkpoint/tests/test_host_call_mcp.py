@@ -322,12 +322,49 @@ def test_without_the_grant_or_without_call_mcp_or_on_a_refused_grant_the_calls_a
     no_grant = _run_scenario(_isolated_hermes_home, granted=False, call_mcp=recorder)
     assert asked == []
     refused = _run_scenario(_isolated_hermes_home, granted=True, call_mcp=refusing)
-    # Refused once (before any transport work); every later call goes through the dispatch.
-    assert asked == [("refused", "ctx", "search")]
+    # Refused once per checkpoint (before any transport work); every later call of that checkpoint
+    # goes through the dispatch (#289: the next checkpoint asks again).
+    assert asked == [("refused", "ctx", "search"), ("refused", "ctx", "search")]
 
     assert "abandoned" in before["error"] and "[timeout]" in before["error"]
     for other in (no_grant, refused):
         assert other == before
+
+
+def test_a_grant_hermes_refused_is_used_again_by_the_next_checkpoint(_isolated_hermes_home, registered):
+    """A5 (#289): Hermes refused the grant during one checkpoint (its own read of config.yaml did not
+    list the entry, e.g. the operator was changing it). The client kept that refusal until the
+    provider connected again, so a grant restored meanwhile went unused; it holds for the checkpoint
+    that received it now, and the next checkpoint goes through call_mcp again."""
+    _write_config(_isolated_hermes_home, granted=True)
+    double = DispatchDouble()
+    hermes_grants = {"ctx": False}
+    asked: list[str] = []
+
+    def call_mcp(server, tool, arguments=None, timeout=30):
+        asked.append(tool)
+        if not hermes_grants[server]:
+            raise PermissionError(f"Plugin 'ctx_checkpoint' is not allowed to call MCP server {server!r}")
+        return _envelope(double.dispatch(mcp_tool_name(server, tool), dict(arguments or {})))
+
+    dispatched: list[str] = []
+
+    def dispatch(name, args, **kwargs):
+        dispatched.append(name.rsplit("__", 1)[-1])
+        return double.dispatch(name, args, **kwargs)
+
+    provider = CtxCheckpointMemoryProvider(dispatch=dispatch, call_mcp=call_mcp)
+    provider.initialize("session-regrant", platform="cli", hermes_home=str(_isolated_hermes_home))
+    assert "ctx checkpoint head:" in provider.on_pre_compress(_turns("first"), require_checkpoint=True)
+    assert asked == ["search"] and "store" in dispatched  # refused once, the rest through the dispatch
+
+    hermes_grants["ctx"] = True
+    asked.clear()
+    dispatched.clear()
+    assert "ctx checkpoint head:" in provider.on_pre_compress(_turns("second"), require_checkpoint=True)
+
+    assert dispatched == []
+    assert asked and "store" in asked
 
 
 # -- with the grant: the bounded calls through call_mcp ----------------------------------------
@@ -429,3 +466,67 @@ def test_the_largest_head_and_manifest_reads_stay_under_hermes_plugin_cap():
     block = {"id": ids[0], "title": "Compaction source " + "t" * 120, "content": content, "metadata": metadata}
     raw = json.dumps({"result": json.dumps(block, indent=2)})
     assert len(raw) < PluginContext._MCP_RESULT_CHAR_CAP, len(raw)
+
+
+# -- A6 (#289): an entry that needs an approval for its writes -----------------------------------
+
+
+def _untrusted(monkeypatch, consent) -> list[str]:
+    """The entry ``ctx`` as ``trust: untrusted``: Hermes asks the user before every call of a tool
+    that is not read-only (ctx marks search, get and query read-only, store not), in the call's
+    handler, before the call's own timeout starts (tools/mcp_tool_handlers.py ``_trust_gate_check``).
+    ``consent`` stands in for the user's answer; returns the tools Hermes asked about."""
+    from tools import approval_prompt, mcp_tool
+
+    monkeypatch.setitem(mcp_tool._server_trust_levels, "ctx", "untrusted")
+    monkeypatch.setitem(mcp_tool._tool_read_only_hints, "ctx", {"search": True, "get": True, "query": True})
+    asked: list[str] = []
+
+    def ask(message, description, **kwargs):
+        asked.append(message.split("'")[1])  # "MCP tool '<tool>' on UNTRUSTED server ..."
+        return consent()
+
+    monkeypatch.setattr(approval_prompt, "request_elicitation_consent", ask)
+    return asked
+
+
+def test_with_the_grant_a_checkpoint_whose_writes_are_approved_in_time_completes(
+    hermes_mcp, _isolated_hermes_home, monkeypatch
+):
+    """Today's success case on an entry that needs approval: each store is approved within the
+    checkpoint's bound, and the checkpoint completes. Refusing the host path (or the checkpoint) for
+    such an entry would lose it, so the plugin does not; the README says what a late approval does."""
+    asked = _untrusted(monkeypatch, lambda: (time.sleep(0.2), "accept")[1])
+    _write_config(_isolated_hermes_home, granted=True)
+    provider = _loaded_provider(hermes_mcp, _isolated_hermes_home)
+
+    receipt = provider.on_pre_compress(_turns("approved"), require_checkpoint=True)
+
+    assert "ctx checkpoint head:" in receipt
+    assert asked == ["store", "store", "store"]  # the part, the manifest and the head; no read asks
+    assert len(hermes_mcp.ctx.heads()) == 1
+
+
+def test_with_the_grant_a_store_approved_after_the_checkpoint_gave_up_still_reaches_ctx(
+    hermes_mcp, _isolated_hermes_home, monkeypatch
+):
+    """Hermes asks before the call's timeout starts, so the checkpoint's bound (its timeout plus one
+    second) runs out while the question is open; the checkpoint fails (fail-closed). An approval
+    given afterwards still sends that store — the grant cannot end a call that has not started —
+    and ctx stores it: the write the checkpoint gave up on keeps its slot, and a retry meets it."""
+    answer = threading.Event()
+    asked = _untrusted(monkeypatch, lambda: (answer.wait(30), "accept")[1])
+    _write_config(_isolated_hermes_home, granted=True)
+    provider = _loaded_provider(hermes_mcp, _isolated_hermes_home)
+
+    with pytest.raises(CtxCheckpointError, match=r"\[timeout\]"):
+        provider.on_pre_compress(_turns("late"), require_checkpoint=True)
+    assert asked == ["store"] and not hermes_mcp.server._rpc_lock.locked()
+    stores = [args for tool, args in hermes_mcp.ctx.calls if tool == "store"]
+    assert stores == []
+
+    answer.set()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not [t for t, _a in hermes_mcp.ctx.calls if t == "store"]:
+        time.sleep(0.02)
+    assert [t for t, _a in hermes_mcp.ctx.calls if t == "store"] == ["store"]

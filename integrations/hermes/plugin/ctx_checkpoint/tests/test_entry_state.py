@@ -21,6 +21,7 @@ import itertools
 import json
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -466,10 +467,10 @@ def test_an_answer_ends_only_the_errors_released_before_its_call_was_sent():
     later = state.admit(write=True, window_writes=5, now=0.3).ticket
     state.release(later, error=True, now=0.4)
     assert state.errors_in_row == 2
-    assert state.admit(write=True, window_writes=5, now=0.5).probe
-    # A read sent now was sent after both: its answer ends them.
-    fresh = state.admit(write=False, window_writes=5, now=0.6).ticket
-    state.release(fresh, error=False, now=0.7)
+    probe = state.admit(write=True, window_writes=5, now=0.5)
+    # The read that comes with the admission (#289) is sent after both: its answer ends them.
+    assert probe.probe and probe.ticket is not None and not probe.ticket.write
+    state.release(probe.ticket, error=False, now=0.7)
     assert state.errors_in_row == 0
 
 
@@ -559,6 +560,8 @@ def test_many_threads_on_one_entry_never_show_it_more_errors_in_a_row_than_allow
                 if admission.ticket is None:
                     time.sleep(0.0002)
                     continue  # stop, pace or wait: the caller would not send now
+                if admission.probe:
+                    write = False  # the read before a write at the limit (#289: its ticket comes with it)
                 time.sleep(rng.random() * 0.001)  # the way to the server: calls of other threads overlap
                 with server_lock:
                     with clock_lock:
@@ -1100,3 +1103,412 @@ def test_without_hermes_connection_identity_the_key_is_the_raw_entry_as_before(_
     assert key_a != key_b
     raw = json.dumps({"url": a["url"], "tools": a["tools"]}, sort_keys=True, ensure_ascii=False, default=str)
     assert key_a == ("mcp", "ctx", hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()[:32], "")
+
+
+# -- GottZ/ctx#289: the follow-ups of #299 ------------------------------------------------------
+
+
+class _WriterCtx:
+    """ctx as the chain writer's client sees it (the REST client's answer shapes): reads answer
+    with no row, a store books a new block — unless ``refuse`` is above zero (ctx's write limit)
+    or ``searches_fail_after`` reads have answered (a search backend that fails from then on)."""
+
+    def __init__(self, *, refuse: int = 0, searches_fail_after: int | None = None, on_search=None) -> None:
+        self.refuse = refuse
+        self.searches_fail_after = searches_fail_after
+        self.on_search = on_search
+        self.searches = 0
+        self.stores: list[str] = []
+
+    def search(self, *, timeout=None, **kwargs) -> dict:
+        self.searches += 1
+        if self.on_search is not None:
+            self.on_search(self.searches)
+        if self.searches_fail_after is not None and self.searches > self.searches_fail_after:
+            raise _cp.CtxApiError("search backend unavailable")
+        return {"success": True, "results": []}
+
+    def get_block(self, *, block_id, timeout=None) -> dict:
+        raise AssertionError("no block to read")
+
+    def store(self, *, timeout=None, **kwargs) -> dict:
+        if self.refuse > 0:
+            self.refuse -= 1
+            raise _cp.CtxApiError("Rate limit exceeded: max 100 writes per 60 seconds", status=429, code="rate_limit")
+        self.stores.append(kwargs["title"])
+        ts = "2026-11-26T00:00:00Z"
+        return {"block": {"id": f"019f7000-0000-7000-8000-{len(self.stores):012d}", "created_at": ts, "updated_at": ts}}
+
+
+def _writer(ctx, state, *, clock=None, **fields):
+    seams = {"sleep": clock.sleep, "monotonic": clock.monotonic} if clock is not None else {}
+    return _cp.ChainWriter(client=ctx, chunk_chars=1_000, max_parts=3, entry=state, **seams, **fields)
+
+
+def _at_the_limit(state: _cp.EntryState, now: float = 0.0) -> None:
+    """Two refused writes: the entry's last MAX_RATE_REFUSALS answers were errors."""
+    for _ in range(_cp.MAX_RATE_REFUSALS):
+        ticket = state.admit(write=True, window_writes=5, now=now).ticket
+        assert ticket is not None
+        state.release(ticket, error=True, now=now)
+    assert state.errors_in_row == _cp.MAX_RATE_REFUSALS
+
+
+class _AnswerAfterTheFirstRefusal(_cp.EntryState):
+    """The entry answers a call of another chain right after the first refusal is released — after
+    its release, before the refused chain looks at the entry's answers (in production another
+    thread releases it there)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.between = 0
+
+    def release(self, ticket, *, error, booked=False, now=0.0):
+        seen = super().release(ticket, error=error, booked=booked, now=now)
+        if error and ticket.write and not self.between:
+            self.between += 1
+            other = self.admit(write=False, window_writes=5, now=now)
+            assert other.ticket is not None
+            super().release(other.ticket, error=False, now=now)
+        return seen
+
+
+def test_an_answer_released_after_a_refusal_ends_the_refusals_in_a_row_of_the_refused_write(clock):
+    """A1: the refused write read the entry's count of answers after ``release``, outside its lock;
+    an answer of another chain released in between moved that baseline past the answer, so the
+    write's next refusal counted as its second in a row and the chain stopped although an answer
+    of the entry lay between its two refusals (the run Hermes counts had ended). The count is the
+    one ``release`` saw under the entry's lock now."""
+    state = _AnswerAfterTheFirstRefusal()
+    ctx = _WriterCtx(refuse=2)
+
+    receipt = _writer(ctx, state, clock=clock).write(
+        _transcript(1, "a"), root_session_id="root-a1", session_id="s-a1", budget_s=600, host_api=2, negotiated_api=2
+    )
+
+    assert receipt.head_id and receipt.rate_limited == 2, receipt
+    assert state.between == 1
+    assert state.errors_in_row == 0 and state.in_flight == 0
+
+
+def test_two_writers_at_the_limit_are_not_both_told_to_probe():
+    """A2: after two error answers in a row both writers were told to probe; the second one's read
+    then went out after the first probe had ended the run — an ordinary read, and its failure ended
+    a chain the entry no longer held back. The check of the limit and the probe ticket are one
+    operation now: the first writer gets the read, the second waits for its answer."""
+    state = _cp.EntryState()
+    _at_the_limit(state)
+
+    first = state.admit(write=True, window_writes=5, now=1.0)
+    waiter, _ = state.register(1, lambda: 100.0, now=1.0, window_writes=5)
+    second = state.admit(write=True, window_writes=5, now=1.0, reservation=waiter)
+
+    assert first.probe and first.ticket is not None and not first.ticket.write
+    assert not second.probe and second.ticket is None  # waits for the probe's answer
+    assert waiter.waiting  # runs that started after it give way to it meanwhile
+    state.release(first.ticket, error=False, now=1.1)
+    after = state.admit(write=True, window_writes=5, now=1.2, reservation=waiter)
+    assert not after.probe and after.ticket is not None and after.ticket.write and not waiter.waiting
+
+
+class _SeesWaiting(_cp.EntryState):
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting = threading.Event()
+
+    def wait_for_answer(self, timeout: float) -> None:
+        self.waiting.set()
+        super().wait_for_answer(timeout)
+
+
+def test_a_writer_that_waits_for_another_writer_s_probe_sends_no_read_of_its_own():
+    """A2 over two chain writers in two threads: the first one's probe is in flight when the second
+    wants to write; the probe answers, and the reads fail from then on. The second writer's own
+    read went out after the run had ended, failed, and stopped it; now it waits for the probe's
+    answer and writes."""
+    state = _SeesWaiting()
+    _at_the_limit(state, now=time.monotonic())
+    later: dict = {}
+
+    def second_writer() -> None:
+        writer = _writer(ctx, state)
+        run = writer.new_run(started=time.monotonic(), deadline=time.monotonic() + 30, budget_s=30, planned_writes=1)
+        try:
+            later["data"] = writer.store_paced("fact b", run, category="learnings", title="fact b", content="b")
+        except BaseException as exc:  # handed back to the test
+            later["error"] = exc
+        finally:
+            run.close()
+
+    def on_search(n: int) -> None:
+        if n == 1:  # the first writer's probe is in flight: the second one wants to write now
+            thread = threading.Thread(target=second_writer, name="second-writer", daemon=True)
+            later["thread"] = thread
+            thread.start()
+            assert state.waiting.wait(10), "the second writer never waited at the entry"
+
+    ctx = _WriterCtx(searches_fail_after=1, on_search=on_search)
+    first = _writer(ctx, state)
+    run = first.new_run(started=time.monotonic(), deadline=time.monotonic() + 30, budget_s=30, planned_writes=1)
+    try:
+        first.store_paced("fact a", run, category="learnings", title="fact a", content="a")
+    finally:
+        run.close()
+    later["thread"].join(30)
+
+    assert "error" not in later, later.get("error")
+    assert ctx.searches == 1 and sorted(ctx.stores) == ["fact a", "fact b"]
+    assert state.errors_in_row == 0 and state.in_flight == 0
+
+
+def test_a_later_chain_whose_transcript_fits_is_not_stopped_for_its_required_facts(clock, monkeypatch):
+    """A3: a chain of 21 writes started first (five per window: its last window opens at 244 s, within
+    Hermes' wait less the margin, 290 s). A chain started a second later needs three writes and has
+    two required facts: its transcript fits the window at 244 s, its second fact would not. Its early
+    stop counted the facts, and the whole checkpoint failed before its first write; the transcript
+    writes decide now — the chain is saved, and the fact that does not fit is left for a later
+    compaction, as a fact that does not fit after a stored chain always was."""
+    _with_host_wait(monkeypatch)
+    entry = EntryDouble(clock)
+    first = _provider(entry.dispatch, "session-first", chunk_chars=1_000, max_parts=3, budget_s=60)
+    later = _provider(entry.dispatch, "session-later", chunk_chars=1_000, max_parts=3, budget_s=60, memory=True)
+    messages = [{"role": "user", "content": "w0 " + "w" * 300}, *_fact_turns()[:4]]
+    budget = _cp.CTX_CONTENT_MAX_BYTES - len(_cp.part_header().encode("utf-8"))
+    assert len(_cp.split_chunks(_cp.render_direct_evidence(messages), 1_000, budget)) == 1  # three chain writes
+
+    def second():
+        clock.sleep(1.0)
+        return later.on_pre_compress(messages, require_checkpoint=True)
+
+    outcomes = clock.run_together(
+        lambda: first.on_pre_compress(_transcript(19, "f"), require_checkpoint=True), second, timeout=300.0
+    )
+
+    assert _completed(outcomes) == [0, 1], [str(o)[:200] for o in outcomes]
+    assert "1 of 2 stored" in outcomes[1], outcomes[1]
+    assert len(entry.facts()) == 1
+    assert entry.max_booked_in_window() <= 5
+
+
+def test_a_slow_notice_does_not_move_the_paced_write_past_its_slot(clock):
+    """A4: the notice before a paced write (another checkpoint of the process filled the window)
+    took 150 s in the user's callback. The write then slept the whole wait it had computed before
+    the notice and woke 211 s after the start, 50 s past its deadline (161 s); it goes when its slot
+    is free, judged after the notice, now."""
+    state = _cp.EntryState()
+    started = clock.now
+    for _ in range(5):  # another checkpoint of the process booked the window's five writes
+        ticket = state.admit(write=True, window_writes=5, now=started).ticket
+        state.release(ticket, error=False, booked=True, now=started)
+    notices: list[float] = []
+
+    def slow_notice(message: str) -> None:
+        notices.append(clock.now)
+        clock.advance(150.0)
+
+    writer = _writer(_WriterCtx(), state, clock=clock, notify=slow_notice)
+    run = writer.new_run(started=started, deadline=started + 100.0, budget_s=100.0, planned_writes=1)
+    assert run.deadline == started + 100.0 + WINDOW_S + 1.0
+    try:
+        writer.store_paced("fact a", run, category="learnings", title="fact a", content="a")
+    finally:
+        run.close()
+
+    assert notices == [started]
+    assert clock.now - started < 151.0, clock.now - started
+
+
+def test_a_slow_notice_that_ends_past_the_deadline_stops_the_write_without_sleeping(clock):
+    """A4, fail-closed: when the notice itself ends after the deadline the write stops at once with
+    the deadline's error, instead of sleeping on past it."""
+    state = _cp.EntryState()
+    started = clock.now
+    for _ in range(5):
+        ticket = state.admit(write=True, window_writes=5, now=started).ticket
+        state.release(ticket, error=False, booked=True, now=started)
+
+    writer = _writer(_WriterCtx(), state, clock=clock, notify=lambda message: clock.advance(200.0))
+    run = writer.new_run(started=started, deadline=started + 100.0, budget_s=100.0, planned_writes=1)
+    slept = len(clock.slept)
+    with pytest.raises(CtxCheckpointError, match="budget"):
+        try:
+            writer.store_paced("fact a", run, category="learnings", title="fact a", content="a")
+        finally:
+            run.close()
+    assert len(clock.slept) == slept
+    assert clock.now == started + 200.0
+
+
+def test_a_run_past_its_deadline_holds_no_place_for_the_runs_after_it():
+    """A8 (the second review of #299: no test pinned it): a registration whose run's deadline has
+    passed holds nothing — neither planned writes in the window nor the next free place at the limit
+    of calls in flight, although its call is still marked as waiting there (its thread has not woken
+    to see its deadline yet). A run that starts after it is served at once."""
+    state = _cp.EntryState()
+    ghost, _ = state.register(400, lambda: 10.0, now=0.0, window_writes=5)  # never ended
+    later, ahead = state.register(5, lambda: 500.0, now=20.0, window_writes=5)
+    assert ahead == 0
+    assert state.admit(write=True, window_writes=5, now=20.0, reservation=later).ticket is not None
+
+    early, _ = state.register(5, lambda: 30.0, now=21.0, window_writes=5)
+    late, _ = state.register(5, lambda: 500.0, now=21.0, window_writes=5)
+    read = state.admit(write=False, window_writes=5, now=21.0, reservation=late).ticket
+    assert read is not None  # with the later run's write: two calls in flight
+    assert state.admit(write=False, window_writes=5, now=21.1, reservation=early).ticket is None  # waits
+    assert early.waiting
+    state.release(read, error=False, now=21.2)
+    # 40 s: the waiting call's run is past its deadline; the later run does not give way to it.
+    assert state.admit(write=False, window_writes=5, now=40.0, reservation=late).ticket is not None
+    assert ghost.pending == 400
+
+
+def test_a_read_before_a_write_that_fails_is_the_entry_s_third_error_answer_in_a_row(clock):
+    """A10 (the second review of #299), reproduced: two chains are each refused once (other writers
+    hold ctx's window), so the entry's last two answers are errors; the first chain that wants to
+    write again sends one read alone, and the reads fail from then on. That read is the entry's
+    third error answer in a row — where Hermes opens its breaker — while before 0.17.0 each chain
+    stopped at its own second refusal and sent nothing more until the next checkpoint's first call.
+    Kept (see the README): the read is the only call that can end the run the plugin sees, so a
+    later checkpoint of the process would send it anyway; it fails closed, and no write follows it."""
+    state = _cp.EntryState()
+    answers: list[tuple[str, str]] = []
+
+    class Recorded(_WriterCtx):
+        def search(self, **kwargs):
+            try:
+                data = super().search(**kwargs)
+            except _cp.CtxApiError:
+                answers.append(("search", "error"))
+                raise
+            answers.append(("search", "ok"))
+            return data
+
+        def store(self, **kwargs):
+            try:
+                data = super().store(**kwargs)
+            except _cp.CtxApiError:
+                answers.append(("store", "error"))
+                raise
+            answers.append(("store", "ok"))
+            return data
+
+    ctx = Recorded(refuse=2, searches_fail_after=0)
+    first, second = _writer(ctx, state, clock=clock), _writer(ctx, state, clock=clock)
+    runs = [
+        writer.new_run(started=clock.now, deadline=clock.now + 60, budget_s=60, planned_writes=2)
+        for writer in (first, second)
+    ]
+
+    for writer, run, title in ((first, runs[0], "fact a"), (second, runs[1], "fact b")):
+        with pytest.raises(CtxCheckpointError, match="rate-limited"):
+            writer.store_paced(title, run, category="learnings", title=title, content=title)
+    assert state.errors_in_row == _cp.MAX_RATE_REFUSALS
+    with pytest.raises(CtxCheckpointError, match="read before fact a failed"):
+        first.store_paced("fact a", runs[0], category="learnings", title="fact a", content="a")
+    for run in runs:
+        run.close()
+
+    assert answers == [("store", "error"), ("store", "error"), ("search", "error")]
+    assert len(answers) == _host_breaker_threshold()
+    assert state.errors_in_row == _host_breaker_threshold() and state.in_flight == 0
+
+
+def test_the_read_before_a_write_at_the_limit_is_a_listing_of_the_category():
+    """A11 (#289, measured on a test ctx): the probe searched its category for "Compaction checkpoint
+    head", which every head matches in full text — ctx read and ranked all of them (0.7–1.1 s median
+    at 100 000 heads, 15–18 s at 1 000 000, past the 10 s bound of a call). Any answer ends the run,
+    so the probe lists the category instead (no query text, one row): ctx answers that from an index
+    of the category in 1.0–1.6 ms, the same at 1 000 000 heads as at none."""
+    state = _cp.EntryState()
+    _at_the_limit(state)
+    searched: list[dict] = []
+
+    class Ctx(_WriterCtx):
+        def search(self, **kwargs):
+            searched.append(kwargs)
+            return super().search(**kwargs)
+
+    writer = _cp.ChainWriter(client=Ctx(), category="compaction-checkpoints", entry=state)
+    run = writer.new_run(started=time.monotonic(), deadline=time.monotonic() + 30, budget_s=30, planned_writes=1)
+    try:
+        writer.store_paced("fact a", run, category="learnings", title="fact a", content="a")
+    finally:
+        run.close()
+
+    assert [{k: v for k, v in s.items() if k != "timeout"} for s in searched] == [
+        {"text": "", "category": "compaction-checkpoints", "limit": 1}
+    ]
+
+
+def _held_behind_an_earlier_run(clock, notice_s: float):
+    """A run registered first plans five writes (one window at max_parts 3) and ends at 70 s without
+    sending them; a write of a run started after it is held behind them, and its notice takes
+    ``notice_s`` seconds in the user's callback."""
+    state = _cp.EntryState()
+    started = clock.now
+    earlier, _ = state.register(5, lambda: started + 70.0, now=started, window_writes=5)
+    writer = _writer(_WriterCtx(), state, clock=clock, notify=lambda message: clock.advance(notice_s))
+    run = writer.new_run(started=started, deadline=started + 100.0, budget_s=100.0, planned_writes=1)
+    return state, earlier, writer, run, started
+
+
+def test_a_slow_notice_of_a_held_write_does_not_lengthen_its_next_look(clock):
+    """A4, held behind an earlier run: the notice took 59 s of the 61 s until the write's turn; the
+    write slept the five seconds it computed before the notice, now the two that are left."""
+    state, earlier, writer, run, started = _held_behind_an_earlier_run(clock, 59.0)
+    slept = len(clock.slept)
+    try:
+        writer.store_paced("fact a", run, category="learnings", title="fact a", content="a")
+    finally:
+        run.close()
+        state.unregister(earlier)
+    assert clock.slept[slept][1] == pytest.approx(started + 61.0 - (started + 59.0))
+
+
+def test_a_slow_notice_of_a_held_write_that_ends_past_the_deadline_stops_it_at_once(clock):
+    """A4, fail-closed: the notice of a held write ended after the write's deadline; the write stops
+    there with the deadline's error instead of sleeping on and looking again."""
+    state, earlier, writer, run, started = _held_behind_an_earlier_run(clock, 200.0)
+    slept = len(clock.slept)
+    with pytest.raises(CtxCheckpointError, match="budget"):
+        try:
+            writer.store_paced("fact a", run, category="learnings", title="fact a", content="a")
+        finally:
+            run.close()
+            state.unregister(earlier)
+    assert len(clock.slept) == slept and clock.now == started + 200.0
+
+
+def test_a_probe_ticket_taken_after_the_deadline_is_given_back():
+    """A2, fail-closed (the fresh reviewer's probe): a writer waits at the limit while a lone read of
+    another chain is in flight; meanwhile its deadline passes and that read fails. The writer's next
+    look hands it the probe's ticket — after its deadline: it sends nothing, gives the ticket back
+    and stops, so the entry is left with no call in flight for the checkpoints after it."""
+    now = [1_000.0]
+
+    class Entry(_cp.EntryState):
+        def __init__(self) -> None:
+            super().__init__()
+            self.read = None
+
+        def wait_for_answer(self, timeout: float) -> None:
+            if self.read is not None:
+                now[0] += 25.0  # the writer's deadline passes while it waits
+                read, self.read = self.read, None
+                self.release(read, error=True, now=now[0])  # the read in flight fails
+
+    state = Entry()
+    _at_the_limit(state, now=now[0])
+    state.read = state.admit(write=False, window_writes=5, now=now[0]).ticket  # another chain's head search
+    assert state.read is not None
+    ctx = _WriterCtx()
+    writer = _cp.ChainWriter(client=ctx, max_parts=3, entry=state, sleep=lambda s: None, monotonic=lambda: now[0])
+    run = writer.new_run(started=now[0], deadline=now[0] + 20.0, budget_s=20.0, planned_writes=1)
+    try:
+        with pytest.raises(CtxCheckpointError, match="budget"):
+            writer.store_paced("fact a", run, category="learnings", title="fact a", content="a")
+    finally:
+        run.close()
+
+    assert ctx.searches == 0 and ctx.stores == []
+    assert state.in_flight == 0 and state.errors_in_row == _cp.MAX_RATE_REFUSALS + 1

@@ -355,7 +355,12 @@ the plugin and runs over either transport.
   waits until a slot is free — when the oldest write in the window ages out, else a whole
   window — at the latest until just before the deadline, and then tries once more; the
   second refusal in a row ends the chain with `CtxCheckpointError` (Hermes opens its
-  per-server circuit breaker at the third error answer in a row).
+  per-server circuit breaker at the third error answer in a row). When no try fits before the
+  deadline, the first refusal ends it (`no time left to wait`); refusals with an answer of the
+  entry between them are not in a row, so such a write keeps trying until its deadline. A
+  required fact (`store_paced`) is not retried: its first refusal ends the facts.
+- A notice (the user's callback) can take its time: the wait after it counts from when it
+  returned, and a notice that ends past the deadline stops the write there (0.18.0).
 - One state per server entry (0.17.0, GottZ/ctx#299): the window's writes and the error
   answers in a row are counted per entry for every chain of the process
   (`checkpoint.EntryState`: the MCP entry by name and a digest of its connection identity — route
@@ -377,20 +382,27 @@ the plugin and runs over either transport.
   beyond those planned writes, and at the limit of calls in flight a later run's call gives way
   to a waiting call of an earlier one. A run whose turn comes after its deadline, or whose last
   planned write would although it would fit from an empty window, stops before its next write
-  (`other checkpoints of this Hermes process started first …`); one that needs more than its
+  (`other checkpoints of this Hermes process started first …`) — judged without the required
+  facts after a chain (`Reservation.optional`, 0.18.0: a fact that does not fit stops alone, the
+  chain stands); one that needs more than its
   deadline even alone saves what fits and stops at its deadline as before. A run's planned
   writes hold their places until it ends, at the latest until its deadline. A planned write ctx
   confirms books nothing; a run held behind others looks again at every answer of the entry, and
   every `ENTRY_HOLD_RECHECK_S` (5 s) while none is in flight.
 - Error answers: no write goes out after `MAX_RATE_REFUSALS` (2) in a row, so writes never draw a
   third. A read still goes out, alone: the head search of a chain that starts then, and the read
-  a chain that wants to write sends first (`ChainWriter._probe`: a search for `PROBE_QUERY` in
-  its category, one row) — the process sees no other answers of the entry. Its answer ends the
-  run; a read that fails there ends its chain and is the entry's third error answer in a row
-  from this process. A chain gives up on a write ctx refused twice with no answer of the entry
-  in between (any call of the process), so refusals of other chains do not stop it. A failure envelope the REST client
-  returns instead of raising (`success: false`, or a body that is no JSON) counts as an error
-  answer; a write answered that way keeps its slot unless its code is `rate_limit`.
+  a chain that wants to write sends first (`ChainWriter._probe`: a listing of its category, one
+  row — `PROBE_QUERY` is empty since 0.18.0, GottZ/ctx#289: ctx answers it from the category's
+  listing index in constant time, where the search for "Compaction checkpoint head" ranked every
+  head). The admission that finds the limit hands out the read's ticket (`Admission.probe`), so
+  one writer sends it and the others wait for its answer. Its answer ends the run; a read that
+  fails there ends its chain and is the entry's third error answer in a row from this process.
+  A chain gives up on a write ctx refused twice with no answer of the entry in between (any call
+  of the process; the count of answers is the one `EntryState.release` returns under the lock),
+  so refusals of other chains do not stop it. A failure envelope the REST client returns instead
+  of raising (`client.is_failure_envelope`: `success: false`, an `error` without `success: true`,
+  or a body that is no JSON) counts as an error answer; a write answered that way keeps its slot
+  unless its code is `rate_limit`.
 - A write the chain gives up on (abandoned, cut off) keeps its slot from that moment; ctx may book
   it until the host ends the call (through the dispatch: the entry's tool timeout), so a window
   can then hold one write more than `checkpoint_max_parts` + 2 — inside ctx's 100 per key while
