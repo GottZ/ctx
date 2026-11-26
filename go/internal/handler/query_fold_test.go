@@ -256,23 +256,25 @@ func TestApplyParentFoldKeepsTheFusionScale(t *testing.T) {
 	if o := out[0].RRFScoreOriginal; out[0].RRFScore != 0.0090 || o == nil || *o != 0.0075 {
 		t.Errorf("in-set parent: score %v rrf_score_original %v, want 0.0090 and 0.0075", out[0].RRFScore, v(o))
 	}
-	// Two children: the fold names the child with the higher boosted score,
-	// the fusion's scale takes the higher fusion score over all of them (the
-	// other child's here) — K13 as it would run on the fusion's output
-	// (review round 1, F1).
+	// Three children: the fold names the child with the highest boosted
+	// score, the fusion's scale takes the highest fusion score over all of
+	// them (the second child's here, neither the first nor the last) — K13 as
+	// it would run on the fusion's output (review round 1, F1).
 	two := []rrf.SearchResult{
 		{ID: "issue", RRFScore: 0.0060, RRFScoreOriginal: f(0.0058)},
 		{ID: "c1", RRFScore: 0.0090, RRFScoreOriginal: f(0.0070)},
 		{ID: "c2", RRFScore: 0.0080, RRFScoreOriginal: f(0.0075)},
+		{ID: "c3", RRFScore: 0.0070, RRFScoreOriginal: f(0.0050)},
 	}
-	twoFolds := map[string]childFold{"c1": {parentID: "issue", visible: true}, "c2": {parentID: "issue", visible: true}}
+	twoFolds := map[string]childFold{"c1": {parentID: "issue", visible: true}, "c2": {parentID: "issue", visible: true},
+		"c3": {parentID: "issue", visible: true}}
 	out, _, _ = applyParentFold(two, twoFolds, nil)
 	if o := out[0].RRFScoreOriginal; len(out) != 1 || out[0].RRFScore != 0.0090 || o == nil || *o != 0.0075 {
-		t.Errorf("in-set parent of two children: %v score %v rrf_score_original %v, want 0.0090 and 0.0075", ids(out), out[0].RRFScore, v(o))
+		t.Errorf("in-set parent of three children: %v score %v rrf_score_original %v, want 0.0090 and 0.0075", ids(out), out[0].RRFScore, v(o))
 	}
 	out, _, _ = applyParentFold(two[1:], twoFolds, map[string]rrf.SearchResult{"issue": {ID: "issue"}})
 	if o := out[0].RRFScoreOriginal; len(out) != 1 || out[0].RRFScore != 0.0090 || o == nil || *o != 0.0075 {
-		t.Errorf("hydrated parent of two children: %v score %v rrf_score_original %v, want 0.0090 and 0.0075", ids(out), out[0].RRFScore, v(o))
+		t.Errorf("hydrated parent of three children: %v score %v rrf_score_original %v, want 0.0090 and 0.0075", ids(out), out[0].RRFScore, v(o))
 	}
 	// Hydrated parent: the child's score and the child's fusion score.
 	hyd := []rrf.SearchResult{{ID: "comment", RRFScore: 0.0090, RRFScoreOriginal: f(0.0072)}, {ID: "other", RRFScore: 0.0050}}
