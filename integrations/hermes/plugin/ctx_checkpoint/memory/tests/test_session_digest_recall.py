@@ -11,6 +11,7 @@ wait for the prefetch; a failure keeps the five.
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 from conftest import FakeClient
@@ -218,10 +219,21 @@ def test_a_query_without_sources_still_gets_the_session_digests(make_provider, t
 
 
 class McpTypedQueryServer(TypedQueryServer):
-    """The same double, reached over MCP: a bounded call through Hermes' call_mcp takes at least
-    ``HOST_CALL_MIN_TIMEOUT_S`` and is waited for ``HOST_CALL_GRACE_S`` past its timeout."""
+    """The same double, reached over MCP with the grant: a bounded call through Hermes' call_mcp takes at
+    least ``HOST_CALL_MIN_TIMEOUT_S`` and is waited for ``HOST_CALL_GRACE_S`` past its timeout."""
 
     transport = "mcp"
+
+    def bounded_through_host(self, tool):
+        return True
+
+
+class McpNoGrantServer(McpTypedQueryServer):
+    """Over MCP without the grant: the call goes through Hermes' tool dispatch, where an abandoned call
+    holds the entry until the entry's tool timeout."""
+
+    def bounded_through_host(self, tool):
+        return False
 
 
 @pytest.mark.parametrize(("elapsed", "sent"), [(5.0, True), (6.1, False)])
@@ -232,7 +244,7 @@ def test_over_mcp_the_second_query_fits_hermes_wait_with_the_grace_of_a_host_cal
     that fits in what Hermes' wait leaves after the first query."""
     from ctx_plugin.mcp_client import HOST_CALL_GRACE_S, HOST_CALL_MIN_TIMEOUT_S
 
-    McpTypedQueryServer.typed_raises = None
+    TypedQueryServer.typed_raises = None
     monkeypatch.setattr(provider_mod, "CtxClient", McpTypedQueryServer)
     p, client = make_provider()
     _known(p)
@@ -289,3 +301,81 @@ def test_the_rest_type_list_is_read_within_the_second_query_s_bound(monkeypatch)
     with pytest.raises(CtxApiError):
         other.query_types("when?", [SESSION_DIGEST_TYPE], limit=3, timeout=1.5)
     assert [what for what, _ in sent] == ["type-list"]
+
+
+def _mcp_provider(make_provider, monkeypatch, server_cls, elapsed: float | None = None):
+    TypedQueryServer.typed_raises = None
+    monkeypatch.setattr(provider_mod, "CtxClient", server_cls)
+    p, client = make_provider()
+    entry = _known(p)
+    if elapsed is not None:
+        clock = iter([100.0, 100.0 + elapsed])
+        monkeypatch.setattr(p, "_now", lambda: next(clock))
+    return p, client, entry
+
+
+@pytest.mark.parametrize(
+    ("server_cls", "elapsed", "sent"),
+    [
+        (McpNoGrantServer, 0.5, True),
+        (McpNoGrantServer, 1.5, False),
+        (McpTypedQueryServer, 3.0, True),
+    ],
+    ids=["no_grant_fast_first", "no_grant_slow_first", "grant_slow_first"],
+)
+def test_without_the_grant_the_second_query_follows_only_a_fast_first_one(
+    make_provider, monkeypatch, fake_client_cls, server_cls, elapsed, sent
+):
+    """Through Hermes' dispatch an abandoned second query holds the entry and the next recall waits
+    behind it, so there it follows only a first query of at most SESSION_DIGEST_RECALL_FAST_MAIN_S; with
+    the grant (Hermes frees the entry at the call's timeout) the time Hermes' wait leaves decides."""
+    p, client, _entry = _mcp_provider(make_provider, monkeypatch, server_cls, elapsed)
+    p.prefetch("when does the queue drain?")
+    assert bool(client.typed_calls) is sent
+    p.shutdown()
+
+
+def test_without_the_grant_an_abandoned_second_query_keeps_it_off_for_the_entry(
+    make_provider, monkeypatch, fake_client_cls, caplog
+):
+    monkeypatch.setattr(provider_mod, "SESSION_DIGEST_RECALL_PAUSE_S", 0.3)
+    p, client, entry = _mcp_provider(make_provider, monkeypatch, McpNoGrantServer)
+    TypedQueryServer.typed_raises = CtxApiError(
+        "mcp query: no answer within 2.0s; the call was abandoned", code="timeout"
+    )
+    with caplog.at_level("WARNING"):
+        first = p.prefetch("when does the queue drain?")
+        second = p.prefetch("and the proxy?")
+    assert _titles(first) == _titles(second) == [s["title"] for s in MAIN]
+    assert len(client.typed_calls) == 1  # the second recall sent none
+    assert entry.recall_extra_paused()
+    warned = [r for r in caplog.records if r.levelname == "WARNING" and "second query" in r.getMessage()]
+    assert len(warned) == 1 and "abandoned" in warned[0].getMessage()
+    TypedQueryServer.typed_raises = None
+    threading.Event().wait(0.4)
+    p.prefetch("when does the queue drain?")
+    assert len(client.typed_calls) == 2  # the pause ran out
+    p.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("server_cls", "error"),
+    [
+        (McpTypedQueryServer, CtxApiError("mcp query: no answer within 2.0s; the call was abandoned", code="timeout")),
+        (McpNoGrantServer, CtxApiError("mcp query: refused", code="")),
+    ],
+    ids=["grant_timeout", "no_grant_error_answer"],
+)
+def test_a_second_query_that_holds_nothing_does_not_pause_it(
+    make_provider, monkeypatch, fake_client_cls, server_cls, error
+):
+    """With the grant an abandoned call frees the entry, and an error answer holds nothing either: the
+    next recall asks again."""
+    p, client, entry = _mcp_provider(make_provider, monkeypatch, server_cls)
+    TypedQueryServer.typed_raises = error
+    p.prefetch("when does the queue drain?")
+    p.prefetch("and the proxy?")
+    assert len(client.typed_calls) == 2
+    assert not entry.recall_extra_paused()
+    TypedQueryServer.typed_raises = None
+    p.shutdown()

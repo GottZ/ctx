@@ -519,7 +519,12 @@ the plugin and runs over either transport.
   its bound); a failure or timeout keeps the five, logs at DEBUG and counts toward nothing
   of the plugin's entry state (over MCP Hermes counts it toward its breaker, as a failed
   recall). A block the first answer holds but the recall does not show
-  (`max_prefetch_results` below five) can come from the second query.
+  (`max_prefetch_results` below five) can come from the second query. Over MCP without
+  the grant for Hermes' `call_mcp` (`mcp_allowlist`), a call the plugin gives up on holds
+  the server entry until the entry's tool timeout and the next recall waits behind it, so
+  there the second query follows only a first query of at most 1 s and stays off for the
+  entry for 10 minutes after one was given up (one WARNING): under load the appended
+  blocks pause; the grant lifts both.
   Measured on a test rig (a hashing embedder, three corpora of 432–656 blocks): no block
   of the first five changed, every added block untrusted, the question's embedding
   cached for the second query, 22 ms median and 33 ms p95 for it.

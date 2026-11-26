@@ -496,6 +496,13 @@ class McpClient:
                 return payload, payload["result"]
         return payload, raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
 
+    def bounded_through_host(self, tool: str) -> bool:
+        """Whether a bounded call of ``tool`` goes through Hermes' ``call_mcp`` (the operator's grant):
+        Hermes cancels it at its timeout and the entry is free again. Through the tool dispatch an
+        abandoned call keeps the entry's RPC lock until the entry's own tool timeout, and the next call
+        to the entry waits behind it (``tools/mcp_tool_handlers.py`` ``_rpc_lock``)."""
+        return self._granted_host_call(tool) is not None
+
     def forget_host_refusal(self) -> None:
         """A new checkpoint starts (GottZ/ctx#289): Hermes' refusal of the grant held for the
         checkpoint that received it. The provider reads the grant again before each checkpoint, and

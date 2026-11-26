@@ -979,6 +979,9 @@ class EntryState:
         self._type_refused_at: dict[str, float] = {}
         # (name, way) of the fallbacks to a write without the type already logged (:meth:`warn_once`).
         self._type_warned: set[tuple[str, str]] = set()
+        # Until when (time.monotonic()) the recall's second query stays off for this entry: one of
+        # them was abandoned while it held the entry (the provider's _session_digest_sources).
+        self._recall_extra_off_until = 0.0
 
     def type_to_send(self, name: str, wait_s: float = 0.0) -> str:
         """Whether a write names the block type ``name`` (GottZ/ctx#289): :data:`TYPE_ASK` (this write
@@ -1032,6 +1035,16 @@ class EntryState:
             elif self._block_types.get(name) == _TYPE_ASKING:
                 del self._block_types[name]
             self._cond.notify_all()
+
+    def pause_recall_extra(self, seconds: float) -> None:
+        """Keep the recall's second query off for this entry for ``seconds`` (GottZ/ctx#289)."""
+        with self._cond:
+            self._recall_extra_off_until = time.monotonic() + max(0.0, float(seconds))
+
+    def recall_extra_paused(self) -> bool:
+        """Whether the recall's second query is off for this entry (:meth:`pause_recall_extra`)."""
+        with self._cond:
+            return time.monotonic() < self._recall_extra_off_until
 
     def type_known(self, name: str) -> bool:
         """Whether a write of this process naming ``name`` was taken by the entry's server (GottZ/ctx#289:

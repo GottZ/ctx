@@ -530,3 +530,70 @@ def test_with_the_grant_a_store_approved_after_the_checkpoint_gave_up_still_reac
     while time.monotonic() < deadline and not [t for t, _a in hermes_mcp.ctx.calls if t == "store"]:
         time.sleep(0.02)
     assert [t for t, _a in hermes_mcp.ctx.calls if t == "store"] == ["store"]
+
+
+_RECALL_ROWS = [
+    {
+        "id": f"019f7100-0000-7000-8000-{i:012d}",
+        "title": f"Knowledge {i}",
+        "category": "reference",
+        "score": 0.03,
+        "content": "k",
+    }
+    for i in range(5)
+]
+
+
+def _recall_provider(hermes_mcp, home: Path, *, granted: bool):
+    """A provider with memory features on whose entry took a typed write, against the lock double: the
+    recall's query answers at once, its second query (``types``) never answers."""
+    config = {
+        "mcp_servers": {"ctx": {"url": "https://ctx.example.test/mcp"}},
+        "memory": {"provider": "ctx_checkpoint", "ctx_checkpoint": {"mcp_server": "ctx", "memory": True}},
+    }
+    if granted:
+        config["plugins"] = {"entries": {"ctx_checkpoint": {"mcp_allowlist": ["ctx"]}}}
+    (home / "config.yaml").write_text(json.dumps(config), encoding="utf-8")
+    provider = _loaded_provider(hermes_mcp, home)
+    provider._mcp_granted = provider._read_mcp_grant()  # as before each checkpoint
+    cp = sys.modules[f"{_SPEC.name}.memory.checkpoint"]
+    entry = cp.entry_state(provider._entry_key())
+    assert entry.type_to_send("session-digest") == cp.TYPE_ASK
+    entry.type_answered("session-digest", True)
+    answer = hermes_mcp.session.call_tool
+
+    async def call_tool(name, arguments=None, **kwargs):
+        if name == "query":
+            if (arguments or {}).get("types"):
+                hermes_mcp.session.hung += 1
+                await asyncio.Event().wait()
+            text = json.dumps({"confidence": "confident", "sources": _RECALL_ROWS})
+            return types.SimpleNamespace(
+                content=[types.SimpleNamespace(type="text", text=text)],
+                isError=False,
+                structuredContent=None,
+                meta=None,
+            )
+        return await answer(name, arguments, **kwargs)
+
+    hermes_mcp.session.call_tool = call_tool
+    return provider, entry
+
+
+@pytest.mark.parametrize("granted", [False, True], ids=["dispatch", "call_mcp"])
+def test_an_abandoned_second_recall_query_holds_the_entry_only_without_the_grant(
+    hermes_mcp, _isolated_hermes_home, granted
+):
+    """Through Hermes' dispatch the abandoned second query keeps the entry's RPC lock (the next recall
+    would wait behind it until the tool timeout), so the provider keeps that query off for the entry;
+    through call_mcp Hermes cancels it at its timeout and the entry is free at once."""
+    provider, entry = _recall_provider(hermes_mcp, _isolated_hermes_home, granted=granted)
+    context = provider.prefetch("when does the queue drain?")
+    assert hermes_mcp.session.hung == 1
+    assert context.count("[reference] Knowledge ") == 5  # the five are kept
+    if granted:
+        assert _lock_freed(hermes_mcp.server)
+        assert not entry.recall_extra_paused()
+    else:
+        assert hermes_mcp.server._rpc_lock.locked()
+        assert entry.recall_extra_paused()

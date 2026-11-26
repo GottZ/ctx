@@ -36,7 +36,11 @@ Digests and facts are stored as ctx's block type `session-digest` (GottZ/ctx#289
   are), each labelled untrusted. Sent only to a server entry that took a write naming the type in
   this process, never with `prefetch_untrusted: drop` or the type in `prefetch_types_exclude`,
   with its own bound (2 s) and only while Hermes' 8 s wait for the prefetch leaves room; a failure
-  keeps the five. Over REST the other type names (`type-list`, once per client) go into
+  keeps the five. Over MCP without the grant for `call_mcp` a given-up call holds the entry until
+  its tool timeout, so there the second query follows only a first query of at most 1 s
+  (`SESSION_DIGEST_RECALL_FAST_MAIN_S`) and stays off for the entry for 10 minutes after one was
+  given up (`SESSION_DIGEST_RECALL_PAUSE_S`, one WARNING); measured through Hermes' MCP client
+  with every query at 5 s, every second recall had gone past Hermes' 8 s wait without it. Over REST the other type names (`type-list`, once per client) go into
   `types_exclude`.
 - **A slow first write.** The writes of an entry wait for the one that asks. Over REST a digest
   that asks and hangs holds the required facts of a compaction that starts meanwhile for up to its

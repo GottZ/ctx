@@ -102,6 +102,14 @@ HOST_PREFETCH_WAIT_S = 8.0
 SESSION_DIGEST_RECALL_TIMEOUT_S = 2.0
 SESSION_DIGEST_RECALL_MARGIN_S = 0.5
 SESSION_DIGEST_RECALL_MIN_S = 0.25
+# Over MCP without the operator's grant the second query goes through Hermes' tool dispatch, where a
+# call the plugin abandons keeps the entry's RPC lock until the entry's tool timeout and the NEXT
+# recall waits behind it (measured through Hermes' MCP client: every query at 5 s, every second
+# recall past Hermes' 8 s wait and dropped whole). There it is sent only after a first query that
+# took at most SESSION_DIGEST_RECALL_FAST_MAIN_S, and after one abandoned it stays off for the entry
+# for SESSION_DIGEST_RECALL_PAUSE_S — a hanging second read costs at most one later recall per pause.
+SESSION_DIGEST_RECALL_FAST_MAIN_S = 1.0
+SESSION_DIGEST_RECALL_PAUSE_S = 600.0
 # Key values an earlier binding of this provider used, kept for redaction after a re-initialization
 # (a write scheduled through the old client redacts when its thread runs; a later text may still
 # carry the old key). At most this many, the most recent first kept; the current keys come on top.
@@ -163,6 +171,16 @@ class _PacedFactStore:
             tags=tags,
             **extra,
         )
+
+
+def _bounded_through_host(client: Any) -> bool:
+    """Whether ``client``'s bounded MCP query goes through Hermes' call_mcp (the grant), which frees the
+    entry when it gives up; False for any other client."""
+    check = getattr(client, "bounded_through_host", None)
+    try:
+        return bool(check("query")) if callable(check) else False
+    except Exception:
+        return False
 
 
 def _count_noise_rows(messages: list[dict[str, Any]]) -> tuple:
@@ -755,12 +773,22 @@ class CtxMemoryProvider(MemoryProvider):
         failed recall is. It counts toward nothing of the plugin's entry state; over MCP Hermes counts a
         failed call toward its breaker, as it counts a failed recall (which costs two: query, search).
 
+        Over MCP without the grant (Hermes' tool dispatch) a call given up on holds the entry until its
+        tool timeout and the next recall waits behind it: there it follows only a fast first query
+        (:data:`SESSION_DIGEST_RECALL_FAST_MAIN_S`) and stays off for the entry for
+        :data:`SESSION_DIGEST_RECALL_PAUSE_S` after one was given up.
+
         ``shown``: the blocks of the first answer the recall renders — a block it holds but does not
         show (``max_prefetch_results`` below the server's five) may still come from this query."""
         want = self._session_digest_recall_results()
         if entry is None or want <= 0 or not entry.type_known(SESSION_DIGEST_TYPE):
             return []
-        left = HOST_PREFETCH_WAIT_S - SESSION_DIGEST_RECALL_MARGIN_S - (self._now() - started)
+        elapsed = self._now() - started
+        # Through Hermes' dispatch (MCP without the grant) an abandoned call holds the entry.
+        holds = getattr(client, "transport", "") == "mcp" and not _bounded_through_host(client)
+        if holds and (entry.recall_extra_paused() or elapsed > SESSION_DIGEST_RECALL_FAST_MAIN_S):
+            return []
+        left = HOST_PREFETCH_WAIT_S - SESSION_DIGEST_RECALL_MARGIN_S - elapsed
         floor = SESSION_DIGEST_RECALL_MIN_S
         if getattr(client, "transport", "") == "mcp":
             left -= HOST_CALL_GRACE_S
@@ -775,6 +803,17 @@ class CtxMemoryProvider(MemoryProvider):
         try:
             data = client.query_types(text, [SESSION_DIGEST_TYPE], limit=want + overlap, timeout=timeout)
         except Exception as exc:
+            if holds and getattr(exc, "code", "") == "timeout":
+                entry.pause_recall_extra(SESSION_DIGEST_RECALL_PAUSE_S)
+                entry.warn_once(
+                    SESSION_DIGEST_TYPE,
+                    "recall-abandoned",
+                    "ctx: the recall's second query (blocks of type %s) got no answer within its bound and was "
+                    "abandoned; without the grant for Hermes' call_mcp it holds the server entry until the "
+                    "entry's tool timeout, so it is not sent to this entry for %.0f minutes (mcp_allowlist lifts this)",
+                    SESSION_DIGEST_TYPE,
+                    SESSION_DIGEST_RECALL_PAUSE_S / 60,
+                )
             logger.debug("CTX recall of session digests failed (non-fatal): %s", self._error_text(exc))
             return []
         rows = (data or {}).get("sources") if (data or {}).get("success") else None
