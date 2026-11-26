@@ -527,3 +527,23 @@ def test_each_way_to_a_write_without_the_type_warns_on_its_own(caplog, monkeypat
         _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, before_ask=failing_read, title="w1")
     assert len(_warnings(caplog, "does not know block type")) == 1
     assert len(_warnings(caplog, "got no answer")) == 1
+
+
+class _Interrupted(BaseException):
+    """A BaseException that is no Exception (a cancel, an interrupt)."""
+
+
+def test_an_interrupt_in_the_read_before_the_ask_leaves_the_question_open():
+    """The read before the write that asks is interrupted (a BaseException): the ask is taken back, so
+    the next write asks again instead of every later write of the process going without the type."""
+    entry = _cp.EntryState()
+    server = {"knows": True, "calls": []}
+    store = _store_on(server)
+
+    def interrupted_read():
+        raise _Interrupted()
+
+    with pytest.raises(_Interrupted):
+        _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, before_ask=interrupted_read, title="w0")
+    assert server["calls"] == []
+    assert entry.type_to_send(SESSION_DIGEST_TYPE) == _cp.TYPE_ASK

@@ -1331,7 +1331,13 @@ def store_typed(
     ask = entry.type_to_send(block_type, wait_s) if block_type else ""
     if not ask:
         return store(**kwargs)
-    failed = _unanswered(before_ask) if ask == TYPE_ASK and before_ask is not None else ""
+    try:
+        failed = _unanswered(before_ask) if ask == TYPE_ASK and before_ask is not None else ""
+    except BaseException:
+        # A cancel or an interrupt in the read (no Exception, so _unanswered lets it through): the
+        # ask is taken back, or the entry would stay asking and every later write go without the type.
+        entry.type_answered(block_type, None)
+        raise
     if failed:
         entry.type_answered(block_type, None)
         entry.warn_once(
