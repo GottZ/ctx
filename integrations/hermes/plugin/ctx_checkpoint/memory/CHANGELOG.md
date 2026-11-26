@@ -42,7 +42,10 @@ check after a notice, the grant asked again per checkpoint, one reading of failu
   before each checkpoint), and a restored grant is used by the next one.
 - **Failure envelopes.** An `error` without `success` was a failure envelope for the REST client and
   an answer for the chain writer (it ended the entry's run of error answers and booked a slot).
-  Both read it through `client.is_failure_envelope` now: an error answer.
+  Both read it through `client.is_failure_envelope` now: an error answer. A checkpoint behind a
+  proxy that answers so fails now (`… rejected: …`); before, a head search answered so counted as
+  "no head" and the chain started again without a parent, and a store failed with `store returned
+  no block id`.
 - Pinned without a change: a registration past its run's deadline holds no place for later runs
   (also while its call is still marked waiting); a failed read before a write is the entry's third
   error answer in a row (kept, see the README); an entry that needs approval completes when its

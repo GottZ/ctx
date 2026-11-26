@@ -319,7 +319,8 @@ wants to write then first sends one read, alone — a listing of its category, o
 row, which ctx answers from an index in about a millisecond however many
 checkpoints it holds (0.18.0; the search for `Compaction checkpoint head` before
 it read and ranked every head of the category: about 1 s at 100 000 heads, 15 to
-18 s at 1 000 000 — longer than the plugin's own 10 s bound of a call) — the
+18 s at 1 000 000 — longer than the plugin's own 10 s bound of a call; the index
+is ctx's since v5.83.0, an older server walks the category for it) — the
 only way the process learns that the entry answers again (it does not see the
 answers to recall or the agent's tools); one checkpoint sends it, the others wait
 for its answer (0.18.0; before, each could send one), and a checkpoint that starts

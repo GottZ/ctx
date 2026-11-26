@@ -1200,13 +1200,15 @@ def test_two_writers_at_the_limit_are_not_both_told_to_probe():
     _at_the_limit(state)
 
     first = state.admit(write=True, window_writes=5, now=1.0)
-    second = state.admit(write=True, window_writes=5, now=1.0)
+    waiter, _ = state.register(1, lambda: 100.0, now=1.0, window_writes=5)
+    second = state.admit(write=True, window_writes=5, now=1.0, reservation=waiter)
 
     assert first.probe and first.ticket is not None and not first.ticket.write
     assert not second.probe and second.ticket is None  # waits for the probe's answer
+    assert waiter.waiting  # runs that started after it give way to it meanwhile
     state.release(first.ticket, error=False, now=1.1)
-    after = state.admit(write=True, window_writes=5, now=1.2)
-    assert not after.probe and after.ticket is not None and after.ticket.write
+    after = state.admit(write=True, window_writes=5, now=1.2, reservation=waiter)
+    assert not after.probe and after.ticket is not None and after.ticket.write and not waiter.waiting
 
 
 class _SeesWaiting(_cp.EntryState):
@@ -1475,3 +1477,38 @@ def test_a_slow_notice_of_a_held_write_that_ends_past_the_deadline_stops_it_at_o
             run.close()
             state.unregister(earlier)
     assert len(clock.slept) == slept and clock.now == started + 200.0
+
+
+def test_a_probe_ticket_taken_after_the_deadline_is_given_back():
+    """A2, fail-closed (the fresh reviewer's probe): a writer waits at the limit while a lone read of
+    another chain is in flight; meanwhile its deadline passes and that read fails. The writer's next
+    look hands it the probe's ticket — after its deadline: it sends nothing, gives the ticket back
+    and stops, so the entry is left with no call in flight for the checkpoints after it."""
+    now = [1_000.0]
+
+    class Entry(_cp.EntryState):
+        def __init__(self) -> None:
+            super().__init__()
+            self.read = None
+
+        def wait_for_answer(self, timeout: float) -> None:
+            if self.read is not None:
+                now[0] += 25.0  # the writer's deadline passes while it waits
+                read, self.read = self.read, None
+                self.release(read, error=True, now=now[0])  # the read in flight fails
+
+    state = Entry()
+    _at_the_limit(state, now=now[0])
+    state.read = state.admit(write=False, window_writes=5, now=now[0]).ticket  # another chain's head search
+    assert state.read is not None
+    ctx = _WriterCtx()
+    writer = _cp.ChainWriter(client=ctx, max_parts=3, entry=state, sleep=lambda s: None, monotonic=lambda: now[0])
+    run = writer.new_run(started=now[0], deadline=now[0] + 20.0, budget_s=20.0, planned_writes=1)
+    try:
+        with pytest.raises(CtxCheckpointError, match="budget"):
+            writer.store_paced("fact a", run, category="learnings", title="fact a", content="a")
+    finally:
+        run.close()
+
+    assert ctx.searches == 0 and ctx.stores == []
+    assert state.in_flight == 0 and state.errors_in_row == _cp.MAX_RATE_REFUSALS + 1
