@@ -1890,11 +1890,22 @@ class ChainWriter:
                 # reads it — is_failure_envelope) is an error answer; a write answered that way may
                 # still be stored and keeps its slot, unless ctx refused it for the write limit.
                 answered = not is_failure_envelope(data)
+                # The same refusal of the type as a returned envelope: no slot, sent again without it.
+                type_refused = (
+                    not answered
+                    and type_refusable
+                    and write
+                    and bool(kwargs.get("type"))
+                    and response_code(data) == "unknown_type"
+                )
                 if answered:
                     booked = write and store_action(data) != "noop"
                 else:
-                    booked = write and response_code(data) != "rate_limit"
+                    booked = write and response_code(data) != "rate_limit" and not type_refused
                 run.entry.release(ticket, error=not answered, booked=booked, now=self.monotonic())
+                if type_refused:
+                    detail = redact_error_text(data.get("error") or "unknown_type", self.secret)[:200]
+                    failure = BlockTypeRefused(f"ctx checkpoint {what}: {detail}")
             if failure is not None:
                 # Raised after the handler, not in it: there the error would keep the original (the
                 # server's or the client's text, unredacted) as its implicit ``__context__``, which

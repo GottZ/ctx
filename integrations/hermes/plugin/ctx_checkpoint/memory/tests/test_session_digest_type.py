@@ -451,3 +451,30 @@ def test_a_refusal_warns_once_per_process_and_entry(caplog, monkeypatch):
         _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, title="w1")  # asks again, refused again
         _cp.store_typed(_cp.EntryState(), SESSION_DIGEST_TYPE, store, title="other entry")
     assert len(_warnings(caplog, "does not know block type")) == 2  # once for each entry
+
+
+class EnvelopeOldServer(FakeClient):
+    """A server without the type whose refusal comes back as a returned failure envelope with the code
+    ``unknown_type`` (the client returns such envelopes instead of raising)."""
+
+    refused: ClassVar[list] = []
+
+    def store(self, category, title, content, sensitivity=None, tags=None, **extra):
+        if extra.get("type") and extra.get("type") != "checkpoint":
+            EnvelopeOldServer.refused.append(title)
+            return {"success": False, "code": "unknown_type", "error": "unknown block type"}
+        return super().store(category, title, content, sensitivity, tags, **extra)
+
+
+def test_a_returned_unknown_type_envelope_of_a_required_fact_is_a_refusal_of_the_type(make_provider, monkeypatch):
+    EnvelopeOldServer.refused = []
+    monkeypatch.setattr(provider_mod, "CtxClient", EnvelopeOldServer)
+    p, client = make_provider()
+    entry = _cp.entry_state(p._entry_key())
+    receipt = p.on_pre_compress(_fact_turns(), require_checkpoint=True)
+    assert f"stored {len(FACTS)} fact block(s)" in receipt, receipt
+    assert len(EnvelopeOldServer.refused) == 1
+    assert _typed(client.calls, CATEGORY_LEARNINGS) == [None] * len(FACTS)
+    # The refusal booked no slot: the window holds the chain's writes and the facts stored, nothing more.
+    assert len(entry.booked) == len(client.chain_calls) + len(FACTS)
+    p.shutdown()
