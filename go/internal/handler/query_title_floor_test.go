@@ -198,6 +198,44 @@ func TestFloorTitleMatchTwinsPreferTheUnfoldedTitle(t *testing.T) {
 	}
 }
 
+// Issue #528, review round 1 (L1): a twin asked inside quotation marks or
+// behind a leading phrase is told apart like the bare question — the
+// comparison as typed runs on the question without its pair of marks (and the
+// closing punctuation behind it) and without its phrase.
+func TestFloorTitleMatchTwinsQuotedOrBehindAPhrase(t *testing.T) {
+	filler := []string{"a", "c", "e", "f", "g", "h", "i", "j", "k", "l"}
+	list := func(higher, lower string) []rrf.SearchResult {
+		titles := append([]string{filler[0], higher}, filler[1:]...)
+		return titleFloorList(append(titles, lower)...)
+	}
+	cases := []struct {
+		name, higher, lower, q, want string
+	}{
+		{"low quote pair around the lower twin", "Notes v1", "Notes v1?", "„Notes v1?“", "b11"},
+		{"ASCII pair around the lower twin", "Notes v1", "Notes v1?", "\"Notes v1?\"", "b11"},
+		{"pair, then the question's own mark", "Notes v1?", "Notes v1", "„Notes v1“?", "b11"},
+		{"single marks", "Notes v1", "Notes v1?", "'Notes v1?'", "b11"},
+		{"pair around the higher twin", "Notes v1?", "Notes v1", "„Notes v1?“", "b01"},
+		{"phrase before the lower twin", "Notes v1", "Notes v1?", "zeig mir Notes v1?", "b11"},
+		{"phrase and pair", "Notes v1", "Notes v1?", "Was steht in „Notes v1?“", "b11"},
+		{"typographic apostrophe in the phrase", "Notes v1", "Notes v1?", "What’s in Notes v1?", "b11"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := floorTitleMatch(list(c.higher, c.lower), c.q, nil)
+			if out[0].ID != c.want {
+				t.Errorf("%q: first = %s (%q), want %s", c.q, out[0].ID, out[0].Title, c.want)
+			}
+		})
+	}
+	// Twins behind a phrase that neither equals as typed name nothing — the
+	// rule of exactly one candidate holds.
+	in := list("Notes v1?", "Notes v1.")
+	if out := floorTitleMatch(in, "zeig mir Notes v1!", nil); titleFloorIDs(out) != titleFloorIDs(in) {
+		t.Errorf("phrase before neither twin as typed: order %s, want it unchanged", titleFloorIDs(out))
+	}
+}
+
 // A title asked inside one pair of quotation marks names the block (issue
 // #528, point 3); a question that contains a quotation is no title.
 func TestFloorTitleMatchQuotedTitle(t *testing.T) {
@@ -261,7 +299,9 @@ func TestFloorTitleMatchLeadingPhrase(t *testing.T) {
 			t.Errorf("%q: first = %s, want b12", q, out[0].ID)
 		}
 	}
-	twins := titleFloorList("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "Release notes", "m", "Release notes?")
+	// Two candidates carry the rest as their title, byte for byte (twins that
+	// differ as typed are told apart: TestFloorTitleMatchTwinsQuotedOrBehindAPhrase).
+	twins := titleFloorList("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "Release notes", "m", "Release notes")
 	deploy := titleFloorList("Deploy runbook 1", "Deploy runbook 2", "a", "b", "c", "d", "e", "f", "g", "h", "i", "Deploy")
 	for _, c := range []struct {
 		name string
