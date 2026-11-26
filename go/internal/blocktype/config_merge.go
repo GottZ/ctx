@@ -108,9 +108,9 @@ func marshalConfig(v any) ([]byte, error) {
 // A partial config must still not pass as a whole one, or the silent reset of
 // issue #565 returns through the broken row. So the replacement must name
 //
-//   - every section the stored config names — in any spelling, since a
-//     misspelled key still says which section the row meant; a section named
-//     null is named, it resets the section;
+//   - every section the stored config names — in any letter case, since
+//     "Digest" still says which section the row meant (a key that is no
+//     section names none); a section named null is named, it resets it;
 //   - for a name with a compiled definition, every FIELD that definition sets
 //     away from the decoder's default (shippedFields), with a value. A field
 //     left out or named null — itself or through its section — takes that
