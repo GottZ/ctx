@@ -1409,3 +1409,69 @@ def test_a_read_before_a_write_that_fails_is_the_entry_s_third_error_answer_in_a
     assert answers == [("store", "error"), ("store", "error"), ("search", "error")]
     assert len(answers) == _host_breaker_threshold()
     assert state.errors_in_row == _host_breaker_threshold() and state.in_flight == 0
+
+
+def test_the_read_before_a_write_at_the_limit_is_a_listing_of_the_category():
+    """A11 (#289, measured on a test ctx with 100 000 checkpoint heads): the probe searched its
+    category for "Compaction checkpoint head", which every head matches in full text — ctx read and
+    ranked all of them (0.7–1.1 s median, up to 3.7 s at p95, some 770 000 buffer hits). Any answer
+    ends the run, so the probe lists the category instead (no query text, one row): ctx answers that
+    from an index of the category in about 1 ms, the same at 100 000 heads as at none."""
+    state = _cp.EntryState()
+    _at_the_limit(state)
+    searched: list[dict] = []
+
+    class Ctx(_WriterCtx):
+        def search(self, **kwargs):
+            searched.append(kwargs)
+            return super().search(**kwargs)
+
+    writer = _cp.ChainWriter(client=Ctx(), category="compaction-checkpoints", entry=state)
+    run = writer.new_run(started=time.monotonic(), deadline=time.monotonic() + 30, budget_s=30, planned_writes=1)
+    try:
+        writer.store_paced("fact a", run, category="learnings", title="fact a", content="a")
+    finally:
+        run.close()
+
+    assert [{k: v for k, v in s.items() if k != "timeout"} for s in searched] == [
+        {"text": "", "category": "compaction-checkpoints", "limit": 1}
+    ]
+
+
+def _held_behind_an_earlier_run(clock, notice_s: float):
+    """A run registered first plans five writes (one window at max_parts 3) and ends at 70 s without
+    sending them; a write of a run started after it is held behind them, and its notice takes
+    ``notice_s`` seconds in the user's callback."""
+    state = _cp.EntryState()
+    started = clock.now
+    earlier, _ = state.register(5, lambda: started + 70.0, now=started, window_writes=5)
+    writer = _writer(_WriterCtx(), state, clock=clock, notify=lambda message: clock.advance(notice_s))
+    run = writer.new_run(started=started, deadline=started + 100.0, budget_s=100.0, planned_writes=1)
+    return state, earlier, writer, run, started
+
+
+def test_a_slow_notice_of_a_held_write_does_not_lengthen_its_next_look(clock):
+    """A4, held behind an earlier run: the notice took 59 s of the 61 s until the write's turn; the
+    write slept the five seconds it computed before the notice, now the two that are left."""
+    state, earlier, writer, run, started = _held_behind_an_earlier_run(clock, 59.0)
+    slept = len(clock.slept)
+    try:
+        writer.store_paced("fact a", run, category="learnings", title="fact a", content="a")
+    finally:
+        run.close()
+        state.unregister(earlier)
+    assert clock.slept[slept][1] == pytest.approx(started + 61.0 - (started + 59.0))
+
+
+def test_a_slow_notice_of_a_held_write_that_ends_past_the_deadline_stops_it_at_once(clock):
+    """A4, fail-closed: the notice of a held write ended after the write's deadline; the write stops
+    there with the deadline's error instead of sleeping on and looking again."""
+    state, earlier, writer, run, started = _held_behind_an_earlier_run(clock, 200.0)
+    slept = len(clock.slept)
+    with pytest.raises(CtxCheckpointError, match="budget"):
+        try:
+            writer.store_paced("fact a", run, category="learnings", title="fact a", content="a")
+        finally:
+            run.close()
+            state.unregister(earlier)
+    assert len(clock.slept) == slept and clock.now == started + 200.0

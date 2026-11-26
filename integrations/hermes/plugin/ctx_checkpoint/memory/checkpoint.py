@@ -50,7 +50,7 @@ from .client import (
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.17.1"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
+PLUGIN_VERSION = "0.18.0"  # ctx_checkpoint plugin version — keep in sync with ../plugin.yaml and ../VERSION
 UPSTREAM_REF = "GottZ/ctx integrations/hermes/plugin/ctx_checkpoint 0.4.3 @ 38fdb74 (MPL-2.0)"
 
 CATEGORY_CHECKPOINT = "compaction-checkpoints"
@@ -111,8 +111,12 @@ ENTRY_WAIT_POLL_S = 0.05
 # in the plan is free at once (EntryState.admit, GottZ/ctx#299).
 ENTRY_HOLD_RECHECK_S = 5.0
 # The read a chain sends before a write while the entry's last MAX_RATE_REFUSALS answers were
-# errors (ChainWriter._probe): a search in the chain's category for this text, one row at most.
-PROBE_QUERY = "Compaction checkpoint head"
+# errors (ChainWriter._probe): a search in the chain's category with this text, one row at most.
+# Empty: a listing of the category, newest first (GottZ/ctx#289, measured on a test ctx with
+# 100 000 checkpoint heads: about 1 ms from the category's listing index, the same as with none;
+# the text "Compaction checkpoint head" matched every head, and ctx ranked all of them — 0.7 to
+# 1.1 s median, 3.7 s at p95). Any answer ends the run, so the read needs no hit.
+PROBE_QUERY = ""
 # Hermes calls on_pre_compress in the compaction worker before the summary call, and its wait for
 # that worker counts from the worker's last progress, which only the summary stream reports
 # (agent/conversation_compression.py _await_worker_within_budget; the window comes from
@@ -1547,10 +1551,8 @@ class ChainWriter:
                 "and the compaction waits for it."
             )
             # The notice runs the user's callback, which may take its time (#289): the wait below
-            # counts from now, and the next look at the entry checks the deadline again.
+            # counts from its return, and the next look at the entry checks the deadline again.
             now = self.monotonic()
-            if now >= run.deadline:
-                raise self._past_deadline(what, run, run.budget_s)
         logger.info("ctx checkpoint holds %s: %.1fs until its turn in the rate window", what, resume - now)
         if admission.answer_pending:
             run.entry.wait_for_answer(ENTRY_WAIT_POLL_S)
@@ -1596,11 +1598,9 @@ class ChainWriter:
                     f"checkpoint takes of ctx's write limit; this one waits about {admission.resume_at - now:.0f}s "
                     "for the next minute, and the compaction waits for it."
                 )
-                # The user's callback may take its time (#289): the wait counts from now, and a
-                # notice that ended past the deadline stops the write here instead of after it.
+                # The user's callback may take its time (#289): the wait counts from its return
+                # (the call's own deadline check follows it at once when it ended too late).
                 now = self.monotonic()
-                if now >= run.deadline:
-                    raise self._past_deadline(what, run, run.budget_s)
             if admission.resume_at > now:
                 self.sleep(admission.resume_at - now)
             return

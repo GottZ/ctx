@@ -6,6 +6,50 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.18.0] — 2026-11-26
+
+The follow-ups of 0.17.0 (GottZ/ctx#289, the list of 2026-11-24): counts read under the entry's
+lock, one probe at a time, a cheap probe, the early stop judged by the transcript, a fresh deadline
+check after a notice, the grant asked again per checkpoint, one reading of failure envelopes.
+
+- **Answers between two refusals.** A refused write read the entry's count of answers after
+  `EntryState.release`, outside its lock; an answer of another chain released in between was
+  taken for one before the refusal, so the next refusal counted as the second in a row and the
+  chain stopped one refusal early. `release` returns the count under the lock now.
+- **One probe at a time.** At `MAX_RATE_REFUSALS` every writer was told to probe; a second
+  writer's read then went out after the first probe had ended the run, and its failure stopped a
+  chain the entry no longer held back. The admission that finds the limit hands out the read's
+  ticket (`Admission.probe` with a ticket); writers that want to write meanwhile wait for its
+  answer.
+- **A cheap probe.** The probe searched its category for `Compaction checkpoint head`, which every
+  head matches: on a test ctx with 100 000 heads ctx read and ranked all of them (0.7–1.1 s
+  median, 3.7 s at p95, about 770 000 buffer hits a call; with `search.leave_out_never_ranked` on,
+  5 ms and no row). It lists the category now (`PROBE_QUERY` empty, one row): about 1 ms and 8–10
+  buffer hits at 100 000 heads as at none, on both settings. Any answer ends the run.
+- **The early stop is judged by the transcript.** A run held behind earlier runs stopped before
+  its first write when its last planned write would come after its deadline — the required facts
+  after the chain included. A chain whose transcript fit failed for a fact that did not; the
+  facts are optional writes of its reservation now (`Reservation.optional`), and a fact that does
+  not fit is left for a later compaction, as after any saved chain.
+- **A slow notice.** The wait after a notice counted from before the user's callback ran: a
+  callback of 150 s moved a paced write 150 s past its slot, here 50 s past its deadline. The
+  wait counts from the callback's return, and a notice that ends past the deadline stops the
+  write there.
+- **Hermes' refusal of the grant** (`PermissionError` from `call_mcp`) held until the provider
+  connected again; it holds for the checkpoint that received it now (`McpClient.forget_host_refusal`
+  before each checkpoint), and a restored grant is used by the next one.
+- **Failure envelopes.** An `error` without `success` was a failure envelope for the REST client and
+  an answer for the chain writer (it ended the entry's run of error answers and booked a slot).
+  Both read it through `client.is_failure_envelope` now: an error answer.
+- Pinned without a change: a registration past its run's deadline holds no place for later runs
+  (also while its call is still marked waiting); a failed read before a write is the entry's third
+  error answer in a row (kept, see the README); an entry that needs approval completes when its
+  stores are approved in time, and a store approved after the checkpoint gave up still reaches
+  ctx (the README says so).
+- Documented from measurements: the cancel of `call_mcp` frees the entry within milliseconds over
+  the MCP SDK Hermes ships, while ctx completes the store; two Hermes processes of one profile
+  share nothing; under `plugins.isolation: host` the MCP transport does not reach ctx.
+
 ## [ctx_checkpoint 0.17.0] — 2026-11-24
 
 The chains of one process share one state per ctx server entry, the required facts pace against
