@@ -117,6 +117,13 @@ func UpdateConfig(name, scope string, builtin, isDefault bool, stored, update []
 	if storedErr == nil {
 		return MergeConfig(name, stored, update)
 	}
+	// The request as sent is checked first, as MergeConfig checks it (PR #567
+	// review): the copy below is a map, which keeps only the last of a repeated
+	// key, loses an unknown key named null and is smaller than the request by
+	// its nulls — the checks of the written config alone would pass all three.
+	if _, err := decodeEnvelope(name, update); err != nil {
+		return nil, err
+	}
 	patch, err := decodeConfigObject(update)
 	if err != nil {
 		return nil, fmt.Errorf("blocktype %q: config: %w", name, err)

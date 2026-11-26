@@ -88,7 +88,13 @@ func TestTypeUpdate565_BrokenStoredConfig(t *testing.T) {
 					if served(t, row.name, row.scope) {
 						t.Fatalf("fixture premise: the broken row %s is served (registry builds)", broken)
 					}
-					for _, partial := range []string{`{"v":1,"retrieval":{"damping_factor":0.45}}`, `{"v":1,"zz_legacy":null}`} {
+					// The request is checked as sent before its nulls are dropped:
+					// an unknown key is refused even when it is named null.
+					if rec := tr.send(t, ar, row.name, `{"v":1,"zz_legacy":null}`); rec.Code != http.StatusUnprocessableEntity ||
+						!strings.Contains(rec.Body.String(), `unknown field \"zz_legacy\"`) {
+						t.Fatalf("an unknown key named null over the broken row: %d %s — want 422 naming the unknown field", rec.Code, rec.Body.String())
+					}
+					for _, partial := range []string{`{"v":1,"retrieval":{"damping_factor":0.45}}`} {
 						if form.label == "no object" && row.scope != store.GlobalScope {
 							// A row that names no section, of a name with no shipped
 							// definition: there is nothing a partial config could drop,

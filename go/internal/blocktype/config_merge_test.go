@@ -202,18 +202,19 @@ func TestUpdateConfig565_BrokenStored(t *testing.T) {
 	}{
 		{"unknown key, whole config", "session-digest", strings.Replace(whole, `{"v":1,`, `{"v":1,"zz_legacy":{"x":1},`, 1), whole, ""},
 		{"unknown key, partial", "session-digest", strings.Replace(whole, `{"v":1,`, `{"v":1,"zz_legacy":{"x":1},`, 1), `{"v":1,"retrieval":{"damping_factor":0.5}}`, "must name"},
-		{"unknown key, key null", "session-digest", strings.Replace(whole, `{"v":1,`, `{"v":1,"zz_legacy":{"x":1},`, 1), `{"v":1,"zz_legacy":null}`, "must name"},
+		{"unknown key, key null", "session-digest", strings.Replace(whole, `{"v":1,`, `{"v":1,"zz_legacy":{"x":1},`, 1), `{"v":1,"zz_legacy":null}`, `unknown field "zz_legacy"`},
 		{"another spelling, whole config", "opsx", `{"v":1,"Digest":{"include":false},"classify":{"priority":3}}`, `{"v":1,"digest":{"include":false},"classify":{"priority":3}}`, ""},
 		{"another spelling, partial", "opsx", `{"v":1,"Digest":{"include":false},"classify":{"priority":3}}`, `{"v":1,"classify":{"priority":4}}`, "digest"},
 		{"no object, builtin, partial", "session-digest", `[]`, `{"v":1,"retrieval":{"damping_factor":0.5}}`, "guard"},
 		{"no object, builtin, whole config", "session-digest", `[]`, whole, ""},
-		{"no object, own type, anything that decodes", "opsx", `[]`, `{"v":1,"retrieval":{"damping_factor":0.5,"zz":null}}`, ""},
+		{"no object, own type, anything that decodes", "opsx", `[]`, `{"v":1,"retrieval":{"damping_factor":0.5,"untrusted":null}}`, ""},
+		{"no object, own type, an unknown key named null", "opsx", `[]`, `{"v":1,"retrieval":{"damping_factor":0.5,"zz":null}}`, `unknown field "zz"`},
 		{"whole config with its own error", "opsx", `[]`, `{"v":1,"guards":{}}`, `unknown field "guards"`},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
 			out, err := UpdateConfig(tc.name, globalScope, tc.name == "session-digest", false, []byte(tc.stored), []byte(tc.update))
 			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || (tc.wantErr != `unknown field "guards"` && !strings.Contains(err.Error(), "stored config does not decode")) {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || (!strings.HasPrefix(tc.wantErr, "unknown field") && !strings.Contains(err.Error(), "stored config does not decode")) {
 					t.Fatalf("err = %v, want one naming the broken stored config and %q", err, tc.wantErr)
 				}
 				return
@@ -234,4 +235,90 @@ func TestUpdateConfig565_BrokenStored(t *testing.T) {
 	if err != nil || !strings.Contains(string(out), `"untrusted":true`) {
 		t.Fatalf("merge over a decodable row: %s, %v", out, err)
 	}
+}
+
+// TestUpdateConfig565_RequestCheckedAsSent: over a stored config that does not
+// decode, the request is checked as sent before its nulls are dropped — a
+// repeated key, an unknown key named null and a request over the size cap that
+// its nulls carry are refused like MergeConfig refuses them, with the text
+// DecodePolicy gives. RED on 9c701044: the checks ran on the copy without the
+// nulls, which keeps the last of a repeated key (untrusted false) and is under
+// the cap.
+func TestUpdateConfig565_RequestCheckedAsSent(t *testing.T) {
+	under := sizedConfig(t, maxConfigBytes-12)
+	for _, tc := range []struct{ label, update, want string }{
+		{"a repeated key", `{"v":1,"retrieval":{"untrusted":true,"untrusted":false}}`, "repeats"},
+		{"an unknown key named null", `{"v":1,"zz_future":null}`, `unknown field "zz_future"`},
+		{"over the cap by its nulls", strings.TrimSuffix(under, "}") + `,"parent":null,"workflow":null}`, "exceeds"},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			out, err := UpdateConfig("opsx", globalScope, false, false, []byte(`[]`), []byte(tc.update))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("UpdateConfig over a broken row = %.80s…, %v — want an error naming %q", out, err, tc.want)
+			}
+			_, decErr := DecodePolicy("opsx", globalScope, false, false, []byte(tc.update))
+			if decErr == nil || decErr.Error() != err.Error() {
+				t.Errorf("error %v, want the text DecodePolicy gives: %v", err, decErr)
+			}
+		})
+	}
+	if out, err := UpdateConfig("opsx", globalScope, false, false, []byte(`[]`), []byte(under)); err != nil || !jsonSame(out, under) {
+		t.Fatalf("the same config without the nulls: %.60s…, %v — want it written as sent", out, err)
+	}
+}
+
+// sizedConfig is a valid config of exactly n bytes, compact: classify arrays of
+// entries of up to maxArrayItemLen characters.
+func sizedConfig(t testing.TB, n int) string {
+	t.Helper()
+	keys := []string{"title_patterns", "source_prefixes", "metadata_flags"}
+	lists := make([][]string, len(keys))
+	render := func() string {
+		var parts []string
+		for i, k := range keys {
+			if len(lists[i]) > 0 {
+				parts = append(parts, `"`+k+`":["`+strings.Join(lists[i], `","`)+`"]`)
+			}
+		}
+		return `{"v":1,"classify":{` + strings.Join(parts, ",") + `}}`
+	}
+	cur := 0
+	lists[0] = []string{"e"}
+	for s := render(); len(s) != n; s = render() {
+		last := &lists[cur][len(lists[cur])-1]
+		gap := n - len(s)
+		switch {
+		case gap < 0:
+			t.Fatalf("sizedConfig(%d) overshot: %d", n, len(s))
+		case len(*last) < maxArrayItemLen:
+			*last += strings.Repeat("x", min(gap, maxArrayItemLen-len(*last)))
+		default:
+			next, cost := cur, 4 // ,"e"
+			if len(lists[cur]) == maxArrayEntries {
+				next = cur + 1
+				if next == len(keys) {
+					t.Fatalf("sizedConfig(%d) is beyond three full arrays", n)
+				}
+				cost = len(`,"`+keys[next]+`":["e"]`)
+			}
+			if gap < cost {
+				*last = (*last)[:len(*last)-(cost-gap)]
+			}
+			cur = next
+			lists[cur] = append(lists[cur], "e")
+		}
+	}
+	s := render()
+	if _, err := DecodePolicy("sized", globalScope, false, false, []byte(s)); err != nil && n <= maxConfigBytes {
+		t.Fatalf("sizedConfig(%d) does not decode: %v", n, err)
+	}
+	return s
+}
+
+func jsonSame(a []byte, b string) bool {
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal([]byte(b), &y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
 }
