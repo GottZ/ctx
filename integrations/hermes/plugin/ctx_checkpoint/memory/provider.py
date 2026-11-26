@@ -786,9 +786,12 @@ class CtxMemoryProvider(MemoryProvider):
         sensitivity: str | None,
         *,
         block_type: str | None = None,
+        entry: _cp.EntryState | None = None,
     ) -> bool:
         """One automatic store with provenance tags + result logging. Never raises."""
-        return self._auto_store_result(client, hook, category, title, content, sensitivity, block_type=block_type)[0]
+        return self._auto_store_result(
+            client, hook, category, title, content, sensitivity, block_type=block_type, entry=entry
+        )[0]
 
     def _auto_store_result(
         self,
@@ -802,6 +805,7 @@ class CtxMemoryProvider(MemoryProvider):
         *,
         timeout: float | None = None,
         block_type: str | None = None,
+        entry: _cp.EntryState | None = None,
     ) -> tuple:
         """Like ``_auto_store`` but returns ``(ok, block_id)``. Never raises. ``timeout`` bounds the
         store (the required facts pass the time their deadline leaves); without it the client's own.
@@ -826,6 +830,7 @@ class CtxMemoryProvider(MemoryProvider):
             data = self._store_typed(
                 client,
                 block_type,
+                entry=entry,
                 category=category,
                 title=title,
                 content=content,
@@ -891,7 +896,9 @@ class CtxMemoryProvider(MemoryProvider):
         )
         return True, block_id
 
-    def _store_typed(self, client: Any, block_type: str | None, **store: Any) -> dict[str, Any]:
+    def _store_typed(
+        self, client: Any, block_type: str | None, *, entry: _cp.EntryState | None = None, **store: Any
+    ) -> dict[str, Any]:
         """``client.store`` naming ``block_type`` (GottZ/ctx#289) through :func:`checkpoint.store_typed` with
         the process-wide state of the server entry: one write asks, a server without the type refuses it
         once and the write is sent again without it. The required facts' client takes the type itself:
@@ -901,7 +908,11 @@ class CtxMemoryProvider(MemoryProvider):
         not go through the entry's admission, and Hermes counts error answers this process cannot see
         (the agent's tools, recall) — after two of them the refusal would open Hermes' breaker for the
         server, where the same write without the type ended the run (a fresh reviewer ran exactly that).
-        REST has no such breaker."""
+        REST has no such breaker.
+
+        ``entry``: the state of ``client``'s server entry, taken together with the client when the write
+        was scheduled — a re-initialization in between can bind another server, whose entry must neither
+        take this write's verdict nor decide it. Default: the current binding's."""
         if not block_type:
             return client.store(**store)
         if isinstance(client, _PacedFactStore):
@@ -915,7 +926,7 @@ class CtxMemoryProvider(MemoryProvider):
                 return client.search(_cp.PROBE_QUERY, category=category, limit=1, timeout=timeout)
 
         return _cp.store_typed(
-            _cp.entry_state(self._entry_key()),
+            entry if entry is not None else _cp.entry_state(self._entry_key()),
             block_type,
             client.store,
             wait_s=_cp.TYPE_ASK_WAIT_S,
@@ -1047,7 +1058,7 @@ class CtxMemoryProvider(MemoryProvider):
         client = self._client
         # #299: the chain and the required facts after it write against the process-wide state of
         # this server entry (its error answers in a row, its booked writes of the window).
-        self._chain().entry = _cp.entry_state(self._entry_key())
+        entry = self._chain().entry = _cp.entry_state(self._entry_key())
 
         # P4: select facts BEFORE the chain write so their dedupe keys ride in the head/
         # manifest metadata (``fact_hashes``); keys already stored for this root are skipped.
@@ -1176,7 +1187,7 @@ class CtxMemoryProvider(MemoryProvider):
             return chain_text
 
         def _run() -> None:
-            self._store_facts(client, facts, sensitivity, ledger=ledger)
+            self._store_facts(client, facts, sensitivity, ledger=ledger, entry=entry)
 
         self._spawn_write(_run)
         lines = "\n".join(f"- {shorten(self._redacted(f) or '', 300)}" for f in facts)
@@ -1397,8 +1408,16 @@ class CtxMemoryProvider(MemoryProvider):
         )
 
     def _store_facts(
-        self, client: CtxClient | None, facts: list[str], sensitivity: str | None, ledger: FactLedger | None = None
+        self,
+        client: CtxClient | None,
+        facts: list[str],
+        sensitivity: str | None,
+        ledger: FactLedger | None = None,
+        *,
+        entry: _cp.EntryState | None = None,
     ) -> dict[str, int]:
+        """``entry``: the server entry of ``client``, taken with it when the write was scheduled
+        (:meth:`_store_typed`)."""
         stored = failed = 0
         for fact in facts:
             safe = self._redacted(fact)
@@ -1410,6 +1429,7 @@ class CtxMemoryProvider(MemoryProvider):
                 safe,
                 sensitivity,
                 block_type=SESSION_DIGEST_TYPE,
+                entry=entry,
             ):
                 stored += 1
             else:
@@ -1578,6 +1598,7 @@ class CtxMemoryProvider(MemoryProvider):
             metadata["manifest_id"] = manifest_id
         sensitivity = self._config.get("sensitivity_default")
         client = self._client
+        entry = _cp.entry_state(self._entry_key())
         logger.info(
             "CTX %s digest scheduled (profile=%s, trigger=%s, root=%s, seg=%d, exchanges=%d)",
             hook,
@@ -1600,6 +1621,7 @@ class CtxMemoryProvider(MemoryProvider):
                     sensitivity,
                     metadata=metadata,
                     block_type=SESSION_DIGEST_TYPE,
+                    entry=entry,
                 )
                 if safe is not None
                 else (False, "")

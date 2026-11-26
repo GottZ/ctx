@@ -478,3 +478,35 @@ def test_a_returned_unknown_type_envelope_of_a_required_fact_is_a_refusal_of_the
     # The refusal booked no slot: the window holds the chain's writes and the facts stored, nothing more.
     assert len(entry.booked) == len(client.chain_calls) + len(FACTS)
     p.shutdown()
+
+
+def test_a_digest_scheduled_before_a_rebinding_answers_for_the_entry_it_was_scheduled_for(make_provider, monkeypatch):
+    """A digest scheduled before a re-initialization that binds another server writes to the server it
+    was scheduled for and takes that entry's verdict: the old server's refusal is the old entry's, and the
+    entry the provider is bound to afterwards still asks (its writes name the type)."""
+    OldServer.refused = []
+    monkeypatch.setattr(provider_mod, "CtxClient", OldServer)
+    p, _client = make_provider()
+    old_entry = _cp.entry_state(p._entry_key())
+    started, go = threading.Event(), threading.Event()
+    redacted = p._redacted
+
+    def held_redaction(text):  # the scheduled write has not reached its store yet
+        started.set()
+        assert go.wait(10)
+        return redacted(text)
+
+    monkeypatch.setattr(p, "_redacted", held_redaction)
+    p.on_session_end(_digest_turns())
+    assert started.wait(5)
+    monkeypatch.setenv("CTX_BASE_URL", "http://ctx-updated.invalid")
+    monkeypatch.setattr(provider_mod, "CtxClient", FakeClient)  # the new binding's server knows the type
+    p.initialize("sess-1234", hermes_home=p._hermes_home, agent_context="primary")
+    new_entry = _cp.entry_state(p._entry_key())
+    assert new_entry is not old_entry
+    go.set()
+    join_writes(p)
+    assert len(OldServer.refused) == 1  # the digest went to the server it was scheduled for
+    assert old_entry.type_to_send(SESSION_DIGEST_TYPE) == ""  # the refusal is the old entry's
+    assert new_entry.type_to_send(SESSION_DIGEST_TYPE) == _cp.TYPE_ASK  # the new entry was never answered
+    p.shutdown()
