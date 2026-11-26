@@ -5,7 +5,7 @@
 ## Tests
 
 ```bash
-# unit suites (fakes, a real SessionDB and real git in temp dirs; the host contract comes from a Hermes checkout)
+# unit suites (fakes, the real session store and real git in temp dirs; the host contract comes from a Hermes checkout)
 PYTHONPATH=/path/to/hermes-agent:integrations/hermes/plugin python -m pytest \
     integrations/hermes/plugin/ctx_handover/tests/unit -q
 # lint + format + bandit rules (ruff.toml in this directory)
@@ -16,6 +16,13 @@ hermes plugins validate integrations/hermes/plugin/ctx_handover
 
 `tests/e2e/` drives two real gateways in a lab (two `HERMES_HOME`s, a fake model); it needs that lab running and is
 not part of the unit run.
+
+The suites run against either session store, whichever the Hermes checkout on `PYTHONPATH` has: the `SessionDB` class
+(Hermes up to v0.23.2) or the storage interface (`persistence_assembly`, v0.23.3 and later), where the tests open the
+store as the engine does (`tests/fakes/hoststore.py`). CI runs them against one pinned commit of each
+(`HERMES_AGENT_SHA`, `HERMES_AGENT_SHA_STORAGE` in `.github/workflows/hermes-ctx-handover.yml`). Put `TMPDIR` outside
+every git repository and outside the dot folders of any home (the destination denylist protects those of every
+account on the host, so a test tree under `~/.cache` makes return trips land elsewhere).
 
 ## Layout
 

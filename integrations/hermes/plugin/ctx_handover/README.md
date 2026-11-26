@@ -57,7 +57,9 @@ an address the laptop can reach: its Hermes dashboard, public or inside a privat
 ## Before you start
 
 You need Hermes 0.22.6 or newer on both machines, and `git` 2.38 or newer if your project is a git repository. Tested
-on Linux; macOS and Windows have had no end-to-end runs yet.
+on Linux; macOS and Windows have had no end-to-end runs yet. Hermes v0.23.3 moved its session store behind a new
+storage interface; the plugin uses whichever store the installed Hermes has, so both machines may run either kind of
+Hermes, and `/handover doctor` names the one it found.
 
 What does not work, or only partly:
 

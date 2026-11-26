@@ -5,10 +5,12 @@
 # the integration suites (two Hermes homes, a real listener process on loopback). The e2e suite needs the two-gateway
 # lab, which is not in the tree; it skips itself without CTXH_E2E/CTXH_LAB.
 #
-# The suites import Hermes itself (SessionDB, plugin storage, the dashboard plugin router): hermes-agent is checked
-# out at a pinned commit (HERMES_AGENT_SHA, the reading tree the plugin was built and reviewed against) and
-# installed from its own uv.lock (`uv sync --locked`, dev group). Bump the pin deliberately, together with a local
-# run.
+# The suites import Hermes itself (the session store, plugin storage, the dashboard plugin router), so they run
+# against two pinned hermes-agent commits, one per session-store interface the plugin speaks: HERMES_AGENT_SHA, the
+# reading tree the plugin was built and reviewed against (the SessionDB class, Hermes up to v0.23.2), and
+# HERMES_AGENT_SHA_STORAGE, a commit with the storage interface (persistence_assembly, Hermes v0.23.3 and later).
+# Each is installed from its own uv.lock (`uv sync --locked`, dev group). Bump a pin deliberately, together with a
+# local run.
 #
 # Not a required check (the ruleset is unchanged); a red run here is information for the PR.
 
@@ -37,6 +39,7 @@ env:
   PLUGIN_DIR: integrations/hermes/plugin/ctx_handover
   HERMES_AGENT_REPO: NousResearch/hermes-agent
   HERMES_AGENT_SHA: 0f0e96fc8e7fd35aba406e4a9fa341fb969d0b41
+  HERMES_AGENT_SHA_STORAGE: c925e8bbc4db34232dd8ecbe2dd31b70af6b33c0
   PYTHON_VERSION: "3.14"
   UV_PIN: "uv==0.13.5"
   RUFF_PIN: "ruff==0.15.22"
@@ -68,7 +71,7 @@ jobs:
         run: ruff format --check .
 
   suites:
-    name: ctx_handover · ${{ matrix.suite }}
+    name: ctx_handover · ${{ matrix.suite }} · ${{ matrix.hermes }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
     permissions:
@@ -76,6 +79,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # sessiondb = HERMES_AGENT_SHA, storage = HERMES_AGENT_SHA_STORAGE (the matrix cannot read env)
+        hermes: [sessiondb, storage]
+        suite: [validate, unit, integration]
         include:
           - suite: validate
             timeout: 15
@@ -92,7 +98,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.HERMES_AGENT_REPO }}
-          ref: ${{ env.HERMES_AGENT_SHA }}
+          ref: ${{ matrix.hermes == 'storage' && env.HERMES_AGENT_SHA_STORAGE || env.HERMES_AGENT_SHA }}
           path: hermes-agent
           persist-credentials: false
       - name: Set up Python

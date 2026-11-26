@@ -1,5 +1,5 @@
 name: ctx_handover
-version: 0.1.3
+version: 0.1.4
 description: "Close the laptop and carry on elsewhere: hands a running Hermes session and the project files it needs over to another machine of yours (your server, or back to the laptop), and the session continues there; with --continue the agent there keeps working on its own if that machine allows it. Over the network or with a handover file you copy. The conversation is copied row by row (message by message) and checked against the original with hashes; git repositories keep branches, stash and uncommitted changes; the agent gets a note about what changed. Works without ctx. Not the core /handoff, not hermes-handoff, not session-relay."
 kind: standalone
 requires_hermes: ">=0.22.6"
