@@ -354,7 +354,11 @@ def test_g3b_l17_committed_import_is_in_the_stored_listing(
     ``list_sessions_rich``; after the commit's unhide the imported tip is there, with a source the stored picker
     treats as local (resumable), never before the unhide."""
     from gateway.session_listing import _LOCAL_SOURCES
-    from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+
+    try:
+        from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+    except ImportError:  # the storage interface host
+        from persistence.conversation.sessions import INTERNAL_LISTING_SOURCES
 
     from ctx_handover.tests.unit.B.conftest import roundtrip
 

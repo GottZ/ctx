@@ -10,6 +10,7 @@ import pytest
 from ctx_handover.engine import session_export, session_import
 from ctx_handover.engine.errors import VerifyFailed
 from ctx_handover.engine.session_hash import put_json
+from ctx_handover.tests.fakes.hoststore import is_store_host
 from ctx_handover.tests.unit.B.conftest import (
     assert_lineage_equal,
     export,
@@ -94,8 +95,13 @@ SPECIAL = (
     "auto_archived",
     "hidden",
 )
+STORE_NOT_WRITTEN = ("prompt_cache_clock",)
+"""Runtime state of the source that the storage-interface pin's ``sessions`` table adds (66 columns there): not
+written either (``rewrite_session`` writes an allowlist), the imported row holds the store default."""
 RULES = {**dict.fromkeys(NOT_WRITTEN, "default"), **dict.fromkeys(NULLED, "null"), **dict.fromkeys(KEPT, "keep")}
 RULES.update(dict.fromkeys(SPECIAL, "special"))
+if is_store_host():
+    RULES.update(dict.fromkeys(STORE_NOT_WRITTEN, "default"))
 
 
 def _gateway_lineage(b, db):
@@ -167,7 +173,7 @@ def test_rule_table_covers_all_65_columns(target_db, target_home):
         cols = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
     finally:
         conn.close()
-    assert len(cols) == 65
+    assert len(cols) == (66 if is_store_host() else 65)
     assert set(cols) == set(RULES)
 
 

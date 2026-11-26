@@ -127,6 +127,9 @@ def typed_submit(db, sid: str, text: str) -> int:
     ``_write_submit_user_row``): stamped timestamp and message uid, plain ``append_message``."""
     from agent.message_metadata import stamp_message_timestamp, stamp_message_uid
 
+    from ctx_handover.tests.fakes.hoststore import as_test_db
+
+    db = as_test_db(db)
     staged = stamp_message_timestamp({"role": "user", "content": text})
     return db.append_message(
         sid, "user", content=text, timestamp=staged["timestamp"], message_uid=stamp_message_uid(staged)
@@ -141,7 +144,10 @@ def withhold_like_core(db, sid: str, row_id: int, typed: str, block_message: str
 
     from agent import turn_context
 
-    agent = SimpleNamespace(_session_db=db, session_id=sid)
+    from ctx_handover.tests.fakes.hoststore import agent_store_attrs, as_test_db
+
+    db = as_test_db(db)
+    agent = SimpleNamespace(**agent_store_attrs(db), session_id=sid)
     turn_user_msg = {"role": "user", "content": typed, "_row_id": row_id, "_submit_row_session_id": sid}
     turn_context._withhold_blocked_prompt(agent, turn_user_msg, typed)
     db.append_message(sid, "assistant", content=block_message)

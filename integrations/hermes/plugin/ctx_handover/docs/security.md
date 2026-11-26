@@ -77,8 +77,10 @@ no telemetry, no update checks.
 profile's sessions with their working files; a peer with the push right can create sessions and write workspace
 copies here, and — only if you enable `allow_remote_continue` — start one continuation turn.
 
-**Reads:** the handed-over session through Hermes' session store, plus read-only SQL on `session_admissions` and
-`async_delegations` to detect pending work; the session's working directory including uncommitted git state;
+**Reads:** the handed-over session through Hermes' session store, plus — to detect pending work — the queued prompts
+and running delegated tasks of the session: on Hermes before v0.23.3 by read-only SQL on `session_admissions` and
+`async_delegations`, from v0.23.3 on through the storage interface's own reads (no connection of the plugin's own on
+`state.db`); the session's working directory including uncommitted git state;
 files under your home that the transcript references (asked before inclusion unless `extra_paths: auto`);
 `cache/spillover`, `hook_outputs`, `native-inputs` and `cache/terminal-output` files of that session;
 `processes.json` and `cron/jobs.json` (named in the note, never moved); the peer credentials through Hermes'
@@ -145,8 +147,9 @@ the turn veto (`ctx_handover-veto`); the hooks' start, which opens the ledger an
 (`ctx_handover-notes`); the notice to the other gateway after a reclaim (`ctxh-reclaimed-<job>`); a watcher per
 continuation run that records its exit (`ctx_handover-continue-<job>`); a handover the agent asked for
 (`ctx_handover-agent-request`); the `refine` model call under its time limit (`ctx_handover-refine`); the tool version
-probes (`ctxh-probe`); a timer per git call that ends a hung git; and, with ctx, a `ctxh-outbox` thread that sends the
-ctx records. Staging and a block cache in the plugin data folder (default up to 5 GiB, 3 days; `/handover gc`). **Retention:** a source's staging goes
+probes (`ctxh-probe`); a timer per git call that ends a hung git; on Hermes v0.23.3 and later one thread per process
+that gives back the session-store handles of finished worker threads (`ctx-handover-store-reaper`); and, with ctx, a
+`ctxh-outbox` thread that sends the ctx records. Staging and a block cache in the plugin data folder (default up to 5 GiB, 3 days; `/handover gc`). **Retention:** a source's staging goes
 when its handover ends (leftovers with the janitor or `/handover gc`); reports, offers 30 days after they expired, sent
 ctx records and the backups of sessions taken back here go after 30 days (a session still handed over keeps its backup
 for `/handover reclaim`); `/handover gc --job` removes everything of one finished job. While a handover runs, the cache

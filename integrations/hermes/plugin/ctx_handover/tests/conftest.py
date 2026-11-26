@@ -62,6 +62,9 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT.parent))
 
+# imported before any test runs: it takes the real ``hostcompat.session_db`` before a FakeHost can be installed over it
+from ctx_handover.tests.fakes import hoststore  # noqa: E402, F401
+
 _SCRUBBED_PREFIXES = ("HERMES_", "GIT_", "CTX_HANDOVER_")
 
 

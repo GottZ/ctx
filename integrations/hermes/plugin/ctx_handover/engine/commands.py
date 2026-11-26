@@ -1494,7 +1494,11 @@ def local_checks(ctx: Any, backend: Backend) -> list[dict]:
             {
                 "name": "Hermes session store",
                 "ok": feats.session_db_ok,
-                "detail": "Hermes offers everything the plugin needs to read and write sessions (SessionDB)"
+                "detail": (
+                    "Hermes offers everything the plugin needs to read and write sessions (storage interface)"
+                    if feats.session_store == hostcompat.SESSION_STORE_PERSISTENCE
+                    else "Hermes offers everything the plugin needs to read and write sessions (SessionDB)"
+                )
                 if feats.session_db_ok
                 else "this Hermes version lacks parts the plugin needs; missing: " + ", ".join(feats.missing),
                 "remedy": "update Hermes to 0.22.6 or newer",

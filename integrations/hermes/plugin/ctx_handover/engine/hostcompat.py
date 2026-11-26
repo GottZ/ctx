@@ -304,12 +304,12 @@ class StoreSessionDB:
     connection of its own. ``close`` releases the handle; an instance collected unclosed (a worker thread's
     per-thread instance, ``jobs._db_factory``) has it released on a reaper thread, as Hermes' own ``SessionDB``
     stand-in does — a finalizer may run on a thread that holds a lock the release takes, so it only queues the
-    handle. Each method takes the old arguments and returns the old
-    shape (the session row dict, wire rows, the revision tuple), and raises what the engine catches where the
-    interface raises something else: a busy store in a lease call reads as not acquired / not refreshed
-    (``sqlite3.OperationalError`` and ``sqlite3.Error`` in ``lock``), a title an import cannot take as
-    ``sqlite3.IntegrityError`` naming the title (``session_import._import_a``), a refused rewind as ``ValueError``.
-    Reads and writes go through repository verbs only; nothing here opens the database file itself.
+    handle. Each method takes the old arguments and returns the old shape (the session row dict, wire rows, the
+    revision tuple), and raises what the engine catches where the interface raises something else: a busy store in a
+    lease call as ``sqlite3.OperationalError`` (``lock`` reads it as not acquired / not refreshed), a title an import
+    cannot take as ``sqlite3.IntegrityError`` naming the title (``session_import._import_a``), a rewind no turn
+    starts at as ``ValueError`` (``lock._rewind_placeholders`` warns). Reads and writes go through repository verbs
+    only; nothing here opens the database file itself.
     """
 
     read_only = False
@@ -332,6 +332,7 @@ class StoreSessionDB:
         self._finalizer.atexit = False
 
     def close(self) -> None:
+        """Release the store handle (once)."""
         self._finalizer.detach()
         self._store.close()
 
@@ -343,10 +344,12 @@ class StoreSessionDB:
 
     # -- sessions ----------------------------------------------------------------------------------------------
     def get_session(self, session_id: str) -> dict | None:
+        """``sessions.get`` as the old session row dict, or None."""
         record = self._store.sessions.get(session_id)
         return None if record is None else record.as_session_row()
 
     def create_session(self, session_id: str, source: str, **kwargs) -> str:
+        """``sessions.create`` of a ``NewSession`` from the old keywords (``origin_json`` decoded); the id."""
         from persistence.conversation.sessions import NewSession
 
         origin_json = kwargs.pop("origin_json", None)
@@ -355,37 +358,47 @@ class StoreSessionDB:
         return self._store.sessions.create(NewSession(session_id=session_id, source=source, **kwargs))
 
     def end_session(self, session_id: str, end_reason: str) -> None:
+        """``sessions.end``: the first end stamp wins."""
         self._store.sessions.end(session_id, end_reason)
 
     def reopen_session(self, session_id: str) -> None:
+        """``sessions.reopen``: the end stamp cleared."""
         self._store.sessions.reopen(session_id)
 
     def set_session_archived(self, session_id: str, archived: bool, notify: bool = True) -> bool:
+        """``sessions.set_archived`` across the lineage; whether the lineage had rows."""
         return bool(self._store.sessions.set_archived(session_id, bool(archived), notify=notify).changed)
 
     def set_session_hidden(self, session_id: str, hidden: bool) -> bool:
+        """``sessions.set_hidden`` across the lineage."""
         return bool(self._store.sessions.set_hidden(session_id, bool(hidden)))
 
     def get_session_title(self, session_id: str) -> str | None:
+        """``sessions.get_title``."""
         return self._store.sessions.get_title(session_id)
 
     def get_session_title_source(self, session_id: str) -> str | None:
+        """``sessions.get_title_source`` as its stored string, or None when untitled."""
         source = self._store.sessions.get_title_source(session_id)
         return None if source is None else str(source.value)
 
     def set_session_title(self, session_id: str, title: str) -> bool:
+        """``sessions.set_title``; a title another session holds raises ``TitleConflict``, a ``ValueError``."""
         return bool(self._store.sessions.set_title(session_id, title))
 
     def set_session_title_source(self, session_id: str, source: str) -> bool:
+        """``sessions.set_title_source``; an unknown source is a ``ValueError``."""
         from persistence.conversation.sessions import TitleSource
 
         return bool(self._store.sessions.set_title_source(session_id, TitleSource(source)))
 
     def get_session_by_title(self, title: str) -> dict | None:
+        """``sessions.get_by_title`` as the old session row dict, or None."""
         record = self._store.sessions.get_by_title(title)
         return None if record is None else record.as_session_row()
 
     def get_next_title_in_lineage(self, base_title: str) -> str:
+        """``sessions.next_title_in_lineage``."""
         return self._store.sessions.next_title_in_lineage(base_title)
 
     def delete_session(self, session_id: str, include_compression_chain: bool = False) -> bool:
@@ -400,33 +413,64 @@ class StoreSessionDB:
     def update_session_cwd(
         self, session_id: str, cwd: str, git_branch: str | None = None, git_repo_root: str | None = None
     ) -> int | None:
+        """``sessions.update_cwd``; the git metadata generation, or None."""
         return self._store.sessions.update_cwd(session_id, cwd, git_branch, git_repo_root)
 
     def list_sessions_rich(
         self,
+        source: str | None = None,
+        sources: list[str] | None = None,
+        exclude_sources: list[str] | None = None,
+        cwd_prefix: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        include_children: bool = False,
+        min_message_count: int = 0,
+        project_compression_tips: bool = True,
         order_by_last_active: bool = False,
         include_archived: bool = False,
+        archived_only: bool = False,
+        id_query: str | None = None,
         search_query: str | None = None,
-        min_message_count: int = 0,
+        compact_rows: bool = False,
+        include_pinned: bool = False,
+        session_key: str | None = None,
+        include_hidden: bool = False,
+        include_subagents: bool = False,
     ) -> list[dict]:
+        """``sessions.list_sessions`` with the old keywords, as the old list rows (the mapping of Hermes' own
+        ``SessionDB`` stand-in)."""
         from persistence.conversation.sessions import SessionOrder, SessionQuery, SessionWindow
 
+        requested = [source] if source else sources
         query = SessionQuery(
+            sources=tuple(requested) if requested else None,
+            exclude_sources=tuple(exclude_sources or ()),
+            cwd_prefix=cwd_prefix,
+            include_children=include_children,
             min_message_count=min_message_count,
+            project_compression_tips=project_compression_tips,
             order=SessionOrder.LAST_ACTIVE if order_by_last_active else SessionOrder.STARTED_AT,
             include_archived=include_archived,
+            archived_only=archived_only,
+            id_query=id_query,
             search_text=search_query,
+            include_pinned=include_pinned,
+            session_key=session_key,
+            include_hidden=include_hidden,
+            include_subagents=include_subagents,
         )
         # as the old class: a negative limit is every row, a negative offset none
         window = SessionWindow(limit=None if limit is not None and limit < 0 else limit, offset=max(offset, 0))
-        return [entry.as_list_row() for entry in self._store.sessions.list_sessions(query, window)]
+        entries = self._store.sessions.list_sessions(query, window, compact_rows=compact_rows)
+        return [entry.as_list_row() for entry in entries]
 
     def resolve_resume_session_id(self, session_id: str) -> str | None:
+        """``lineage.resolve_resume_target``: the session a resume of ``session_id`` continues."""
         return self._store.lineage.resolve_resume_target(session_id)
 
     def get_compression_lineage(self, session_id: str) -> list[str]:
+        """``lineage.lineage``: the compression chain root first, as a list."""
         return list(self._store.lineage.lineage(session_id))
 
     # -- messages ----------------------------------------------------------------------------------------------
@@ -439,14 +483,18 @@ class StoreSessionDB:
         offset: int = 0,
         latest: bool = False,
         after_id: int | None = None,
+        include_ancestors: bool = False,
     ) -> list[dict]:
+        """``messages.read_transcript`` with the old view and page keywords, as wire rows."""
         from persistence.conversation.messages import TranscriptRead, TranscriptView
 
         if include_inactive:
             view = TranscriptView.ALL
         else:
             view = TranscriptView.DISPLAY if include_compacted else TranscriptView.ACTIVE
-        request = TranscriptRead(view=view, limit=limit, offset=offset, latest=latest, after_id=after_id)
+        request = TranscriptRead(
+            view=view, limit=limit, offset=offset, latest=latest, after_id=after_id, include_lineage=include_ancestors
+        )
         return [row.as_wire_row() for row in self._store.messages.read_transcript(session_id, request)]
 
     def append_messages_batch(self, session_id: str, messages: list[dict], chunk_rows: int | None = None) -> int:
@@ -461,13 +509,16 @@ class StoreSessionDB:
         return int(self._store.messages.compact(session_id, _new_messages(messages)).active_count)
 
     def conversation_revision(self, session_id: str, include_ancestors: bool = False) -> tuple:
+        """``messages.conversation_revision`` as the old tuple (``[1]`` = active rows)."""
         return self._store.messages.conversation_revision(session_id, include_lineage=include_ancestors).as_tuple()
 
     def get_resume_conversations(self, session_id: str) -> tuple[list[dict], list[dict]]:
+        """``messages.read_resume_conversations``: ``(model, display)`` as message dicts."""
         both = self._store.messages.read_resume_conversations(session_id)
         return [m.as_openai_message() for m in both.model], [m.as_openai_message() for m in both.display]
 
     def assert_resume_safe(self, session_id: str) -> int:
+        """``messages.assert_resume_safe`` with the configured resume limit (``ResumeTooLarge`` above it)."""
         from storage_limits import resolved_max_resume_messages
 
         return self._store.messages.assert_resume_safe(session_id, max_messages=resolved_max_resume_messages())
@@ -519,6 +570,7 @@ class StoreSessionDB:
     def try_acquire_session_turn_lease(
         self, session_id: str, holder: str, ttl_seconds: float = 300.0, patience_s: float | None = None
     ) -> bool:
+        """``coordination.try_acquire_turn_lease``; a busy store raises ``sqlite3.OperationalError``."""
         import sqlite3
 
         from persistence import TransientStoreError
@@ -535,6 +587,7 @@ class StoreSessionDB:
     def refresh_session_turn_lease(
         self, session_id: str, holder: str, ttl_seconds: float = 300.0, patience_s: float | None = None
     ) -> bool:
+        """``coordination.refresh_turn_lease``; a busy store raises ``sqlite3.OperationalError``."""
         import sqlite3
 
         from persistence import TransientStoreError
@@ -549,9 +602,11 @@ class StoreSessionDB:
             raise sqlite3.OperationalError(str(exc)) from exc
 
     def release_session_turn_lease(self, session_id: str, holder: str) -> None:
+        """``coordination.release_turn_lease`` (this holder's row only)."""
         self._store.coordination.release_turn_lease(session_id=session_id, holder=holder)
 
     def try_acquire_compression_lock(self, session_id: str, holder: str, ttl_seconds: float = 300.0) -> bool:
+        """``coordination.try_acquire_compression_lock``; a busy store raises ``sqlite3.OperationalError``."""
         import sqlite3
 
         from persistence import TransientStoreError
@@ -566,6 +621,7 @@ class StoreSessionDB:
             raise sqlite3.OperationalError(str(exc)) from exc
 
     def refresh_compression_lock(self, session_id: str, holder: str, ttl_seconds: float = 300.0) -> bool:
+        """``coordination.refresh_compression_lock``; a busy store raises ``sqlite3.OperationalError``."""
         import sqlite3
 
         from persistence import TransientStoreError
@@ -580,9 +636,11 @@ class StoreSessionDB:
             raise sqlite3.OperationalError(str(exc)) from exc
 
     def release_compression_lock(self, session_id: str, holder: str) -> None:
+        """``coordination.release_compression_lock`` (this holder's row only)."""
         self._store.coordination.release_compression_lock(session_id=session_id, holder=holder)
 
     def get_compression_lock_holder(self, session_id: str) -> str | None:
+        """``coordination.get_compression_lock_holder``."""
         return self._store.coordination.get_compression_lock_holder(session_id=session_id)
 
     # -- busy signals (``lock.probe_busy``) ------------------------------------------------------------------
@@ -611,12 +669,15 @@ class StoreSessionDB:
 
     # -- state_meta --------------------------------------------------------------------------------------------
     def get_meta(self, key: str) -> str | None:
+        """``state_meta.get``."""
         return self._store.state_meta.get(key)
 
     def set_meta(self, key: str, value: str) -> None:
+        """``state_meta.set``."""
         self._store.state_meta.set(key, value)
 
     def list_meta_prefix(self, prefix: str) -> list[tuple[str, str]]:
+        """``state_meta.list_prefix`` as ``(key, value)`` pairs; an empty prefix lists nothing."""
         if not prefix:
             return []
         return [(entry.key, entry.value) for entry in self._store.state_meta.list_prefix(prefix)]

@@ -19,6 +19,7 @@ import pytest
 from ctx_handover.engine import lock
 from ctx_handover.engine.errors import AlreadyHandingOver, Cancelled, InvalidState, SessionBusy, WaitTimeout
 from ctx_handover.engine.model import MapRow, Options
+from ctx_handover.tests.fakes.hoststore import is_store_host
 from ctx_handover.tests.unit.B.support import LedgerStub
 from ctx_handover.tests.unit.B.test_lock_support import (  # noqa: F401 (fixtures)
     JOB,
@@ -232,15 +233,23 @@ def test_probe_busy_idle(session_db, make_session, hermes_home):
 
 
 def test_probe_busy_queued_admission(session_db, make_session, hermes_home):
-    """A queued prompt admitted through the unified runtime's own path (``admit_session_input``) makes the
+    """A queued prompt admitted through the unified runtime's own path (``admit_session_input``; on a host with the
+    storage interface ``runtime.begin_epoch`` + ``admissions.admit``, read back through the store) makes the
     session busy."""
-    from hermes_state_runtime import admit_session_input, begin_runtime_epoch
-
     tip = build(make_session, drivers=False)
-    epoch = begin_runtime_epoch(session_db, instance_id="test")
-    admit_session_input(
-        session_db, epoch=epoch, principal_id="local", session_id=tip, request_id="r1", payload={"text": "next"}
-    )
+    if is_store_host():
+        store = session_db.store
+        epoch = store.runtime.begin_epoch(instance_id="test")
+        store.admissions.admit(
+            epoch=epoch, principal_id="local", session_id=tip, request_id="r1", payload={"text": "next"}
+        )
+    else:
+        from hermes_state_runtime import admit_session_input, begin_runtime_epoch
+
+        epoch = begin_runtime_epoch(session_db, instance_id="test")
+        admit_session_input(
+            session_db, epoch=epoch, principal_id="local", session_id=tip, request_id="r1", payload={"text": "next"}
+        )
     report = lock.probe_busy(session_db, hermes_home / "state.db", describe(session_db, tip), hermes_home, None)
     assert report.busy is True
     assert any("queued prompt" in r for r in report.reasons)
@@ -303,6 +312,26 @@ def test_probe_busy_processes_and_cron(session_db, make_session, hermes_home):
     assert "hermes cron pause j1" in report.cron[0]["disable"]
 
 
+def test_probe_busy_store_failure_is_a_warning(session_db, make_session, hermes_home, monkeypatch):
+    """On a host with the storage interface the queued prompts and delegations come from the store
+    (``StoreSessionDB.busy_signals``), never from the database file: a store that cannot answer is a warning, not
+    an abort and not "busy" (the SQL path's rule, O8); on a ``SessionDB`` host the file is read (below)."""
+    tip = build(make_session, drivers=False)
+    if not is_store_host():
+        assert not hasattr(session_db, "busy_signals")
+        return
+
+    def broken(lineage):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(session_db.engine_db, "busy_signals", broken)
+    report = lock.probe_busy(
+        session_db, hermes_home / "nope" / "state.db", describe(session_db, tip), hermes_home, None
+    )
+    assert report.busy is False
+    assert any("queued prompts and delegated tasks are not readable" in w for w in report.warnings)
+
+
 def test_probe_busy_schema_drift_is_a_warning(session_db, make_session, hermes_home, tmp_path):
     import sqlite3
 
@@ -310,12 +339,14 @@ def test_probe_busy_schema_drift_is_a_warning(session_db, make_session, hermes_h
     bare = tmp_path / "bare.db"
     sqlite3.connect(bare).close()
     (hermes_home / "processes.json").write_text("{not json")
-    report = lock.probe_busy(session_db, bare, describe(session_db, tip), hermes_home, None)
+    # the SQL path: a SessionDB host's store, or no store at all (the storage interface host never takes it)
+    sql_db = None if is_store_host() else session_db
+    report = lock.probe_busy(sql_db, bare, describe(session_db, tip), hermes_home, None)
     assert report.busy is False
     assert any("session_admissions" in w for w in report.warnings)
     assert any("async_delegations" in w for w in report.warnings)
     assert any("processes.json" in w for w in report.warnings)
-    missing = lock.probe_busy(session_db, tmp_path / "nope" / "state.db", describe(session_db, tip), hermes_home, None)
+    missing = lock.probe_busy(sql_db, tmp_path / "nope" / "state.db", describe(session_db, tip), hermes_home, None)
     assert missing.busy is False and missing.warnings
 
 
@@ -591,6 +622,41 @@ def test_reclaim_rewinds_placeholder_rows(session_db, make_session, ledger, prov
     assert driver(session_db, "goal", tip)["status"] == "active"
     index.refresh_now()
     assert index.lookup(tip) is None
+
+
+def test_reclaim_after_an_unanswered_message(session_db, make_session, ledger, provider_url, tmp_path):
+    """A vetoed attempt right after a user message that never got an answer (issue GottZ/ctx#570). The old class
+    rewinds by row id: the attempt goes, the unanswered message stays live. The storage interface rewinds by turn,
+    and its replay counts the unanswered message and the attempt as one turn: the plugin then removes nothing (the
+    rewind would take the user's message too), says why, keeps the typed text as withheld, and blames no compaction.
+
+    Mutant: ``StoreSessionDB.rewind_to_message`` takes the first planned turn without checking that it starts at
+    the placeholder → the unanswered message is rewound too.
+    """
+    tip = build(make_session)
+    info, holder = prepared(session_db, ledger, tip)
+    lock.retire(session_db, ledger, info, holder, JOB, ack(), [])
+    index = index_for(tmp_path, ledger.path)
+    unanswered = make_session.user(tip, "a question nobody answered")
+    before_active = len(session_db.get_messages(tip))
+    vetoed_turn(session_db, tip, provider_url, index, "typed 0")
+    assert chat_requests() == []
+    assert len(session_db.get_messages(tip)) == before_active + 2
+    out = lock.reclaim(session_db, ledger, tip, force=False)
+    assert out["state"] == "reclaimed" and out["withheld"] == ["typed 0"]
+    live_ids = {int(m["id"]) for m in session_db.get_messages(tip)}
+    assert unanswered in live_ids
+    if is_store_host():
+        assert out["rewound"] == 0
+        assert len(live_ids) == before_active + 2
+        assert any("the unanswered message before it" in w for w in out["warnings"])
+        assert any("1 blocked message(s) stay in this session's history;" in w for w in out["warnings"])
+        assert not any("Hermes compacted the session" in w for w in out["warnings"])
+    else:
+        assert out["rewound"] == 2
+        assert len(live_ids) == before_active
+    index.refresh_now()
+    index.stop()
 
 
 def test_reclaim_table(session_db, make_session, ledger):
