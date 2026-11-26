@@ -803,7 +803,10 @@ class CtxMemoryProvider(MemoryProvider):
         try:
             data = client.query_types(text, [SESSION_DIGEST_TYPE], limit=want + overlap, timeout=timeout)
         except Exception as exc:
-            if holds and getattr(exc, "code", "") == "timeout":
+            # Read the way again: Hermes can refuse the grant during the call, and the client then sends
+            # it again through the dispatch, where the call given up on holds the entry as well.
+            mcp = getattr(client, "transport", "") == "mcp"
+            if getattr(exc, "code", "") == "timeout" and (holds or (mcp and not _bounded_through_host(client))):
                 entry.pause_recall_extra(SESSION_DIGEST_RECALL_PAUSE_S)
                 entry.warn_once(
                     SESSION_DIGEST_TYPE,

@@ -136,6 +136,7 @@ def test_a_failed_second_query_keeps_the_recalled_blocks(make_provider, typed_se
     assert _titles(context) == [s["title"] for s in MAIN]
     assert entry.errors_in_row == 0  # the recall's reads count toward nothing of the entry's own state
     assert entry.type_known(SESSION_DIGEST_TYPE)  # and take no verdict
+    assert not entry.recall_extra_paused()  # a REST call given up on holds nothing
     p.shutdown()
 
 
@@ -378,4 +379,35 @@ def test_a_second_query_that_holds_nothing_does_not_pause_it(
     assert len(client.typed_calls) == 2
     assert not entry.recall_extra_paused()
     TypedQueryServer.typed_raises = None
+    p.shutdown()
+
+
+def test_a_grant_refused_during_the_second_query_and_a_given_up_dispatch_pause_it(make_provider, caplog):
+    """The second query starts through Hermes' call_mcp (the grant), Hermes refuses the grant during the
+    call (PermissionError), the client sends it again through the dispatch, and that call is given up:
+    it now holds the entry, so the second query pauses for the entry as on the dispatch path."""
+    release = threading.Event()
+
+    def dispatch(name, args):
+        if name == "mcp__ctx__query" and args.get("types"):
+            release.wait(30)  # never answers within the bound
+        return {"result": json.dumps({"confidence": "", "sources": [dict(s) for s in MAIN]})}
+
+    def call_mcp(server, tool, arguments=None, timeout=30):
+        raise PermissionError("grant revoked")
+
+    p, _client = make_provider()
+    entry = _known(p)
+    client = McpClient(dispatch, "ctx", host_call=lambda tool: call_mcp)
+    assert client.bounded_through_host("query")
+    p._client = client
+    try:
+        with caplog.at_level("WARNING"):
+            context = p.prefetch("when does the queue drain?")
+    finally:
+        release.set()
+    assert _titles(context) == [s["title"] for s in MAIN]
+    assert not client.bounded_through_host("query")  # the client now goes through the dispatch
+    assert entry.recall_extra_paused()
+    assert [r for r in caplog.records if r.levelname == "WARNING" and "second query" in r.getMessage()]
     p.shutdown()
