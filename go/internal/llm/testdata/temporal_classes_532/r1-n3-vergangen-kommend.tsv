@@ -1,0 +1,63 @@
+# Holdout of the review round of issue #532, r1-n3-vergangen-kommend: a past and a coming clause, the past first (V) or the coming first (K), the coming one with an English present (-s, -ing, is due) or a German present; written with its expectations and hashed before the round's first edit (2026-11-25T20:48:22Z, sha256 of the source list 90899a8734bb20e4).
+# Asked at noon UTC of the day. Expected: the dates by ";" as D:day, NONE for no rule; hours are not judged.
+# id, day, kind, question, expected, the answer of the rules at 5a28c475.
+n3-001	2026-11-25	V	The cache crashed on Monday; the vendor arrives on Friday.	D:2026-11-23;D:2026-11-27	D:2026-11-23;D:2026-11-20
+n3-002	2026-11-25	V	Our build failed on Tuesday and the hotfix ships on Thursday.	D:2026-11-24;D:2026-11-26	D:2026-11-24;D:2026-11-19
+n3-003	2026-11-25	V	The disk died on Saturday, the replacement lands on Monday?	D:2026-11-21;D:2026-11-30	D:2026-11-28;D:2026-11-30
+n3-004	2026-11-25	V	Latency spiked on Sunday; the capacity review kicks off on Friday.	D:2026-11-22;D:2026-11-27	D:2026-11-29;D:2026-11-27
+n3-005	2026-11-25	V	We migrated the cluster on Monday, and the cleanup is due on Friday.	D:2026-11-23;D:2026-11-27	D:2026-11-23;D:2026-11-27
+n3-006	2026-11-25	V	The audit started on Tuesday, the report is scheduled for Thursday.	D:2026-11-24;D:2026-11-26	D:2026-11-24;D:2026-11-26
+n3-007	2026-11-25	V	Anna fixed the parser on Saturday, Bob is reviewing it on Monday.	D:2026-11-21;D:2026-11-30	D:2026-11-21;D:2026-11-30
+n3-008	2026-11-25	V	The vendor shipped the firmware on Sunday; our rollout begins on Thursday.	D:2026-11-22;D:2026-11-26	D:2026-11-22;D:2026-11-19
+n3-009	2026-11-25	V	Who broke staging on Friday, and who handles the cleanup on Monday?	D:2026-11-20;D:2026-11-30	D:2026-11-20;D:2026-11-30
+n3-010	2026-11-25	V	The intern deleted the bucket on Thursday; the restore runs on Saturday.	D:2026-11-19;D:2026-11-28	D:2026-11-19;D:2026-11-21
+n3-011	2026-11-25	V	Payments went down on Monday, the postmortem takes place on Friday.	D:2026-11-23;D:2026-11-27	D:2026-11-23;D:2026-11-20
+n3-012	2026-11-25	V	The certificate expired on Sunday and the renewal goes live on Thursday.	D:2026-11-22;D:2026-11-26	D:2026-11-29;D:2026-11-26
+n3-013	2026-11-25	V	Traffic doubled on Saturday; marketing launches the campaign on Monday.	D:2026-11-21;D:2026-11-30	D:2026-11-28;D:2026-11-30
+n3-014	2026-11-25	V	Support escalated the ticket on Tuesday, engineering responds on Friday?	D:2026-11-24;D:2026-11-27	D:2026-12-01;D:2026-11-27
+n3-015	2026-11-25	V	The pipeline stalled on Monday, the new runner comes online on Saturday.	D:2026-11-23;D:2026-11-28	D:2026-11-30;D:2026-11-28
+n3-016	2026-11-30	K	The vendor arrives on Friday to fix what crashed on Tuesday.	D:2026-12-04;D:2026-11-24	D:2026-11-27;D:2026-11-24
+n3-017	2026-11-30	K	The hotfix ships on Thursday for the bug we found on Saturday.	D:2026-12-03;D:2026-11-28	D:2026-11-26;D:2026-11-28
+n3-018	2026-11-30	K	Our rollout begins on Tuesday, after the canary failed on Friday.	D:2026-12-01;D:2026-11-27	D:2026-11-24;D:2026-11-27
+n3-019	2026-11-30	K	The review is due on Friday for the changes that landed on Wednesday.	D:2026-12-04;D:2026-11-25	D:2026-11-27;D:2026-11-25
+n3-020	2026-11-30	K	The team presents on Thursday what they built on Tuesday.	D:2026-12-03;D:2026-11-24	D:2026-12-03;D:2026-12-01
+n3-021	2026-11-30	K	Bob is on call on Saturday because Anna covered on Sunday.	D:2026-12-05;D:2026-11-29	D:2026-12-05;D:2026-12-06
+n3-022	2026-11-30	K	The audit kicks off on Wednesday, after the breach happened on Thursday.	D:2026-12-02;D:2026-11-26	D:2026-11-25;D:2026-11-26
+n3-023	2026-11-30	K	Billing goes live on Friday; the old system died on Tuesday.	D:2026-12-04;D:2026-11-24	D:2026-12-04;D:2026-12-01
+n3-024	2026-11-30	K	On Thursday we demo the feature we finished on Wednesday.	D:2026-12-03;D:2026-11-25	D:2026-11-26;D:2026-11-25
+n3-025	2026-11-30	K	The cleanup runs on Saturday, the outage hit us on Friday.	D:2026-12-05;D:2026-11-27	D:2026-12-05;D:2026-12-04
+n3-026	2026-11-30	K	Who is presenting on Tuesday what went wrong on Sunday?	D:2026-12-01;D:2026-11-29	D:2026-12-01;D:2026-11-29
+n3-027	2026-11-30	K	The migration lands on Wednesday, the dry run broke on Thursday.	D:2026-12-02;D:2026-11-26	D:2026-11-25;D:2026-11-26
+n3-028	2026-11-30	K	Anna starts on Friday; her predecessor left on Wednesday.	D:2026-12-04;D:2026-11-25	D:2026-12-04;D:2026-12-02
+n3-029	2026-11-30	K	The board meets on Thursday to discuss what leaked on Saturday.	D:2026-12-03;D:2026-11-28	D:2026-11-26;D:2026-11-28
+n3-030	2026-11-30	K	Our new SLA takes effect on Tuesday, the old one ended on Friday.	D:2026-12-01;D:2026-11-27	D:2026-12-01;D:2026-12-04
+n3-031	2026-11-25	V	Am Montag ist der Cache abgestürzt, am Freitag kommt der Dienstleister.	D:2026-11-23;D:2026-11-27	D:2026-11-23;D:2026-11-27
+n3-032	2026-11-25	V	Der Build brach am Dienstag, der Hotfix geht am Donnerstag raus.	D:2026-11-24;D:2026-11-26	D:2026-11-24;D:2026-11-26
+n3-033	2026-11-25	V	Die Platte starb am Samstag, die neue kommt am Montag?	D:2026-11-21;D:2026-11-30	D:2026-11-28;D:2026-11-30
+n3-034	2026-11-25	V	Am Sonntag stieg die Latenz, am Freitag beginnt die Kapazitätsplanung.	D:2026-11-22;D:2026-11-27	D:2026-11-22;D:2026-11-20
+n3-035	2026-11-25	V	Wir haben am Montag migriert, und am Freitag steht das Aufräumen an.	D:2026-11-23;D:2026-11-27	D:2026-11-23;D:2026-11-27
+n3-036	2026-11-25	V	Das Audit startete am Dienstag, der Bericht ist für Donnerstag geplant.	D:2026-11-24;D:2026-11-26	D:2026-11-24;D:2026-11-26
+n3-037	2026-11-25	V	Anna hat am Samstag den Parser repariert, Bob prüft ihn am Montag.	D:2026-11-21;D:2026-11-30	D:2026-11-21;D:2026-11-23
+n3-038	2026-11-25	V	Der Lieferant schickte die Firmware am Sonntag, unser Rollout läuft am Donnerstag.	D:2026-11-22;D:2026-11-26	D:2026-11-22;D:2026-11-26
+n3-039	2026-11-25	V	Wer hat am Freitag Staging kaputt gemacht und wer räumt am Montag auf?	D:2026-11-20;D:2026-11-30	D:2026-11-20;D:2026-11-30
+n3-040	2026-11-25	V	Der Praktikant löschte am Donnerstag den Bucket, die Wiederherstellung läuft am Samstag.	D:2026-11-19;D:2026-11-28	D:2026-11-19;D:2026-11-28
+n3-041	2026-11-25	V	Am Montag fiel das Bezahlsystem aus, am Freitag findet die Nachbesprechung statt.	D:2026-11-23;D:2026-11-27	D:2026-11-23;D:2026-11-20
+n3-042	2026-11-25	V	Das Zertifikat lief am Sonntag ab und die Verlängerung geht am Donnerstag live.	D:2026-11-22;D:2026-11-26	D:2026-11-22;D:2026-11-26
+n3-043	2026-11-25	V	Am Samstag verdoppelte sich der Traffic, am Montag startet das Marketing die Kampagne.	D:2026-11-21;D:2026-11-30	D:2026-11-21;D:2026-11-23
+n3-044	2026-11-25	V	Der Support eskalierte am Dienstag, die Entwicklung antwortet am Freitag?	D:2026-11-24;D:2026-11-27	D:2026-11-24;D:2026-11-20
+n3-045	2026-11-25	V	Die Pipeline hing am Montag, der neue Runner kommt am Samstag.	D:2026-11-23;D:2026-11-28	D:2026-11-30;D:2026-11-28
+n3-046	2026-11-30	K	Der Dienstleister kommt am Freitag, um zu reparieren, was am Dienstag abstürzte.	D:2026-12-04;D:2026-11-24	D:2026-12-04;D:2026-11-24
+n3-047	2026-11-30	K	Der Hotfix geht am Donnerstag raus, für den Bug, den wir am Samstag fanden.	D:2026-12-03;D:2026-11-28	D:2026-12-03;D:2026-11-28
+n3-048	2026-11-30	K	Unser Rollout beginnt am Dienstag, nachdem der Canary am Freitag scheiterte.	D:2026-12-01;D:2026-11-27	D:2026-11-24;D:2026-11-27
+n3-049	2026-11-30	K	Das Review ist am Freitag fällig, für die Änderungen vom Mittwoch.	D:2026-12-04;D:2026-11-25	D:2026-12-04;D:2026-12-02
+n3-050	2026-11-30	K	Das Team zeigt am Donnerstag, was es am Dienstag gebaut hat.	D:2026-12-03;D:2026-11-24	D:2026-11-26;D:2026-11-24
+n3-051	2026-11-30	K	Bob hat am Samstag Bereitschaft, weil Anna am Sonntag eingesprungen ist.	D:2026-12-05;D:2026-11-29	D:2026-12-05;D:2026-11-29
+n3-052	2026-11-30	K	Das Audit startet am Mittwoch, nachdem am Donnerstag der Einbruch passierte.	D:2026-12-02;D:2026-11-26	D:2026-11-25;D:2026-11-26
+n3-053	2026-11-30	K	Die Abrechnung geht am Freitag live; das alte System starb am Dienstag.	D:2026-12-04;D:2026-11-24	D:2026-12-04;D:2026-12-01
+n3-054	2026-11-30	K	Am Donnerstag zeigen wir das Feature, das wir am Mittwoch fertig gemacht haben.	D:2026-12-03;D:2026-11-25	D:2026-12-03;D:2026-11-25
+n3-055	2026-11-30	K	Am Samstag läuft das Aufräumen, der Ausfall traf uns am Freitag.	D:2026-12-05;D:2026-11-27	D:2026-12-05;D:2026-11-27
+n3-056	2026-11-30	K	Wer präsentiert am Dienstag, was am Sonntag schiefging?	D:2026-12-01;D:2026-11-29	D:2026-12-01;D:2026-11-29
+n3-057	2026-11-30	K	Die Migration kommt am Mittwoch, der Probelauf brach am Donnerstag.	D:2026-12-02;D:2026-11-26	D:2026-12-02;D:2026-11-26
+n3-058	2026-11-30	K	Anna fängt am Freitag an; ihr Vorgänger ging am Mittwoch.	D:2026-12-04;D:2026-11-25	D:2026-11-27;D:2026-11-25
+n3-059	2026-11-30	K	Der Vorstand tagt am Donnerstag zu dem, was am Samstag durchsickerte.	D:2026-12-03;D:2026-11-28	D:2026-12-03;D:2026-11-28
+n3-060	2026-11-30	K	Die neue SLA greift am Dienstag, die alte endete am Freitag.	D:2026-12-01;D:2026-11-27	D:2026-11-24;D:2026-11-27

@@ -1,0 +1,103 @@
+# Holdout of issue #532, class e-restformen: written with its expectations and hashed before any rule changed (2026-11-25T17:37:24Z, sha256 of the source list dfe1dc7e8f97e8ee).
+# Asked at noon UTC of the day. Expected: alternatives split by " | ", the dates of one by ";": D:day, W:start..end, F:from, U:until, NONE for no rule; @H the hour of that date, @- no hour, no mark not judged.
+# id, day, kind (F: the reading of the class is right, G: a counter-case, K: a control), question, expected, the answer of the rules at 5a28c475.
+e-001	2026-11-25	F	Was macht Projekt Freitag gerade?	NONE	D:2026-11-27
+e-002	2026-11-25	F	Hat Team Montag schon geliefert?	NONE	D:2026-11-23
+e-003	2026-11-25	F	Was hat die Friday Group präsentiert?	NONE	D:2026-11-20
+e-004	2026-11-25	F	Who runs Monday Systems now?	NONE	D:2026-11-30
+e-005	2026-11-25	F	Ist Ruby Tuesday noch geöffnet?	NONE	D:2026-12-01
+e-006	2026-11-25	F	Wie heißt noch mal der Song Manic Monday?	NONE	D:2026-11-30
+e-007	2026-11-25	F	Liest du die Sunday Times?	NONE	D:2026-11-29
+e-008	2026-11-25	F	Hat Thursday Labs eine API?	NONE	D:2026-11-26
+e-009	2026-11-25	F	Was hat Team Montag am Dienstag deployed?	D:2026-11-24	D:2026-11-23;D:2026-11-24
+e-010	2026-11-25	F	Projekt Freitag ist am Montag gestartet	D:2026-11-23	D:2026-11-20;D:2026-11-23
+e-011	2026-11-25	F	Wann trifft sich die Friday Group am Donnerstag?	D:2026-11-26	D:2026-11-27;D:2026-11-26
+e-012	2026-11-25	G	Ist das Büro Freitag geöffnet?	D:2026-11-27	D:2026-11-27
+e-013	2026-11-25	G	Ist der Server Montag erreichbar?	D:2026-11-30	D:2026-11-30
+e-014	2026-11-25	G	Hat die Kantine Sonntag offen?	D:2026-11-29	D:2026-11-29
+e-015	2026-11-25	G	Kommt das Paket Freitag an?	D:2026-11-27	D:2026-11-27
+e-016	2026-11-25	G	Wer hat Bereitschaft, Team Alpha am Freitag?	D:2026-11-27	D:2026-11-27
+e-017	2026-11-25	F	Was ist gestern und am Montag passiert?	D:2026-11-24;D:2026-11-23	D:2026-11-23
+e-018	2026-11-25	F	Gestern und am Freitag gab es Ausfälle, warum?	D:2026-11-24;D:2026-11-20	D:2026-11-20
+e-019	2026-11-25	F	What broke yesterday and on Friday?	D:2026-11-24;D:2026-11-20	D:2026-11-20
+e-020	2026-11-25	F	Was war gestern, was ist am Freitag?	D:2026-11-24;D:2026-11-27	D:2026-11-27
+e-021	2026-11-25	F	Gestern Meeting, am Freitag Release?	D:2026-11-24;D:2026-11-27	D:2026-11-27
+e-022	2026-11-25	F	Wer war gestern da, und wer kommt am Montag?	D:2026-11-24;D:2026-11-30	D:2026-11-30
+e-023	2026-11-25	F	Gestern lief der Job, am Montag nicht – warum?	D:2026-11-24;D:2026-11-23	D:2026-11-23
+e-024	2026-11-25	F	What happened yesterday and what is planned for Friday?	D:2026-11-24;D:2026-11-27	D:2026-11-27
+e-025	2026-11-25	G	Gestern war Dienstag, oder?	D:2026-11-24 | D:2026-11-24;D:2026-11-24	D:2026-11-24
+e-026	2026-11-25	G	Ist gestern das Ticket vom Montag geschlossen worden?	D:2026-11-24 | D:2026-11-24;D:2026-11-23	D:2026-11-23
+e-027	2026-11-25	F	Wir haben am Montag deployt und wir deployen am Montag wieder	D:2026-11-23;D:2026-11-30	D:2026-11-30
+e-028	2026-11-25	F	We deployed on Friday and we deploy on Friday again	D:2026-11-20;D:2026-11-27	D:2026-11-20;D:2026-11-27
+e-029	2026-11-25	F	Am Dienstag war Release, am Dienstag ist wieder Release	D:2026-11-24;D:2026-12-01	D:2026-11-24;D:2026-12-01
+e-030	2026-11-25	G	Letzten Montag lief alles, nächsten Montag auch?	D:2026-11-23;D:2026-11-30	D:2026-11-23
+e-031	2026-11-25	F	Ist der Build am Montag gebrochen?	D:2026-11-23	D:2026-11-30
+e-032	2026-11-25	F	Der Build ist am Dienstag gebrochen, wer war's?	D:2026-11-24	D:2026-12-01
+e-033	2026-11-25	F	Ist das Deployment am Freitag gebrochen?	D:2026-11-20	D:2026-11-27
+e-034	2026-11-25	F	Warum ist die Pipeline am Montag gebrochen?	D:2026-11-23	D:2026-11-30
+e-035	2026-11-25	G	Ist der Vertrag am Freitag gebrochen worden?	D:2026-11-20	D:2026-11-20
+e-036	2026-11-25	F	After 2022 failed health checks the pod restarts	NONE	F:2023-01-01
+e-037	2026-11-25	F	After 2021 failed logins the account locks	NONE	NIL
+e-038	2026-11-25	F	After 2023 failed attempts the job aborts?	NONE	NIL
+e-039	2026-11-25	G	After 2022 the service failed health checks twice	F:2023-01-01	F:2023-01-01
+e-040	2026-11-25	G	After 2024 the team grew a lot	F:2025-01-01	F:2025-01-01
+e-041	2026-11-25	F	What happened between March 2026 and 2026-05-15?	W:2026-03-01..2026-05-15	D:2026-05-15
+e-042	2026-11-25	F	Was lief zwischen März 2026 und 2026-05-15?	W:2026-03-01..2026-05-15	D:2026-05-15
+e-043	2026-11-25	F	between 2026-03-01 and May 2026, what shipped?	W:2026-03-01..2026-05-31	D:2026-03-01
+e-044	2026-11-25	F	Zwischen Januar 2026 und dem 15.02.2026, was ist passiert?	W:2026-01-01..2026-02-15	D:2026-02-15
+e-045	2026-11-25	F	What changed between April 2026 and 2026-06-30?	W:2026-04-01..2026-06-30	D:2026-06-30
+e-046	2026-11-25	F	What happened the day before yesterday?	D:2026-11-23	D:2026-11-24
+e-047	2026-11-25	F	Who deployed the day before yesterday?	D:2026-11-23	D:2026-11-24
+e-048	2026-11-25	F	What is planned for the day after tomorrow?	D:2026-11-27	D:2026-11-26
+e-049	2026-11-25	F	The day before yesterday the disk filled up	D:2026-11-23	D:2026-11-24
+e-050	2026-11-25	F	Who is on call the day after tomorrow?	D:2026-11-27	D:2026-11-26
+e-051	2026-11-25	G	What happened the day before the release?	NONE	NIL
+e-052	2026-11-25	G	What happened yesterday?	D:2026-11-24	D:2026-11-24
+e-053	2026-11-25	F	Was ist an Neujahr geplant?	D:2027-01-01	D:2026-01-01
+e-054	2026-11-25	F	Wer hat an Neujahr Bereitschaft?	D:2027-01-01	D:2026-01-01
+e-055	2026-11-25	F	Was war an Neujahr los?	D:2026-01-01	D:2026-01-01
+e-056	2026-11-25	F	Was ist an Neujahr passiert?	D:2026-01-01	D:2026-01-01
+e-057	2026-11-25	F	What are we doing on New Year's Day?	D:2027-01-01	D:2026-01-01
+e-058	2026-11-25	F	What broke on New Year's Day?	D:2026-01-01	D:2026-01-01
+e-059	2026-01-05	G	Was war an Neujahr los?	D:2026-01-01	D:2026-01-01
+e-060	2026-01-05	G	Was ist an Neujahr passiert?	D:2026-01-01	D:2026-01-01
+e-061	2026-11-25	G	Wer arbeitet an Weihnachten?	D:2026-12-25	D:2026-12-25
+e-062	2026-11-25	G	Was ist an Silvester geplant?	D:2026-12-31	D:2026-12-31
+e-063	2026-01-05	F	Was war an Silvester?	D:2025-12-31	D:2026-12-31
+e-064	2026-02-10	F	Was ist an Weihnachten schiefgegangen?	D:2025-12-25	D:2026-12-25
+e-065	2026-11-25	F	Was ist heute um 14 Uhr?	D:2026-11-25@14	D:2026-11-25
+e-066	2026-11-25	F	Was lief gestern um 9 Uhr schief?	D:2026-11-24@9	D:2026-11-24
+e-067	2026-11-25	F	Was steht morgen um 10 Uhr an?	D:2026-11-26@10	D:2026-11-26
+e-068	2026-11-25	F	What happened yesterday at 9am?	D:2026-11-24@9	D:2026-11-24
+e-069	2026-11-25	F	What is on tomorrow at 3pm?	D:2026-11-26@15	D:2026-11-26
+e-070	2026-11-25	F	Was ist heute um 7 passiert?	D:2026-11-25@7	D:2026-11-25
+e-071	2026-11-25	F	Wer hat heute um 14 Uhr deployed?	D:2026-11-25@14	D:2026-11-25
+e-072	2026-11-25	F	What failed today at 9am?	D:2026-11-25@9	D:2026-11-25
+e-073	2026-11-25	F	Was steht am Montag um 10 Uhr an?	D:2026-11-30@10	D:2026-11-30
+e-074	2026-11-25	F	What happened on Friday at 5pm?	D:2026-11-20@17	D:2026-11-20
+e-075	2026-11-25	F	Was ist am Dienstag um 23 Uhr passiert?	D:2026-11-24@23	D:2026-11-24
+e-076	2026-11-25	F	Meeting tomorrow at 14:00?	D:2026-11-26@14	D:2026-11-26
+e-077	2026-11-25	F	Was war gestern um 18:30?	D:2026-11-24@18	D:2026-11-24
+e-078	2026-11-25	F	Was lief heute um 3 Uhr nachts?	D:2026-11-25@3	D:2026-11-25@23
+e-079	2026-11-25	F	Who was paged at 4am yesterday?	D:2026-11-24@4	D:2026-11-24
+e-080	2026-11-25	F	Release ist morgen um 9	D:2026-11-26@9	D:2026-11-26
+e-081	2026-11-25	F	Was ist am Freitag um 16 Uhr passiert?	D:2026-11-20@16	D:2026-11-20
+e-082	2026-11-25	F	What is planned for Monday at 11am?	D:2026-11-30@11	D:2026-11-30
+e-083	2026-11-25	F	Um 10 Uhr ist heute der Standup?	D:2026-11-25@10	D:2026-11-25
+e-084	2026-11-25	F	Gestern um 22 Uhr ist der Job abgestürzt	D:2026-11-24@22	D:2026-11-24
+e-085	2026-11-25	G	Wir haben heute um 7 Prozent zugelegt	D:2026-11-25@-	D:2026-11-25
+e-086	2026-11-25	G	Läuft der Job gestern um 7 Minuten länger?	D:2026-11-24@-	D:2026-11-24
+e-087	2026-11-25	G	Die Latenz stieg gestern um 14 ms	D:2026-11-24@-	D:2026-11-24
+e-088	2026-11-25	G	Ist der Server heute um 50 % langsamer?	D:2026-11-25@-	D:2026-11-25
+e-089	2026-11-25	G	Shift the window by 2 hours tomorrow	D:2026-11-26@-	D:2026-11-26
+e-090	2026-11-25	G	Hat die Version 14 Uhrzeit-Bugs, die gestern auftraten?	D:2026-11-24@-	D:2026-11-24
+e-091	2026-11-25	G	Raise the limit by 9 percent tomorrow	D:2026-11-26@-	D:2026-11-26
+e-092	2026-11-25	G	Haben wir gestern um 2 Ecken gedacht?	D:2026-11-24@-	D:2026-11-24
+e-093	2026-11-25	G	Ist der Preis heute um 3 Euro gestiegen?	D:2026-11-25@-	D:2026-11-25
+e-094	2026-11-25	G	Did the latency drop by 9 ms yesterday?	D:2026-11-24@-	D:2026-11-24
+e-095	2026-11-25	G	Was ist um 7 Prozent gestiegen?	NONE	NIL
+e-096	2026-11-25	G	Wie viele Tickets sind um 14 gestiegen?	NONE	NIL
+e-097	2026-11-25	G	Was kostet der Upgrade um 9 Euro mehr?	NONE	NIL
+e-098	2026-11-25	G	Läuft der Build um 10 Minuten zu lange?	NONE	NIL
+e-099	2026-11-25	G	Why did usage grow by 7 percent?	NONE	NIL
+e-100	2026-11-25	G	Hat sich die Zahl um 3 erhöht?	NONE	NIL

@@ -1,0 +1,131 @@
+# Holdout of issue #532, class a-tageszeit: written with its expectations and hashed before any rule changed (2026-11-25T17:37:24Z, sha256 of the source list 133195399e3a3139).
+# Asked at noon UTC of the day. Expected: alternatives split by " | ", the dates of one by ";": D:day, W:start..end, F:from, U:until, NONE for no rule; @H the hour of that date, @- no hour, no mark not judged.
+# id, day, kind (F: the reading of the class is right, G: a counter-case, K: a control), question, expected, the answer of the rules at 5a28c475.
+a-001	2026-11-25	F	Was steht heute Abend an?	D:2026-11-25@19	D:2026-11-25
+a-002	2026-11-25	F	Was lief gestern Abend schief?	D:2026-11-24@19	D:2026-11-24
+a-003	2026-11-25	F	Was war gestern Nacht mit dem Backup los?	D:2026-11-24@23	D:2026-11-24
+a-004	2026-11-25	F	Wer hat gestern früh den Cluster neu gestartet?	D:2026-11-24@8	D:2026-11-25@8
+a-005	2026-11-25	F	Was ist gestern Morgen im Monitoring aufgefallen?	D:2026-11-24@8	D:2026-11-24;D:2026-11-26
+a-006	2026-11-25	F	Was steht morgen früh als Erstes an?	D:2026-11-26@8	D:2026-11-25@8
+a-007	2026-11-25	F	Haben wir morgen Abend noch ein Deployment?	D:2026-11-26@19	D:2026-11-26
+a-008	2026-11-25	F	Was ist heute Morgen kaputtgegangen?	D:2026-11-25@8	D:2026-11-25;D:2026-11-26
+a-009	2026-11-25	F	was ist heute morgen kaputtgegangen?	D:2026-11-25@8	D:2026-11-25;D:2026-11-26
+a-010	2026-11-25	F	Was haben wir heute morgen besprochen?	D:2026-11-25@8	D:2026-11-25;D:2026-11-26
+a-011	2026-11-25	F	Was lief gestern abend im Batch?	D:2026-11-24@19	D:2026-11-24
+a-012	2026-11-25	F	Wer hatte gestern nacht Bereitschaft?	D:2026-11-24@23	D:2026-11-24
+a-013	2026-11-25	F	What broke last night?	D:2026-11-24@23	D:2026-11-25@23
+a-014	2026-11-25	F	What happened yesterday evening?	D:2026-11-24@19	D:2026-11-25@19
+a-015	2026-11-25	F	What is on the agenda tomorrow morning?	D:2026-11-26@8	D:2026-11-25@8
+a-016	2026-11-25	F	Is anything scheduled for tonight?	D:2026-11-25@19 | D:2026-11-25@23	NIL
+a-017	2026-11-25	F	What do we have planned this evening?	D:2026-11-25@19	D:2026-11-25@19
+a-018	2026-11-25	F	Did the nightly backup run last night?	D:2026-11-24@23	D:2026-11-25@23
+a-019	2026-11-25	F	Who was paged yesterday morning?	D:2026-11-24@8	D:2026-11-25@8
+a-020	2026-11-25	F	What did we ship yesterday afternoon?	D:2026-11-24@15	D:2026-11-25@15
+a-021	2026-11-25	F	What is due tomorrow afternoon?	D:2026-11-26@15	D:2026-11-25@15
+a-022	2026-11-25	F	Who is on call tomorrow night?	D:2026-11-26@23	D:2026-11-25@23
+a-023	2026-11-25	F	Was war gestern Nachmittag mit der API?	D:2026-11-24@15	D:2026-11-24
+a-024	2026-11-25	F	Was steht morgen Mittag an?	D:2026-11-26@12	D:2026-11-26
+a-025	2026-11-25	F	Was haben wir heute Nachmittag vor?	D:2026-11-25@15	D:2026-11-25
+a-026	2026-11-25	F	Was gab es gestern Mittag für einen Ausfall?	D:2026-11-24@12	D:2026-11-24
+a-027	2026-11-25	F	Wer übernimmt morgen Vormittag das Review?	D:2026-11-26@10	D:2026-11-26
+a-028	2026-11-25	F	Was ist vorgestern Abend passiert?	D:2026-11-23@19	D:2026-11-23
+a-029	2026-11-25	F	Was steht übermorgen früh an?	D:2026-11-27@8	D:2026-11-25@8
+a-030	2026-11-22	F	Wie war das Freitag-Release, und was steht heute Abend an?	D:2026-11-22@19	D:2026-11-22
+a-031	2026-03-18	F	Wer ist Herr Montag, der heute Abend kommt?	D:2026-03-18@19	D:2026-03-18
+a-032	2026-03-18	F	Wie war das Montag-Meeting, und was ist heute Abend?	D:2026-03-18@19	D:2026-03-18
+a-033	2026-11-22	F	Was lief gestern Abend schief, nachdem am Freitag deployed wurde?	D:2026-11-21@19 | D:2026-11-21@19;D:2026-11-20	D:2026-11-20
+a-034	2026-11-25	F	Late last night the queue stalled, why?	D:2026-11-24@23	D:2026-11-25@23
+a-035	2026-11-25	F	Earlier this morning the API returned 500s, what changed?	D:2026-11-25@8	D:2026-11-25@8
+a-036	2026-11-25	F	War der Build heute früh grün?	D:2026-11-25@8	D:2026-11-25@8
+a-037	2026-11-25	F	Morgen Abend ist das Release, sind alle Tickets zu?	D:2026-11-26@19	D:2026-11-26
+a-038	2026-11-25	F	Ist morgen Abend noch jemand im Büro?	D:2026-11-26@19	D:2026-11-26
+a-039	2026-11-25	F	Was ist heute Nacht im Log aufgetaucht?	D:2026-11-25@23 | D:2026-11-24@23	D:2026-11-25
+a-040	2026-11-25	F	Was steht heute Nacht noch an?	D:2026-11-25@23	D:2026-11-25
+a-041	2026-11-25	F	What failed yesterday morning?	D:2026-11-24@8	D:2026-11-25@8
+a-042	2026-11-25	F	Who deployed this afternoon?	D:2026-11-25@15	D:2026-11-25@15
+a-043	2026-11-25	F	What are we doing tomorrow evening?	D:2026-11-26@19	D:2026-11-25@19
+a-044	2026-11-25	F	Gab es letzte Nacht Alarme?	D:2026-11-24@23	NIL
+a-045	2026-11-25	F	Was ist letzte Nacht passiert?	D:2026-11-24@23	NIL
+a-046	2026-11-25	F	Last night the cron job hung, who looked at it?	D:2026-11-24@23	D:2026-11-25@23
+a-047	2026-11-25	F	Wie lange lief der Job gestern Abend?	D:2026-11-24@19	D:2026-11-24
+a-048	2026-11-25	F	Kommst du morgen früh ins Büro?	D:2026-11-26@8	D:2026-11-25@8
+a-049	2026-11-25	F	Kann jemand morgen Nachmittag das Review machen?	D:2026-11-26@15	D:2026-11-26
+a-050	2026-11-25	F	Wer hat heute Vormittag den Hotfix gemerged?	D:2026-11-25@10	D:2026-11-25
+a-051	2026-03-18	F	Was war gestern Abend mit dem Mail-Server?	D:2026-03-17@19	D:2026-03-17
+a-052	2026-01-01	F	Was lief gestern Abend vor dem Feuerwerk schief?	D:2025-12-31@19	D:2025-12-31
+a-053	2026-01-01	F	What broke last night during the new year rollover?	D:2025-12-31@23	D:2026-01-01
+a-054	2026-11-30	F	Was ist gestern Abend beim Sonntagsdienst passiert?	D:2026-11-29@19	D:2026-11-29
+a-055	2026-11-25	F	tomorrow morning we migrate the db, is the runbook ready?	D:2026-11-26@8	D:2026-11-25@8
+a-056	2026-11-25	F	yesterday night the disk filled up, who cleaned it?	D:2026-11-24@23	D:2026-11-25@23
+a-057	2026-11-25	F	What did the on-call see this morning?	D:2026-11-25@8	D:2026-11-25@8
+a-058	2026-11-25	F	Gestern Abend ging der Alarm los – wer war dran?	D:2026-11-24@19	D:2026-11-24
+a-059	2026-11-25	F	Morgen früh, bevor das Standup beginnt, deployen wir?	D:2026-11-26@8	D:2026-11-25@8
+a-060	2026-11-25	F	Habt ihr heute abend Zeit für ein Review?	D:2026-11-25@19	D:2026-11-25
+a-061	2026-11-25	F	Who restarted the workers yesterday evening?	D:2026-11-24@19	D:2026-11-25@19
+a-062	2026-11-25	F	Any incidents last night?	D:2026-11-24@23	D:2026-11-25@23
+a-063	2026-11-25	F	Will the migration run tomorrow night?	D:2026-11-26@23	D:2026-11-25@23
+a-064	2026-11-25	F	Was this morning's deploy rolled back?	D:2026-11-25@8	D:2026-11-25@8
+a-065	2026-11-25	F	Is the release still on for tomorrow afternoon?	D:2026-11-26@15	D:2026-11-25@15
+a-066	2026-11-25	F	Was hat der Pager gestern Nacht gemeldet?	D:2026-11-24@23	D:2026-11-24
+a-067	2026-11-25	F	Was ist für morgen Abend geplant?	D:2026-11-26@19	D:2026-11-26
+a-068	2026-11-25	F	Wer war heute Nachmittag im Call?	D:2026-11-25@15	D:2026-11-25
+a-069	2026-03-18	F	Gestern Nacht ist die Platte vollgelaufen, warum?	D:2026-03-17@23	D:2026-03-17
+a-070	2026-03-18	F	Morgen früh kommt der Techniker, wer lässt ihn rein?	D:2026-03-19@8	D:2026-03-18@8
+a-071	2026-03-18	F	Did anyone check the logs yesterday afternoon?	D:2026-03-17@15	D:2026-03-18@15
+a-072	2026-03-18	F	What is planned for tomorrow evening?	D:2026-03-19@19	D:2026-03-18@19
+a-073	2026-03-18	F	Heute Abend Wartungsfenster?	D:2026-03-18@19	D:2026-03-18
+a-074	2026-11-25	F	Was war in der letzten Nacht los?	D:2026-11-24@23	NIL
+a-075	2026-11-25	F	Tomorrow's morning meeting is cancelled?	D:2026-11-26 | D:2026-11-26@8	D:2026-11-25@8
+a-076	2026-11-25	F	Was gab es am Montagabend und was heute Abend?	D:2026-11-23@19;D:2026-11-25@19	D:2026-11-23@19
+a-077	2026-11-25	G	Guten Morgen! Was steht an?	NONE	D:2026-11-26
+a-078	2026-11-25	G	Guten Morgen, was ist am Freitag passiert?	D:2026-11-20@-	D:2026-11-20
+a-079	2026-11-25	G	Guten Abend, gab es gestern Probleme?	D:2026-11-24@-	D:2026-11-24
+a-080	2026-11-25	G	Guten Abend zusammen, was steht morgen an?	D:2026-11-26@-	D:2026-11-26
+a-081	2026-11-25	G	Is the morning star build green?	NONE	D:2026-11-25@8
+a-082	2026-11-25	G	Who is the night owl on the team?	NONE	D:2026-11-25@23
+a-083	2026-11-25	G	Wo findet das Abendessen am Freitag statt?	D:2026-11-27@-	D:2026-11-27
+a-084	2026-11-25	G	Wer hat die Nachtschicht am Montag?	D:2026-11-30	D:2026-11-30
+a-085	2026-11-22	G	Was planen wir für die letzte Nacht des Jahres?	NONE | D:2026-12-31 | D:2026-12-31@23	NIL
+a-086	2026-11-25	G	Wie hoch war die Last gestern Abend?	D:2026-11-24@19	D:2026-11-24
+a-087	2026-11-25	G	Ist die Last in der Nacht höher als am Tag?	NONE	NIL
+a-088	2026-11-25	G	Die Last Nacht für Nacht steigt – warum?	NONE	NIL
+a-089	2026-11-25	G	Montag morgen ist Release, ist alles bereit?	D:2026-11-30@8	D:2026-11-30@8
+a-090	2026-11-25	G	Was passiert morgen, früh genug für das Review?	D:2026-11-26@-	D:2026-11-25@8
+a-091	2026-11-25	G	Wir müssen morgen früher anfangen, oder?	D:2026-11-26@-	D:2026-11-26
+a-092	2026-11-25	G	Ist heute Abendessen im Büro?	D:2026-11-25@-	D:2026-11-25
+a-093	2026-11-25	G	Gibt es morgen Abendbrot?	D:2026-11-26@-	D:2026-11-26
+a-094	2026-11-25	G	Was steht heute an? Morgen ist Feiertag.	D:2026-11-25@-;D:2026-11-26 | D:2026-11-25@-	D:2026-11-25;D:2026-11-26
+a-095	2026-11-25	G	Was war heute, morgen kommt der Rest?	D:2026-11-25@-;D:2026-11-26	D:2026-11-25;D:2026-11-26
+a-096	2026-11-25	G	Who has the night shift on Friday?	D:2026-11-27	D:2026-11-27
+a-097	2026-11-25	G	Last night of the conference, who presented?	NONE	D:2026-11-25@23
+a-098	2026-11-25	G	Which talk is on the last night of the summit?	NONE	D:2026-11-25@23
+a-099	2026-11-25	G	Did the morning standup on Monday run long?	D:2026-11-23	D:2026-11-23
+a-100	2026-11-25	G	Was ist mit dem Morgen-Report von gestern?	D:2026-11-24 | D:2026-11-24@8	D:2026-11-26;D:2026-11-24
+a-101	2026-11-25	G	Wer schreibt morgen den Abend-Bericht?	D:2026-11-26	D:2026-11-26
+a-102	2026-11-25	G	Kommt der Morgenkurier heute?	D:2026-11-25@-	D:2026-11-25
+a-103	2026-11-25	G	Last but not least: what did we deploy yesterday?	D:2026-11-24@-	D:2026-11-24
+a-104	2026-11-25	G	How was the evening event on Friday?	D:2026-11-20	D:2026-11-20
+a-105	2026-11-25	G	Wo ist heute die Abendveranstaltung?	D:2026-11-25	D:2026-11-25
+a-106	2026-11-25	G	Kommt die Abendlieferung heute oder morgen?	W:2026-11-25..2026-11-26 | D:2026-11-25;D:2026-11-26	W:2026-11-25..2026-11-26
+a-107	2026-11-25	G	Wer hat heute Nachtdienst?	D:2026-11-25	D:2026-11-25
+a-108	2026-11-25	G	Wer hatte gestern Nachtdienst?	D:2026-11-24	D:2026-11-24
+a-109	2026-11-25	G	Gab es heute Morgenmeetings?	D:2026-11-25	D:2026-11-25
+a-110	2026-11-25	G	Morgenröte über dem Rechenzentrum?	NONE	NIL
+a-111	2026-11-25	G	Sind die Abendzahlen von gestern schon da?	D:2026-11-24	D:2026-11-24
+a-112	2026-11-25	G	Moin, guten Morgen allerseits – wer hat heute Dienst?	D:2026-11-25@-	D:2026-11-26;D:2026-11-25
+a-113	2026-11-25	G	Good morning team, what shipped yesterday?	D:2026-11-24@-	D:2026-11-25@8
+a-114	2026-11-25	G	Good evening, anything on fire?	NONE	D:2026-11-25@19
+a-115	2026-11-25	G	Good night everyone, see you tomorrow	D:2026-11-26@-	D:2026-11-25@23
+a-116	2026-11-25	G	Haben wir heute oder morgen ein Abendmeeting?	W:2026-11-25..2026-11-26 | D:2026-11-25;D:2026-11-26	W:2026-11-25..2026-11-26
+a-117	2026-11-25	G	Ist die Nacht-Migration für morgen angesetzt?	D:2026-11-26 | D:2026-11-26@23	D:2026-11-26
+a-118	2026-11-25	G	Morning, did the deploy go out yesterday?	D:2026-11-24@-	D:2026-11-25@8
+a-119	2026-11-25	G	Evening all – was there an outage today?	D:2026-11-25@-	D:2026-11-25@19
+a-120	2026-11-25	G	Die letzte Nacht im Hotel war laut, wann war das?	NONE	NIL
+a-121	2026-11-25	G	Was lief in der letzten Nacht vor dem Release schief?	NONE	NIL
+a-122	2026-11-25	G	Who took the last night train?	NONE	D:2026-11-25@23
+a-123	2026-11-25	G	Heute Abendessen, morgen Release?	D:2026-11-25@-;D:2026-11-26@- | W:2026-11-25..2026-11-26	D:2026-11-25;D:2026-11-26
+a-124	2026-11-25	G	Läuft der Morgen-Job heute?	D:2026-11-25	D:2026-11-26;D:2026-11-25
+a-125	2026-11-25	G	Was hat der Abendjob gestern gemacht?	D:2026-11-24	D:2026-11-24
+a-126	2026-11-25	G	Was the night build green yesterday?	D:2026-11-24	D:2026-11-25@23
+a-127	2026-11-25	G	Is the evening batch running today?	D:2026-11-25	D:2026-11-25@19
+a-128	2026-11-25	G	Kommt morgen der Abendzug pünktlich?	D:2026-11-26	D:2026-11-26
