@@ -338,3 +338,19 @@ func TestUpdateConfig565_NullSectionIsNamed(t *testing.T) {
 		t.Fatalf("digest left out: %v — want a refusal naming digest", err)
 	}
 }
+
+// TestUpdateConfig565_ShippedRetrievalIsRequired: over a stored config that
+// names no section at all, a replacement for a builtin must still name what
+// its shipped definition sets in retrieval — session-digest's damped policy,
+// factor and untrusted mark. Leaving retrieval out is refused naming it. Every
+// other broken row in these tests stores a retrieval section, so this is the
+// one probe that fails when retrieval drops out of the shipped requirement.
+func TestUpdateConfig565_ShippedRetrievalIsRequired(t *testing.T) {
+	const noRetrieval = `{"v":1,"guard":{"check":false,"candidate":false},"dream":{"linkable":false},"digest":{"include":false},"overview":{"include":false}}`
+	for _, stored := range []string{`[]`, `{"v":1,"zz_legacy":{"x":1}}`} {
+		out, err := UpdateConfig("session-digest", globalScope, true, false, []byte(stored), []byte(noRetrieval))
+		if err == nil || !strings.Contains(err.Error(), "retrieval") || !strings.Contains(err.Error(), "must name") {
+			t.Fatalf("session-digest without retrieval over %s: %s, %v — want a refusal naming retrieval", stored, out, err)
+		}
+	}
+}
