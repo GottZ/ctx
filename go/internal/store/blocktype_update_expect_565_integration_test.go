@@ -91,21 +91,29 @@ func TestUpdateBlockType565_ExpectConfig(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer func() { _ = holder.Rollback(ctx) }()
-		if _, err := holder.Exec(ctx,
-			`UPDATE context_block_types SET config = '{"v":1,"dream":{"linkable":false}}'::jsonb WHERE id = $1`, bt.ID); err != nil {
-			t.Fatal(err)
-		}
 		cfg := pool.Config().Copy()
 		cfg.ConnConfig.RuntimeParams["application_name"] = "t565-update"
 		waiterPool, err := pgxpool.NewWithConfig(ctx, cfg)
 		if err != nil {
+			_ = holder.Rollback(ctx)
 			t.Fatal(err)
 		}
-		defer waiterPool.Close()
+		waitCtx, cancelWait := context.WithCancel(ctx)
+		// One cleanup, in order: the waiter is cancelled and the holder rolled
+		// back BEFORE the pool closes — Close waits for the connection the
+		// waiter holds while it queues on the holder's row lock.
+		defer func() {
+			cancelWait()
+			_ = holder.Rollback(ctx)
+			waiterPool.Close()
+		}()
+		if _, err := holder.Exec(ctx,
+			`UPDATE context_block_types SET config = '{"v":1,"dream":{"linkable":false}}'::jsonb WHERE id = $1`, bt.ID); err != nil {
+			t.Fatal(err)
+		}
 		done := make(chan error, 1)
 		go func() {
-			_, err := store.UpdateBlockType(ctx, waiterPool, bt.ID, scopes, store.BlockTypeUpdate{
+			_, err := store.UpdateBlockType(waitCtx, waiterPool, bt.ID, scopes, store.BlockTypeUpdate{
 				Config: json.RawMessage(`{"v":1,"retrieval":{"policy":"excluded"}}`), ExpectConfig: json.RawMessage(read),
 			}, nil, "")
 			done <- err
@@ -137,6 +145,23 @@ func TestUpdateBlockType565_ExpectConfig(t *testing.T) {
 		}
 		if !sameJSON(stored(), `{"v":1,"dream":{"linkable":false}}`) {
 			t.Fatalf("the waiting update overwrote the committed one: %s", stored())
+		}
+	})
+
+	t.Run("the config is compared as jsonb, not as text", func(t *testing.T) {
+		// Stored in one spelling, expected in another: v 1.0 and 1, 0.80 and
+		// 0.8, another key order. Equal values, so the update writes. RED
+		// (mutation): config::text = $n.
+		if _, err := pool.Exec(ctx, `UPDATE context_block_types
+			  SET config = '{"v":1.0,"retrieval":{"damping_factor":0.80,"policy":"damped"}}'::jsonb WHERE id = $1`, bt.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.UpdateBlockType(ctx, pool, bt.ID, scopes, store.BlockTypeUpdate{
+			Config:       json.RawMessage(c0),
+			ExpectConfig: json.RawMessage(`{"retrieval":{"policy":"damped","damping_factor":0.8},"v":1}`),
+		}, nil, "")
+		if err != nil || got == nil || !sameJSON(stored(), c0) {
+			t.Fatalf("update over an equal config in another spelling: %v, %v; stored %s", got, err, stored())
 		}
 	})
 

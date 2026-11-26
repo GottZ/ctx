@@ -262,13 +262,15 @@ func overlayBasePolicy(ctx context.Context, pool *pgxpool.Pool, name string) (bl
 
 // mergedTypeConfig is the config a type UPDATE writes, on both transports
 // (manage type-update and PUT /api/types on an existing row): the request's
-// config laid over the row's stored config (blocktype.MergeConfig, issue #565
-// — a field the request leaves out keeps its stored value, null resets it),
-// decoded against the ROW's identity (name/scope/builtin/is_default feed the
-// cross-field rules). The error is the 422 text: a request part that fails the
-// envelope checks, or a merged config that fails DecodePolicy.
+// config laid over the row's stored config (blocktype.UpdateConfig, issue #565
+// — a field the request leaves out keeps its stored value, null resets it; over
+// a stored config that does not decode, the request is the whole config and
+// must name its sections), decoded against the ROW's identity (name/scope/
+// builtin/is_default feed the cross-field rules). The error is the 422 text: a
+// request part that fails the envelope checks, a partial config over a broken
+// row, or a merged config that fails DecodePolicy.
 func mergedTypeConfig(cur *store.BlockTypeRow, config json.RawMessage) (json.RawMessage, blocktype.Policy, error) {
-	merged, err := blocktype.MergeConfig(cur.Name, cur.Config, config)
+	merged, err := blocktype.UpdateConfig(cur.Name, cur.Scope, cur.Builtin, cur.IsDefault, cur.Config, config)
 	if err != nil {
 		return nil, blocktype.Policy{}, err
 	}

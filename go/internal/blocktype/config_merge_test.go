@@ -158,3 +158,80 @@ func lookupPath(m map[string]any, path string) (any, bool) {
 	}
 	return cur, true
 }
+
+// TestMergeConfig565_NoHTMLEscaping: strings with & < > keep their size through
+// the merge. 24 title patterns of 128 such characters are 3 KiB as stored;
+// HTML-escaped they are 18 KiB, past maxConfigBytes, and the unchanged config
+// sent back would not decode. RED on 02a1a26e (json.Marshal escapes).
+func TestMergeConfig565_NoHTMLEscaping(t *testing.T) {
+	pats := make([]string, 24)
+	for i := range pats {
+		pats[i] = strings.Repeat("&", 64) + strings.Repeat("<>", 32)
+	}
+	var b strings.Builder
+	b.WriteString(`{"v":1,"classify":{"title_patterns":[`)
+	for i, p := range pats {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(`"` + p + `"`)
+	}
+	b.WriteString(`]}}`)
+	stored := b.String()
+	out, err := MergeConfig("probe", []byte(stored), []byte(stored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > len(stored)+16 || strings.Contains(string(out), `\u0026`) || strings.HasSuffix(string(out), "\n") {
+		t.Fatalf("merged config is %d bytes for %d stored (escaped or newline-terminated): %.80s…", len(out), len(stored), out)
+	}
+	if _, err := DecodePolicy("probe", globalScope, false, false, out); err != nil {
+		t.Fatalf("the unchanged config does not decode after the merge: %v", err)
+	}
+}
+
+// TestUpdateConfig565_BrokenStored: over a stored config that does not decode
+// an update is a replacement — the whole config — and must name every section
+// the stored config names (in any spelling) and, for a builtin, every section
+// its shipped definition sets; nulls in it are dropped. RED on 02a1a26e (no
+// such path: the merge keeps the broken key).
+func TestUpdateConfig565_BrokenStored(t *testing.T) {
+	whole := `{"v":1,"retrieval":{"policy":"damped","damping_factor":0.8,"untrusted":true},"guard":{"check":false,"candidate":false},"dream":{"linkable":false},"digest":{"include":false},"overview":{"include":false}}`
+	for _, tc := range []struct {
+		label, name, stored, update, wantErr string
+	}{
+		{"unknown key, whole config", "session-digest", strings.Replace(whole, `{"v":1,`, `{"v":1,"zz_legacy":{"x":1},`, 1), whole, ""},
+		{"unknown key, partial", "session-digest", strings.Replace(whole, `{"v":1,`, `{"v":1,"zz_legacy":{"x":1},`, 1), `{"v":1,"retrieval":{"damping_factor":0.5}}`, "must name"},
+		{"unknown key, key null", "session-digest", strings.Replace(whole, `{"v":1,`, `{"v":1,"zz_legacy":{"x":1},`, 1), `{"v":1,"zz_legacy":null}`, "must name"},
+		{"another spelling, whole config", "opsx", `{"v":1,"Digest":{"include":false},"classify":{"priority":3}}`, `{"v":1,"digest":{"include":false},"classify":{"priority":3}}`, ""},
+		{"another spelling, partial", "opsx", `{"v":1,"Digest":{"include":false},"classify":{"priority":3}}`, `{"v":1,"classify":{"priority":4}}`, "digest"},
+		{"no object, builtin, partial", "session-digest", `[]`, `{"v":1,"retrieval":{"damping_factor":0.5}}`, "guard"},
+		{"no object, builtin, whole config", "session-digest", `[]`, whole, ""},
+		{"no object, own type, anything that decodes", "opsx", `[]`, `{"v":1,"retrieval":{"damping_factor":0.5,"zz":null}}`, ""},
+		{"whole config with its own error", "opsx", `[]`, `{"v":1,"guards":{}}`, `unknown field "guards"`},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			out, err := UpdateConfig(tc.name, globalScope, tc.name == "session-digest", false, []byte(tc.stored), []byte(tc.update))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || (tc.wantErr != `unknown field "guards"` && !strings.Contains(err.Error(), "stored config does not decode")) {
+					t.Fatalf("err = %v, want one naming the broken stored config and %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UpdateConfig: %v", err)
+			}
+			if strings.Contains(string(out), "null") || strings.Contains(string(out), "zz") || strings.Contains(string(out), "Digest") {
+				t.Fatalf("replacement %s carries a null or a key of the broken row", out)
+			}
+			if _, err := DecodePolicy(tc.name, globalScope, false, false, out); err != nil {
+				t.Fatalf("replacement %s does not decode: %v", out, err)
+			}
+		})
+	}
+	// A stored config that decodes is merged, as before.
+	out, err := UpdateConfig("session-digest", globalScope, true, false, []byte(whole), []byte(`{"v":1,"retrieval":{"damping_factor":0.5}}`))
+	if err != nil || !strings.Contains(string(out), `"untrusted":true`) {
+		t.Fatalf("merge over a decodable row: %s, %v", out, err)
+	}
+}

@@ -35,13 +35,19 @@ func TestTenantRowOfAnUntrustedBuiltin565_Integration(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool := testdb.SetupTestDBUpTo(t, 195)
-	for _, row := range []struct{ scope, name, config string }{
-		{"tenant-a", "session-digest", `{"v":1,"retrieval":{"policy":"full-pass"}}`},
-		{"tenant-b", "session-digest", `{"v":1,"retrieval":{"policy":"damped","damping_factor":0.5,"untrusted":true}}`},
-		{"tenant-c", "knowledge", `{"v":1,"retrieval":{"policy":"full-pass"}}`},
+	for _, row := range []struct {
+		scope, name, config string
+		isDefault           bool
+	}{
+		{"tenant-a", "session-digest", `{"v":1,"retrieval":{"policy":"full-pass"}}`, false},
+		{"tenant-b", "session-digest", `{"v":1,"retrieval":{"policy":"damped","damping_factor":0.5,"untrusted":true}}`, false},
+		// The tenant's knowledge row replaces the base default, so it carries
+		// the default flag itself — without it the set has no default, the
+		// build fails and the "no WARN for a trusted name" check proves nothing.
+		{"tenant-c", "knowledge", `{"v":1,"retrieval":{"policy":"full-pass"}}`, true},
 	} {
 		if _, err := store.CreateBlockType(ctx, pool, store.BlockTypeWrite{
-			Name: row.name, Scope: row.scope, Config: json.RawMessage(row.config),
+			Name: row.name, Scope: row.scope, IsDefault: row.isDefault, Config: json.RawMessage(row.config),
 		}, nil, ""); err != nil {
 			t.Fatalf("tenant row %s/%s: %v", row.scope, row.name, err)
 		}
@@ -85,7 +91,9 @@ func TestTenantRowOfAnUntrustedBuiltin565_Integration(t *testing.T) {
 	if !reg.SnapshotForTenant(ctx, "tenant-b").IsUntrusted("session-digest") {
 		t.Fatal("tenant-b's marked row is not untrusted")
 	}
-	_ = reg.SnapshotForTenant(ctx, "tenant-c")
+	if reg.SnapshotForTenant(ctx, "tenant-c") == reg.Snapshot() {
+		t.Fatal("fixture premise: tenant-c's set did not build (the base is served)")
+	}
 	if n := warns("tenant-b") + warns("tenant-c"); n != 0 {
 		t.Fatalf("WARN for a marked tenant row or a trusted builtin name: %d", n)
 	}
@@ -154,5 +162,27 @@ func TestTenantRowOfAnUntrustedBuiltin565_Integration(t *testing.T) {
 	}
 	if n := warns("tenant-d"); n != 0 {
 		t.Fatalf("untrusted WARN records for tenant-d, whose set is never served = %d, want 0", n)
+	}
+
+	// The same for a build whose rows all decode but whose set is refused: a
+	// knowledge row without the default flag leaves the merged set without a
+	// default (NewSet fails), and the base is served.
+	for _, row := range []struct{ name, config string }{
+		{"session-digest", `{"v":1,"retrieval":{"policy":"full-pass"}}`},
+		{"knowledge", `{"v":1,"retrieval":{"policy":"full-pass"}}`},
+	} {
+		if _, err := store.CreateBlockType(ctx, pool, store.BlockTypeWrite{
+			Name: row.name, Scope: "tenant-e", Config: json.RawMessage(row.config),
+		}, nil, ""); err != nil {
+			t.Fatalf("tenant-e row %s: %v", row.name, err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if reg.SnapshotForTenant(ctx, "tenant-e") != reg.Snapshot() {
+			t.Fatal("fixture premise: tenant-e's set built although it has no default")
+		}
+	}
+	if n := warns("tenant-e"); n != 0 {
+		t.Fatalf("untrusted WARN records for tenant-e, whose set is refused = %d, want 0", n)
 	}
 }
