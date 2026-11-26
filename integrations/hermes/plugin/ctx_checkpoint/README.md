@@ -192,7 +192,7 @@ The connection test names the tools when the entry name is rewritten.
 
 | Feature | What it does | Switch |
 |---|---|---|
-| Recall | before each turn the most relevant blocks are injected as `<ctx-context>` (untrusted text labelled, a block re-typed out of an untrusted type named with an `untrusted_origin:` line); the host's indicator shows `🧠 CTX — recalled N memories` | `auto_recall`, `max_prefetch_results`, `prefetch_types_exclude`, `prefetch_untrusted` |
+| Recall | before each turn the most relevant blocks are injected as `<ctx-context>` (untrusted text labelled, a block re-typed out of an untrusted type named with an `untrusted_origin:` line); the host's indicator shows `🧠 CTX — recalled N memories` | `auto_recall`, `max_prefetch_results`, `prefetch_session_digest_results`, `prefetch_types_exclude`, `prefetch_untrusted` |
 | Agent tools | `ctx_query(text, synthesize?, types_exclude?)`, `ctx_store(category, title, content, …)`, `ctx_search(query, category?, tags?, …)`, `ctx_get(block_id)` | — |
 | Memory mirror | Hermes' curated `MEMORY.md`/`USER.md` writes become `agent-briefing` / `reference` blocks | `auto_memory_mirror` |
 | Fact extraction | up to 5 salient closing statements of the compacted turns become `learnings` blocks of type `session-digest`, deduplicated across compactions | `auto_compress_extract`, `facts_from_user`, `facts_reject_cjk_codeswitch` |

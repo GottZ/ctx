@@ -2329,6 +2329,8 @@ Issue #289. The Hermes plugin `ctx_checkpoint` stores, with `memory: true`, sess
 
 **Plugins before 0.19.0** write untyped as before. A plugin 0.19.0 against a server without the type is refused once per process and server entry, writes without the type for an hour and then asks once more (plugin README); each such fallback logs one WARNING per process and entry.
 
+**The plugin's recall sends a second query.** With `memory: true`, once a server took a digest or fact write naming the type, the recall of plugin 0.19.0 follows each of its queries with a second retrieval-only query that sees only `session-digest` blocks (`prefetch_session_digest_results`, default 3, `0` turns it off): one more `/api/query` (over MCP one more `query` call) per recalled turn against the key's read rate limit and the tenant's query quota. The question's embedding is cached for it when the first embed backend is shareable (`_global` or no scope); a tenant's own embed backend embeds it again. Over REST the plugin reads `type-list` once per client for it.
+
 ### `graph_overview.csr_loader`: the rebuild's input substrate
 
 `CTX_GRAPH_OVERVIEW_CSR_LOADER` (default `false`, hot) switches how the rebuild gets its graph into memory. It changes no result — the partition, the modularity and the intra-cluster degrees are byte-identical either way, and that identity is a gate, not a hope.

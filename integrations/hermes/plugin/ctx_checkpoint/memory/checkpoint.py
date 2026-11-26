@@ -1033,6 +1033,12 @@ class EntryState:
                 del self._block_types[name]
             self._cond.notify_all()
 
+    def type_known(self, name: str) -> bool:
+        """Whether a write of this process naming ``name`` was taken by the entry's server (GottZ/ctx#289:
+        the recall's second query asks only such an entry — a server without the type refuses it)."""
+        with self._cond:
+            return self._block_types.get(name) == _TYPE_KNOWN
+
     def warn_once(self, name: str, way: str, message: str, *args: Any) -> None:
         """Log ``message`` as a WARNING the first time this process stores a write of type ``name`` to this
         entry without the type by the fallback ``way`` (GottZ/ctx#289); later ones of that way are silent.

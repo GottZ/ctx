@@ -236,6 +236,8 @@ class CtxClient:
         self._key = api_key
         self._timeout = timeout
         self._synthesis_timeout = synthesis_timeout
+        # The server registry's type names (``query_types``), read once per client.
+        self._type_names: frozenset[str] | None = None
 
     # -- low-level -----------------------------------------------------------
 
@@ -367,6 +369,32 @@ class CtxClient:
             payload["types_exclude"] = list(types_exclude)
         t = self._synthesis_timeout if synthesize else None
         return self._request("POST", "/api/query", payload, timeout=t)
+
+    def query_types(self, text: str, types: list[str], *, limit: int, timeout: float | None = None) -> dict[str, Any]:
+        """Retrieval-only ``/api/query`` that sees only blocks of ``types`` (GottZ/ctx#289): the REST query
+        takes no positive type filter, so the other type names of the server's registry (``type-list``,
+        read once per client) go into ``types_exclude`` — what the MCP query tool does with its ``types``.
+        A type the registry does not list answers no sources, without a query."""
+        end = _monotonic() + timeout if timeout is not None else None
+        if self._type_names is None:
+            listing = self._request("POST", "/api/manage", {"action": "type-list"}, timeout=timeout)
+            rows = listing.get("types") if isinstance(listing, dict) else None
+            if not isinstance(rows, list):
+                raise CtxApiError("type-list returned no types")
+            self._type_names = frozenset(str(r.get("name")) for r in rows if isinstance(r, dict) and r.get("name"))
+        if not set(types) <= self._type_names:
+            return {"success": True, "answer": "", "sources": []}
+        payload: dict[str, Any] = {
+            "query": text,
+            "synthesize": False,
+            "include_content": True,
+            "limit": int(limit),
+            "types_exclude": sorted(self._type_names - set(types)),
+        }
+        left = None if end is None else end - _monotonic()
+        if left is not None and left <= 0:
+            raise CtxApiError("query: no time left after the type list", code="timeout")
+        return self._request("POST", "/api/query", payload, timeout=left)
 
     def search(
         self,

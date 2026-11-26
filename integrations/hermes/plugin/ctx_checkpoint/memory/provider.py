@@ -90,6 +90,16 @@ _CONTEXT_TAG = "<ctx-context>"
 # the frame is the model's only cue that what follows is data. Escape it (case-insensitive).
 _CONTEXT_TAG_RE = re.compile(r"</?\s*ctx-context\s*>", re.IGNORECASE)
 _PREFETCH_CACHE_TTL_S = 60.0
+# The recall's second query (GottZ/ctx#289, ``prefetch_session_digest_results``): Hermes waits
+# ``_EXTERNAL_PREFETCH_TIMEOUT_S`` (8 s, agent/memory_manager.py) for a provider's prefetch and
+# drops all of it after that, so the second query gets its own bound and only what that wait leaves
+# after the first one, less a margin (the grace of a bounded MCP call through Hermes, 1 s, and
+# 0.5 s); with less than the minimum left it is not sent and the recall is the first query's.
+# Measured on the test rig: 22 ms median, 33 ms p95 (the question's embedding is cached).
+HOST_PREFETCH_WAIT_S = 8.0
+SESSION_DIGEST_RECALL_TIMEOUT_S = 2.0
+SESSION_DIGEST_RECALL_MARGIN_S = 1.5
+SESSION_DIGEST_RECALL_MIN_S = 0.25
 # Key values an earlier binding of this provider used, kept for redaction after a re-initialization
 # (a write scheduled through the old client redacts when its thread runs; a later text may still
 # carry the old key). At most this many, the most recent first kept; the current keys come on top.
@@ -615,6 +625,7 @@ class CtxMemoryProvider(MemoryProvider):
         client = self._client
         if not self._active or not self._config.get("auto_recall", True) or not client:
             return ""
+        entry = self._recall_entry()
         q = (query or "").strip()
         if not q:
             return ""
@@ -625,7 +636,7 @@ class CtxMemoryProvider(MemoryProvider):
                 self._last_recall_count = cached[2]
                 return cached[1]
         try:
-            context, self._last_recall_count = self._recall(q, client)
+            context, self._last_recall_count = self._recall(q, client, entry)
             return context
         except Exception as exc:
             logger.debug("CTX prefetch failed (non-fatal): %s", self._error_text(exc))
@@ -653,10 +664,11 @@ class CtxMemoryProvider(MemoryProvider):
         client = self._client
         if client is None:
             return
+        entry = self._recall_entry()
 
         def _warm() -> None:
             try:
-                context, count = self._recall(q, client)
+                context, count = self._recall(q, client, entry)
                 with self._prefetch_lock:
                     # A re-init or session switch since the start invalidated this warm-up.
                     if generation == self._prefetch_generation:
@@ -672,15 +684,21 @@ class CtxMemoryProvider(MemoryProvider):
     def _types_exclude(self) -> list[str]:
         return list(self._config.get("prefetch_types_exclude") or [])
 
-    def _recall(self, text: str, client: CtxClient | None = None) -> tuple[str, int]:
+    def _recall(
+        self, text: str, client: CtxClient | None = None, entry: _cp.EntryState | None = None
+    ) -> tuple[str, int]:
         """Retrieval-only recall → ``(context block, hit count)``. Query path with search
         fallback (embedding backfill can make /api/query time out right after stores). Both
         paths send ``types_exclude`` (P2: checkpoints are browseable on /api/search).
-        ``client`` pins the call to a binding (prefetch, warm-ups); default: the current client."""
+        ``client`` pins the call to a binding (prefetch, warm-ups); default: the current client.
+        ``entry``: that binding's server entry (:meth:`_recall_entry`) — with it, after an answer of
+        the query path, the second query of :meth:`_session_digest_sources` may add digests and facts
+        behind the recalled blocks."""
         if client is None:
             client = self._client
         if not client:
             return "", 0
+        started = self._now()
         types_exclude = self._types_exclude()
         if self._config.get("prefetch_mode") == "search":
             return self._format_search_results(client.search(text, types_exclude=types_exclude))
@@ -688,8 +706,9 @@ class CtxMemoryProvider(MemoryProvider):
             data = client.query(text, synthesize=False, include_content=True, types_exclude=types_exclude)
             if data.get("success"):
                 sources = data.get("sources") or []
-                if sources:
-                    return self._format_sources(sources)
+                extra = self._session_digest_sources(text, client, entry, sources, started)
+                if sources or extra:
+                    return self._format_sources(sources, extra)
             return "", 0
         except Exception:
             try:
@@ -697,7 +716,65 @@ class CtxMemoryProvider(MemoryProvider):
             except Exception:
                 return "", 0
 
-    def _prefetch_items(self, items: list[dict[str, Any]]) -> list[str]:
+    def _session_digest_recall_results(self) -> int:
+        """How many blocks the recall's second query adds (``prefetch_session_digest_results``); 0 when
+        they would be dropped anyway (``prefetch_untrusted: drop``, the type in ``prefetch_types_exclude``)."""
+        if self._config.get("prefetch_untrusted") == "drop" or SESSION_DIGEST_TYPE in self._types_exclude():
+            return 0
+        return int(self._config.get("prefetch_session_digest_results") or 0)
+
+    def _recall_entry(self) -> _cp.EntryState | None:
+        """The current binding's server entry for the recall's second query, taken with its client;
+        None while that query is off (no lookup of the entry then)."""
+        return _cp.entry_state(self._entry_key()) if self._session_digest_recall_results() > 0 else None
+
+    def _session_digest_sources(
+        self,
+        text: str,
+        client: Any,
+        entry: _cp.EntryState | None,
+        sources: list[dict[str, Any]],
+        started: float,
+    ) -> list[dict[str, Any]]:
+        """Up to ``prefetch_session_digest_results`` blocks of type ``session-digest`` that the recall's
+        query did not answer (GottZ/ctx#289): the type is damped, so a digest or a fact that alone
+        answers a question can rank below the recalled blocks. A second, small query that sees only
+        that type finds it; its blocks come after the recalled ones, which stay as they are, each with
+        the untrusted label of its type.
+
+        Not sent when it would be dropped anyway (``prefetch_untrusted: drop``, the type in
+        ``prefetch_types_exclude``), to an entry whose server has not taken a write naming the type in
+        this process (a server without the type refuses the query — over MCP an error answer Hermes
+        counts), or with less than :data:`SESSION_DIGEST_RECALL_MIN_S` left of Hermes' wait. Bounded by
+        its own time; a failure or a timeout keeps the recalled blocks and is logged at DEBUG, as a
+        failed recall is (it counts toward nothing of the entry's own state)."""
+        want = self._session_digest_recall_results()
+        if entry is None or want <= 0 or not entry.type_known(SESSION_DIGEST_TYPE):
+            return []
+        left = HOST_PREFETCH_WAIT_S - SESSION_DIGEST_RECALL_MARGIN_S - (self._now() - started)
+        timeout = min(SESSION_DIGEST_RECALL_TIMEOUT_S, left)
+        if timeout < SESSION_DIGEST_RECALL_MIN_S:
+            return []
+        seen = {str(s.get("id")) for s in sources if isinstance(s, dict) and s.get("id")}
+        # The answer carries no type; every block of the type among it is marked untrusted, so this
+        # many more places leave room for ``want`` blocks the first answer does not hold.
+        overlap = sum(1 for s in sources if isinstance(s, dict) and s.get("untrusted") is True)
+        try:
+            data = client.query_types(text, [SESSION_DIGEST_TYPE], limit=want + overlap, timeout=timeout)
+        except Exception as exc:
+            logger.debug("CTX recall of session digests failed (non-fatal): %s", self._error_text(exc))
+            return []
+        rows = (data or {}).get("sources") if (data or {}).get("success") else None
+        out: list[dict[str, Any]] = []
+        for row in rows or []:
+            if isinstance(row, dict) and row.get("id") and str(row["id"]) not in seen:
+                seen.add(str(row["id"]))
+                out.append(row)
+                if len(out) >= want:
+                    break
+        return out
+
+    def _prefetch_items(self, items: list[dict[str, Any]], limit: int | None = None) -> list[str]:
         """Render hits as bullet lines. Defense in depth: hits whose ``type`` is in
         ``prefetch_types_exclude`` are dropped client-side too (older servers ignore
         the request filter); ``untrusted: true`` hits are labelled (or dropped with
@@ -705,7 +782,8 @@ class CtxMemoryProvider(MemoryProvider):
         under the label (#295) — a hit without one renders as before."""
         excluded = set(self._types_exclude())
         drop_untrusted = self._config.get("prefetch_untrusted") == "drop"
-        limit = int(self._config.get("max_prefetch_results", 5))
+        if limit is None:
+            limit = int(self._config.get("max_prefetch_results", 5))
         parts: list[str] = []
         skipped = 0
         for item in items:
@@ -754,12 +832,18 @@ class CtxMemoryProvider(MemoryProvider):
         closing = "</" + _CONTEXT_TAG.strip("<>") + ">"
         return f"{_CONTEXT_TAG}\n{intro}\n\n" + "\n\n".join(escaped) + "\n" + closing
 
-    def _format_sources(self, sources: list[dict[str, Any]]) -> tuple[str, int]:
+    def _format_sources(
+        self, sources: list[dict[str, Any]], extra: list[dict[str, Any]] | None = None
+    ) -> tuple[str, int]:
+        """``extra``: the second query's blocks (:meth:`_session_digest_sources`), after the others and
+        outside their ``max_prefetch_results``."""
         intro = (
             "Relevant knowledge from CTX long-term memory. Use silently when relevant; "
             "do not force it into the conversation."
         )
         parts = self._prefetch_items(sources or [])
+        if extra:
+            parts += self._prefetch_items(extra, limit=len(extra))
         return self._wrap_context(parts, intro), len(parts)
 
     def _format_search_results(self, data: dict[str, Any]) -> tuple[str, int]:

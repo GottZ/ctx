@@ -29,6 +29,15 @@ Digests and facts are stored as ctx's block type `session-digest` (GottZ/ctx#289
   answer is a verdict — any other error, a write that waited out the ask and a failed listing
   before it leave the question open for the next write. Each way a write goes without the type
   logs one WARNING per process and entry (a refusal, a failed listing, a wait run out).
+- **The recall's second query** (`prefetch_session_digest_results`, default 3, `0` = off). The
+  type is damped in recall, so a digest or a fact that alone answers a question can rank below the
+  five recalled blocks. After the recall's query a second, small query that sees only the type
+  adds up to that many of its blocks the first did not answer, behind the five (which stay as they
+  are), each labelled untrusted. Sent only to a server entry that took a write naming the type in
+  this process, never with `prefetch_untrusted: drop` or the type in `prefetch_types_exclude`,
+  with its own bound (2 s) and only while Hermes' 8 s wait for the prefetch leaves room; a failure
+  keeps the five. Over REST the other type names (`type-list`, once per client) go into
+  `types_exclude`.
 - **The required facts.** A required fact refused for its type is sent again in the same run by
   `ChainWriter.store_paced`, admitted as a call of its own: the refusal is released as an error
   answer of the entry (Hermes counts it), without a slot of the window (ctx checks the type before

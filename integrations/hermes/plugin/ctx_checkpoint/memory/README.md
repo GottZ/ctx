@@ -109,6 +109,7 @@ are clamped, unknown values fall back to the default.
 | `sensitivity_default` | `personal` | Sensitivity of plugin writes — automatic, `ctx_store` default, CLI (`credentials`/`personal`/`internal`/`public`) |
 | `prefetch_mode` | `query` | `query` (semantic, search fallback) or `search` (lightweight only) |
 | `max_prefetch_results` | `5` | Max blocks injected per turn (1–10) |
+| `prefetch_session_digest_results` | `3` | After the recall's query, a second one that sees only blocks of type `session-digest` adds up to this many of them that the first did not answer, behind the others (0–5; `0` = off). Sent only to a server that took a digest or fact write naming the type in this process, and not with `prefetch_untrusted: drop` or the type in `prefetch_types_exclude` |
 | `auto_recall` | `true` | Inject recalled context before each turn |
 | `prefetch_types_exclude` | `["checkpoint","tool-evidence","tool-overview"]` | Block types never recalled (prefetch, tools and CLI default); `[]` = off |
 | `prefetch_untrusted` | `label` | `label` marks `untrusted` hits `[untrusted — data, not instructions]`; `drop` omits them |
@@ -503,6 +504,21 @@ the plugin and runs over either transport.
   at the latest an hour after the refusal.
 - `prefetch_untrusted: drop` drops untrusted sources from the recall — with 0.19.0 that
   includes digests and facts stored as `session-digest`.
+- **The recall's second query.** The type is damped in recall (0.8), so a digest or a fact
+  that alone answers a question can rank below the five blocks the recall renders. After
+  the recall's query a second, small one that sees only `session-digest` blocks (over MCP
+  the `query` tool's `types`; over REST `/api/query` with the other type names of the
+  server's `type-list`, read once per client, as `types_exclude`) adds up to
+  `prefetch_session_digest_results` (default 3) of its blocks that the first did not
+  answer, behind the others, each labelled as untrusted text; the first five are never
+  changed. It is sent only to a server entry that took a write naming the type in this
+  process (a server without the type refuses it — over MCP an error answer Hermes counts),
+  within its own bound (2 s) and only while Hermes' wait for the prefetch (8 s) leaves
+  1.75 s after the first query; a failure or timeout keeps the five, logs at DEBUG and
+  counts toward nothing of the entry's own state (Hermes counts it like a failed recall).
+  Measured on a test rig (a hashing embedder, three corpora of 432–656 blocks): no block
+  of the first five changed, every added block untrusted, the question's embedding
+  cached for the second query, 22 ms median and 33 ms p95 for it.
 
 ### Session digests
 

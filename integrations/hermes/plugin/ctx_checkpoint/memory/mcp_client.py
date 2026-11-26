@@ -693,6 +693,24 @@ class McpClient:
                         source[key] = block[key]
         return {"success": True, "answer": answer, "sources": sources}
 
+    def query_types(self, text: str, types: list[str], *, limit: int, timeout: float | None = None) -> dict[str, Any]:
+        """Retrieval-only ``query`` that sees only blocks of ``types`` (GottZ/ctx#289; the tool folds them
+        into ``types_exclude``), bounded by ``timeout``. A server that does not know a type refuses the
+        call (an error answer Hermes counts): the caller asks only an entry that took the type."""
+        args: dict[str, Any] = {
+            "question": text,
+            "synthesize": False,
+            "include_content": True,
+            "limit": int(limit),
+            "types": list(types),
+        }
+        _payload, body = self._call("query", args, timeout)
+        answer = self._as_json(body)
+        rows = answer.get("sources") if isinstance(answer, dict) else None
+        if not isinstance(answer, dict) or not (rows is None or isinstance(rows, list)):
+            raise CtxApiError(f"mcp query: the retrieval-only answer is not a sources document ({len(body)} chars)")
+        return {"success": True, "answer": "", "sources": [row for row in rows or [] if isinstance(row, dict)]}
+
     def _retrieval_via_query(
         self,
         text: str,
