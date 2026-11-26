@@ -322,3 +322,19 @@ func jsonSame(a []byte, b string) bool {
 	}
 	return reflect.DeepEqual(x, y)
 }
+
+// TestUpdateConfig565_NullSectionIsNamed: over a stored config that does not
+// decode, a section the request names null is named — it resets the section,
+// and the replacement goes without it; a section the request leaves out is
+// still missing. RED on 9c701044: the nulls were dropped before the required
+// sections were looked up, so the reset was refused as a missing section.
+func TestUpdateConfig565_NullSectionIsNamed(t *testing.T) {
+	const stored = `{"v":1,"Digest":{"include":false},"classify":{"priority":3}}`
+	out, err := UpdateConfig("opsx", globalScope, false, false, []byte(stored), []byte(`{"v":1,"digest":null,"classify":{"priority":3}}`))
+	if err != nil || !jsonSame(out, `{"v":1,"classify":{"priority":3}}`) {
+		t.Fatalf("digest named null over a row that stores Digest: %s, %v — want the config without the section", out, err)
+	}
+	if _, err := UpdateConfig("opsx", globalScope, false, false, []byte(stored), []byte(`{"v":1,"classify":{"priority":3}}`)); err == nil || !strings.Contains(err.Error(), "must name digest") {
+		t.Fatalf("digest left out: %v — want a refusal naming digest", err)
+	}
+}

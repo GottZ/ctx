@@ -108,7 +108,8 @@ func marshalConfig(v any) ([]byte, error) {
 // A partial config must still not pass as a whole one, or the silent reset of
 // issue #565 returns through the broken row: the replacement must name every
 // section the stored config names — in any spelling, since a misspelled key
-// still says which section the row meant — and, for a builtin name, every
+// still says which section the row meant; a section named null is named, it
+// resets the section — and, for a builtin name, every
 // section its shipped definition sets (shippedSections). Otherwise 422, naming
 // the broken stored config and the sections. A row that names no section, of a
 // name with no shipped definition, has nothing a partial config could drop.
@@ -127,6 +128,14 @@ func UpdateConfig(name, scope string, builtin, isDefault bool, stored, update []
 	patch, err := decodeConfigObject(update)
 	if err != nil {
 		return nil, fmt.Errorf("blocktype %q: config: %w", name, err)
+	}
+	// A section named null is named: it resets the section (PR #567 review).
+	// So the request's own keys are read before its nulls are dropped.
+	var missing []string
+	for _, key := range requiredSections(name, stored) {
+		if _, ok := patch[key]; !ok {
+			missing = append(missing, key)
+		}
 	}
 	for key, val := range patch {
 		section, isObject := val.(map[string]any)
@@ -147,12 +156,6 @@ func UpdateConfig(name, scope string, builtin, isDefault bool, stored, update []
 	}
 	if _, err := decodeEnvelope(name, whole); err != nil {
 		return nil, err
-	}
-	var missing []string
-	for _, key := range requiredSections(name, stored) {
-		if _, ok := patch[key]; !ok {
-			missing = append(missing, key)
-		}
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("blocktype %q: the stored config does not decode (%v), so an update cannot keep its "+
