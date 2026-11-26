@@ -55,6 +55,12 @@ check after a notice, the grant asked again per checkpoint, one reading of failu
   the MCP SDK Hermes ships, while ctx completes the store; two Hermes processes of one profile
   share nothing; under `plugins.isolation: host` the MCP transport does not reach ctx.
 
+## [ctx_checkpoint 0.17.1] — 2026-11-25
+
+- ctx's `409 write_conflict` (GottZ/ctx#547: the write met concurrent changes of the rows it
+  needed and wrote nothing) is retried once after one second, like a rate limit; a tool answers
+  it to the model as `retryable`. Shipped with GottZ/ctx#554; this entry was added with 0.18.0.
+
 ## [ctx_checkpoint 0.17.0] — 2026-11-24
 
 The chains of one process share one state per ctx server entry, the required facts pace against
