@@ -1524,7 +1524,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// (Steps 8-10) and return the post-rerank sources directly. Deterministic +
 	// fast so an A/B sweep can score retrieval in isolation from synthesis
 	// variance. The label is the one the synthesis gives the same sources
-	// (llm.ClassifySources: the fusion's scale, issue #528).
+	// (llm.ClassifySources on the final scores, issue #528).
 	if req.Synthesize != nil && !*req.Synthesize {
 		go h.logAccess(ar, results, query, selectorDec, accessSourceFor(armRanks))
 		slog.Info("query pipeline complete (retrieval-only)",

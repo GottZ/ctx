@@ -53,14 +53,12 @@ import (
 //     cluster stages place a block by a score relative to the list: the list
 //     stays sorted, the synthesis path's score threshold (query.score_threshold)
 //     judges the place rather than the fused score that put the block behind
-//     its siblings, and the list's highest fusion score is still there for the
-//     confidence label (llm.ClassifySources reads rrf_score_original on both
-//     paths). The floor therefore never lifts a label; a label falls only when
-//     a value that carried the list's highest score leaves the list — the
-//     result at the end of the limit, or the block's own fields when its own
-//     rrf_score_original was the highest (the gravity sorts by the boosted
-//     score, so that can happen). The block's own score stays readable in
-//     TitleFloorScore (title_floor_score on the wire, issue #528).
+//     its siblings, and the list's highest score is still there for the
+//     confidence label (llm.ClassifySources reads the scores on both paths,
+//     issue #528). The floor therefore never lifts the label and never lowers
+//     it: the first place's score stays the list's highest. The block's own
+//     score stays readable in TitleFloorScore (title_floor_score on the wire,
+//     issue #528).
 //
 // A block the candidate window (the fusion's internal limit, 200 or the
 // aggregate over-fetch) does not hold cannot be placed; the pass only reorders

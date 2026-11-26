@@ -357,34 +357,22 @@ type SynthesisResult struct {
 	SkipLLM     bool     `json:"-"`
 }
 
-// LabelScore is the score a source's confidence label is read on: the
-// fusion's, before a stage behind it rescaled it — RRFScoreOriginal where a
-// stage kept it (the temporal gravity, the cluster prior, the graph
-// reinforcement, the aggregate fold, the reranker), Score otherwise (no stage
-// changed it, or the graph or cluster stage injected the row, which then has
-// no fusion score of its own and is read at its placement score). It is the scale
-// query.confident_threshold is set on: the threshold (0.008) is older than the
-// gravity, which multiplies a dated block's score by up to 1.3 (issue #528).
-func LabelScore(src Source) float64 {
-	if src.RRFScoreOriginal != nil {
-		return *src.RRFScoreOriginal
-	}
-	return src.Score
-}
-
 // ClassifySources labels an answer from its sources: ClassifyConfidence over
-// the highest LabelScore among the sources the synthesis keeps (Score at or
-// above s.ScoreThreshold, FilterByScore). The retrieval-only path and the
-// synthesis both call it on the same source list, so one answer carries one
-// label on both paths (issue #528: they disagreed whenever the gravity lifted
-// the top score across the threshold).
+// the highest Score among the sources at or above s.ScoreThreshold — exactly
+// what FilterByScore hands the synthesis, i.e. the final score every stage
+// behind the fusion left (gravity, cluster, graph, reranker). The
+// retrieval-only path and the synthesis both call it on the same source list,
+// so one answer carries one label on both paths (issue #528: the
+// retrieval-only path read rrf_score_original and disagreed whenever a stage
+// had lifted the top score across the threshold).
+//
+// Decision taken by measurement (issue #528): the other reading, the fusion's
+// score on both paths, turned 202 synthesis labels of 1 768 restored-corpus
+// answers into low_confidence and dropped the gold block from 17 prompts of
+// questions whose top score the graph and the cluster prior had lifted; this
+// reading changes no synthesis label and no prompt.
 func ClassifySources(sources []Source, s SynthesisSettings) string {
-	maxScore := 0.0
-	for _, src := range sources {
-		if src.Score >= s.ScoreThreshold {
-			maxScore = max(maxScore, LabelScore(src))
-		}
-	}
+	_, maxScore := FilterByScore(sources, s)
 	return ClassifyConfidence(maxScore, s)
 }
 
@@ -873,8 +861,8 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 		}, nil
 	}
 
-	// Step 2: Classify confidence, on the fusion's scale (ClassifySources —
-	// the function the retrieval-only path labels with).
+	// Step 2: Classify confidence (ClassifySources — the function the
+	// retrieval-only path labels with; the same maximum FilterByScore found).
 	confidence := ClassifySources(filtered, settings)
 
 	// Step 3: Build sources metadata (without content, for the response).

@@ -3,8 +3,10 @@ package llm
 import "testing"
 
 // Issue #528, point 6: one label for one answer on both paths, read on the
-// fusion's scale — rrf_score_original where a stage behind the fusion kept it.
-func TestClassifySourcesReadsTheFusionScale(t *testing.T) {
+// final score the synthesis has always classified — the highest Score among
+// the sources at or above the score threshold. rrf_score_original (the score
+// before a stage behind the fusion rescaled it) is not read.
+func TestClassifySourcesReadsTheFinalScore(t *testing.T) {
 	s := SynthesisSettings{ScoreThreshold: 0.001, ConfidentThreshold: 0.008}
 	f := func(v float64) *float64 { return &v }
 	cases := []struct {
@@ -12,18 +14,16 @@ func TestClassifySourcesReadsTheFusionScale(t *testing.T) {
 		sources []Source
 		want    string
 	}{
-		{"gravity lifted the top across the threshold",
-			[]Source{{Score: 0.0098, RRFScoreOriginal: f(0.0075)}, {Score: 0.006}}, ConfidenceLow},
-		{"the fusion score alone carries it",
-			[]Source{{Score: 0.0050, RRFScoreOriginal: f(0.0090)}, {Score: 0.004}}, ConfidenceConfident},
-		{"no original: the score",
-			[]Source{{Score: 0.0085}, {Score: 0.002}}, ConfidenceConfident},
+		{"a stage lifted the top across the threshold",
+			[]Source{{Score: 0.0098, RRFScoreOriginal: f(0.0075)}, {Score: 0.006}}, ConfidenceConfident},
+		{"the original alone would carry it",
+			[]Source{{Score: 0.0050, RRFScoreOriginal: f(0.0090)}, {Score: 0.004}}, ConfidenceLow},
+		{"exactly at the confident threshold",
+			[]Source{{Score: 0.008}, {Score: 0.002}}, ConfidenceConfident},
 		{"a source at the score threshold is read",
-			[]Source{{Score: 0.001, RRFScoreOriginal: f(0.0090)}, {Score: 0.0009}}, ConfidenceConfident},
+			[]Source{{Score: 0.001}, {Score: 0.0009}}, ConfidenceLow},
 		{"a source below the score threshold is not read",
-			[]Source{{Score: 0.0005, RRFScoreOriginal: f(0.0090)}, {Score: 0.003}}, ConfidenceLow},
-		{"nothing at or above the score threshold",
-			[]Source{{Score: 0.0005, RRFScoreOriginal: f(0.0090)}}, ConfidenceNoRelevant},
+			[]Source{{Score: 0.0009}}, ConfidenceNoRelevant},
 		{"no sources", nil, ConfidenceNoRelevant},
 	}
 	for _, c := range cases {
@@ -31,16 +31,12 @@ func TestClassifySourcesReadsTheFusionScale(t *testing.T) {
 			if got := ClassifySources(c.sources, s); got != c.want {
 				t.Errorf("label %q, want %q", got, c.want)
 			}
+			// The synthesis' own classification of the same list, as it read
+			// before issue #528: the maximum FilterByScore finds.
+			_, max := FilterByScore(c.sources, s)
+			if got, syn := ClassifySources(c.sources, s), ClassifyConfidence(max, s); got != syn {
+				t.Errorf("label %q, the synthesis' classification %q", got, syn)
+			}
 		})
-	}
-}
-
-func TestLabelScore(t *testing.T) {
-	o := 0.004
-	if got := LabelScore(Source{Score: 0.009, RRFScoreOriginal: &o}); got != o {
-		t.Errorf("with an original: %v, want %v", got, o)
-	}
-	if got := LabelScore(Source{Score: 0.009}); got != 0.009 {
-		t.Errorf("without: %v, want 0.009", got)
 	}
 }

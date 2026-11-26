@@ -9,8 +9,7 @@
 //   - point 3: a title asked inside quotation marks is placed;
 //   - point 4: a title asked behind a leading phrase is placed, a topic
 //     question with the same start is not;
-//   - point 6: the retrieval-only path and the synthesis label one answer alike
-//     when the gravity lifted the top score across query.confident_threshold;
+//   - point 6 lives in query_label_scale_528_integration_test.go;
 //   - point 7: the placed source carries its own score in a field of its own.
 
 package handler
@@ -26,7 +25,6 @@ import (
 	"testing"
 
 	"github.com/GottZ/ctx/internal/auth"
-	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
 )
@@ -156,58 +154,6 @@ func askRaw(t *testing.T, h *QueryHandler, body map[string]any) labelResp {
 		t.Fatalf("decode: %v", err)
 	}
 	return out
-}
-
-// Point 6: when the gravity lifted the top score across the confident
-// threshold, the two paths label the answer alike — on the fusion's scale, the
-// one query.confident_threshold was set on.
-func TestQueryLabelsAgreeAfterGravity(t *testing.T) {
-	// Twelve operations logs, one per day; the one nearest the question vector
-	// is the log of the day the question asks about, so the gravity boosts the
-	// list's first.
-	e := seededEnv(t, func(put func(title, content string, cos float64) string) {
-		for j := 0; j < 12; j++ {
-			day := fmt.Sprintf("2026-08-%02d", 31-j)
-			put(fmt.Sprintf("Operations log %02d", j), "Operations log of "+day+": rotation, backups, one restart.", 0.90-0.02*float64(j))
-		}
-	})
-	const q = "Was geschah am 2026-08-31?"
-	ro := askRaw(t, e.h, map[string]any{"query": q, "limit": 10, "synthesize": false})
-	maxRaw, maxScore := 0.0, 0.0
-	for _, s := range ro.Sources {
-		raw := s.Score
-		if s.RRFScoreOriginal != nil {
-			raw = *s.RRFScoreOriginal
-		}
-		maxRaw, maxScore = max(maxRaw, raw), max(maxScore, s.Score)
-	}
-	if !(maxScore > maxRaw) {
-		t.Fatalf("precondition: the gravity lifted no score above the list's highest fusion score (score %v, fusion %v)", maxScore, maxRaw)
-	}
-	// A threshold between the two: the fusion's maximum stays below it, the
-	// boosted maximum crosses it.
-	threshold := (maxRaw + maxScore) / 2
-	h := titleFloorHandler(t, e.pool, func(c *config.Config) { c.Query.ConfidentThreshold = threshold }, 0)
-	ro2 := askRaw(t, h, map[string]any{"query": q, "limit": 10, "synthesize": false})
-	sy := askRaw(t, h, map[string]any{"query": q, "limit": 10})
-	if ro2.Confidence != sy.Confidence {
-		t.Errorf("one answer, two labels: retrieval-only %q, synthesis %q (fusion max %v, boosted max %v, threshold %v)",
-			ro2.Confidence, sy.Confidence, maxRaw, maxScore, threshold)
-	}
-	if ro2.Confidence != "low_confidence" {
-		t.Errorf("label %q, want low_confidence: the fusion's maximum %v is below the threshold %v", ro2.Confidence, maxRaw, threshold)
-	}
-	// The low_confidence prompt carries the first query.low_confidence_max_sources
-	// sources.
-	cited := 0
-	for _, s := range sy.Sources {
-		if s.CitationIndex != nil {
-			cited++
-		}
-	}
-	if cited != 2 {
-		t.Errorf("%d sources in the low_confidence prompt, want 2", cited)
-	}
 }
 
 // Point 7: the placed source carries its own score in title_floor_score; score

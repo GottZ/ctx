@@ -449,16 +449,10 @@ func applyRerankScores(results []SearchResult, rerankScores []float64, docCount 
 	for i := range reranked {
 		originalRRF := reranked[i].RRFScore
 		rrfNorm := originalRRF / maxRRF
-		// The fusion's score, unless a stage before it already kept it — the
-		// one rule of every post-fusion stage (keepFusionScore, issue #528).
-		// Exact: a copy rounded to four decimals carried a fusion score just
-		// below query.confident_threshold across it (0.00795 read as 0.0080).
-		keepFusionScore(&reranked[i])
+		originalRRFRounded := float64(int(originalRRF*10000+0.5)) / 10000
+		reranked[i].RRFScoreOriginal = &originalRRFRounded
 
-		// The callers hand in one score per reranked doc (docCount of them);
-		// the second bound states it where the index is read, which gosec's
-		// G602 asks for once this file is touched (the pre-commit lint).
-		if i < docCount && i < len(rerankScores) {
+		if i < docCount {
 			// This doc was reranked: blend the rerank score with RRF.
 			rerankNorm := rerankScores[i] / maxRerank
 			reranked[i].RRFScore = rerankWeight*rerankNorm + (1.0-rerankWeight)*rrfNorm

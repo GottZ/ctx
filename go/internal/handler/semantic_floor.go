@@ -92,11 +92,10 @@ type semanticFloorVerdict struct {
 // already inflated. Reading them as lexical evidence would let the gate be
 // talked out of a rejection by the very stages that expand a thin result set.
 //
-// The score read is the RAW fusion score (RRFScoreOriginal where a stage behind
-// the fusion recorded it, RRFScore otherwise) — the same derivation the
-// confidence label uses (llm.ClassifySources), because confidentThreshold is
-// calibrated on the RRF scale and the gravity, cluster and graph boosts and
-// the reranker all rewrite RRFScore.
+// The score read is the RAW fusion score (RRFScoreOriginal where the reranker
+// set it, RRFScore otherwise) — the same derivation the retrieval-only path
+// uses, because confidentThreshold is calibrated on the RRF scale and the
+// reranker rewrites RRFScore onto its own.
 func evalSemanticFloor(results []rrf.SearchResult, floor, confidentThreshold float64) semanticFloorVerdict {
 	v := semanticFloorVerdict{BestCos: -1}
 	if floor <= 0 || len(results) == 0 {
@@ -124,11 +123,9 @@ func evalSemanticFloor(results []rrf.SearchResult, floor, confidentThreshold flo
 }
 
 // rawRRFScore returns the fusion score on the scale query.confident_threshold
-// is calibrated for: RRFScoreOriginal is set whenever a stage behind the fusion
-// rescaled RRFScore — the gravity (Step 6a), the cluster prior, the graph
-// reinforcement, the aggregate fold, the reranker (Step 6b) — and the
-// confidence label of both paths reads it the same way (llm.LabelScore, issue
-// #528).
+// is calibrated for: RRFScoreOriginal is set precisely when the reranker
+// replaced RRFScore with its own (Step 6b), and the retrieval-only path in
+// query.go reads it the same way.
 func rawRRFScore(r *rrf.SearchResult) float64 {
 	if r.RRFScoreOriginal != nil {
 		return *r.RRFScoreOriginal
