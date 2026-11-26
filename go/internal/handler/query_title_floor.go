@@ -75,7 +75,7 @@ func floorTitleMatch(results []rrf.SearchResult, question string, skipTypes []st
 	if q == "" {
 		return results
 	}
-	match := titleNamed(results, q, typedForm(question))
+	match := titleNamed(results, q, verbatimTitle(question), typedForm(question))
 	if match < 0 {
 		match = phraseNamed(results, q, question)
 	}
@@ -102,20 +102,26 @@ func floorTitleMatch(results []rrf.SearchResult, question string, skipTypes []st
 // titleNamed is the index of the candidate whose title equals the folded
 // question q, or -1 when none does or another candidate's title contains q.
 // Of twins — several titles that fold to q — the first whose title equals the
-// question as typed (verbatim, the question's typedForm) wins: "Release notes"
-// names the block of that title, not its higher-ranked twin "Release notes?"
-// (issue #528), and so does "„Release notes“". Without such a title the
-// pipeline's rank decides.
-func titleNamed(results []rrf.SearchResult, q, verbatim string) int {
-	match, typed := -1, -1
+// question as typed (asTyped, its verbatimTitle form) wins, then the first
+// whose title equals it without an enclosing pair of marks (unquoted, its
+// typedForm): "Release notes" names the block of that title, not its
+// higher-ranked twin "Release notes?" (issue #528), so does "„Release notes“",
+// and a question equal to a title that carries the marks itself names that
+// title. Without such a title the pipeline's rank decides.
+func titleNamed(results []rrf.SearchResult, q, asTyped, unquoted string) int {
+	match, exact, bare := -1, -1, -1
 	for i := range results {
 		t := foldTitle(results[i].Title)
 		if t == q {
 			if match < 0 {
 				match = i
 			}
-			if typed < 0 && verbatimTitle(results[i].Title) == verbatim {
-				typed = i
+			v := verbatimTitle(results[i].Title)
+			if exact < 0 && v == asTyped {
+				exact = i
+			}
+			if bare < 0 && v == unquoted {
+				bare = i
 			}
 			continue
 		}
@@ -123,8 +129,11 @@ func titleNamed(results []rrf.SearchResult, q, verbatim string) int {
 			return -1
 		}
 	}
-	if typed >= 0 {
-		return typed
+	switch {
+	case exact >= 0:
+		return exact
+	case bare >= 0:
+		return bare
 	}
 	return match
 }
@@ -178,9 +187,9 @@ func phraseNamed(results []rrf.SearchResult, q, question string) int {
 }
 
 // typedRest is the question as typed (typedForm) behind the leading phrase p,
-// which matched the folded question: the phrase is cut off rune by rune with
-// typographic apostrophes read as ASCII, so "What’s in „Notes v1?“" keeps
-// "notes v1?". ok is false when the typed question does not start with the
+// which matched the folded question: the phrase is cut off rune by rune, each
+// rune read the way foldTitle reads it (compatibility form, typographic
+// apostrophes as ASCII), so "What’s in „Notes v1?“" keeps "notes v1?". ok is false when the typed question does not start with the
 // phrase in that reading (a compatibility form the fold alone resolves).
 func typedRest(question, p string) (string, bool) {
 	v := []rune(verbatimTitle(question))
@@ -189,7 +198,7 @@ func typedRest(question, p string) (string, bool) {
 		return "", false
 	}
 	for i, r := range pr {
-		if []rune(typographicQuotes.Replace(string(v[i])))[0] != r {
+		if m := []rune(typographicQuotes.Replace(norm.NFKC.String(string(v[i])))); len(m) != 1 || m[0] != r {
 			return "", false
 		}
 	}
@@ -257,13 +266,24 @@ const titleQuoteMarks = "\"'`"
 // "Notes v1".
 func typedForm(s string) string {
 	v := verbatimTitle(s)
-	r := []rune(strings.TrimRight(v, titleCloseCutset))
+	r := []rune(v)
+	for len(r) > 0 && closingRune(r[len(r)-1]) {
+		r = r[:len(r)-1]
+	}
 	if len(r) >= 2 {
 		if m := quoteMark(r[0]); m != 0 && m == quoteMark(r[len(r)-1]) {
 			return strings.TrimSpace(string(r[1 : len(r)-1]))
 		}
 	}
 	return v
+}
+
+// closingRune reports whether foldTitle drops r at the end of a title or
+// question: its compatibility form is closing punctuation or space
+// (titleCloseCutset; "…" and the full-width "？" included).
+func closingRune(r rune) bool {
+	m := norm.NFKC.String(string(r))
+	return m != "" && strings.Trim(m, titleCloseCutset) == ""
 }
 
 // quoteMark is the ASCII mark of titleQuoteMarks that foldTitle reads r as,

@@ -278,9 +278,18 @@ func applyParentFold(results []rrf.SearchResult, folds map[string]childFold, hyd
 		if !ok || cf.parentID == "" || !cf.visible || cf.excluded {
 			continue
 		}
-		if cur, seen := parentBest[cf.parentID]; !seen || r.RRFScore > cur.score {
-			parentBest[cf.parentID] = childHit{score: r.RRFScore, orig: r.RRFScoreOriginal, id: r.ID, content: r.Content}
+		cur, seen := parentBest[cf.parentID]
+		// The fusion's scale runs over every foldable child, not only the one
+		// the boosted score names (foldedFusionScore, issue #528).
+		fusion, staged := rawRRFScore(&r), r.RRFScoreOriginal != nil
+		if seen {
+			fusion, staged = max(fusion, cur.fusion), staged || cur.staged
 		}
+		if !seen || r.RRFScore > cur.score {
+			cur = childHit{score: r.RRFScore, id: r.ID, content: r.Content}
+		}
+		cur.fusion, cur.staged = fusion, staged
+		parentBest[cf.parentID] = cur
 	}
 
 	out = make([]rrf.SearchResult, 0, len(results))
@@ -330,26 +339,29 @@ func applyParentFold(results []rrf.SearchResult, folds map[string]childFold, hyd
 // feeds the K13 max merge, its id+content feed the matched_comment annotation.
 type childHit struct {
 	score   float64
-	orig    *float64 // the child's RRFScoreOriginal (foldedFusionScore)
 	id      string
 	content string
+	// fusion is the highest fusion score (rawRRFScore) over all foldable
+	// children of the parent, staged whether any of them carried
+	// RRFScoreOriginal (foldedFusionScore).
+	fusion float64
+	staged bool
 }
 
 // foldedFusionScore is a parent's RRFScoreOriginal after the fold: K13 —
-// max(parent, child), no bonus — on the fusion's scale as well (rawRRFScore),
-// the scale the confidence label reads (llm.ClassifySources, issue #528). A
-// hydrated parent has no score of its own and takes the child's. Unset when
-// neither carries the field: no stage rescaled either score, so RRFScore is
-// already the fusion's maximum.
+// max(parent, children), no bonus — on the fusion's scale as well
+// (rawRRFScore), the scale the confidence label reads (llm.ClassifySources,
+// issue #528): the highest fusion score over the parent and all its foldable
+// children, which is what the fold would give on the fusion's output — the
+// child the boosted score names need not be the one with the highest fusion
+// score. A hydrated parent has no score of its own. Unset when neither the
+// parent nor a child carries the field: no stage rescaled any of the scores,
+// so RRFScore is already the fusion's maximum.
 func foldedFusionScore(parent rrf.SearchResult, child childHit) *float64 {
-	if parent.RRFScoreOriginal == nil && child.orig == nil {
+	if parent.RRFScoreOriginal == nil && !child.staged {
 		return nil
 	}
-	childFusion := child.score
-	if child.orig != nil {
-		childFusion = *child.orig
-	}
-	s := max(rawRRFScore(&parent), childFusion)
+	s := max(rawRRFScore(&parent), child.fusion)
 	return &s
 }
 

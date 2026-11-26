@@ -229,6 +229,27 @@ func TestFloorTitleMatchTwinsQuotedOrBehindAPhrase(t *testing.T) {
 			}
 		})
 	}
+	// A title that itself carries the pair of marks is named by the question
+	// that equals it byte for byte, not by its twin without the marks (review
+	// round 1, F4): the question as typed comes before its form without the
+	// pair.
+	for _, c := range []struct{ name, higher, lower string }{
+		{"the title in marks ranked lower", "Notes v1?", "\"Notes v1?\""},
+		{"the title in marks ranked higher", "\"Notes v1?\"", "Notes v1?"},
+	} {
+		out := floorTitleMatch(list(c.higher, c.lower), "\"Notes v1?\"", nil)
+		if out[0].Title != "\"Notes v1?\"" {
+			t.Errorf("%s: question equal to the title in marks: first %q, want that title", c.name, out[0].Title)
+		}
+	}
+	// Closing punctuation behind the pair in a compatibility form (an ellipsis
+	// character, a full-width question mark) and a full-width apostrophe in the
+	// phrase read like their plain forms (review round 1, F5 and F6).
+	for _, q := range []string{"„Notes v1?“\u2026", "„Notes v1?“\uff1f", "What\uff07s in Notes v1?"} {
+		if out := floorTitleMatch(list("Notes v1", "Notes v1?"), q, nil); out[0].Title != "Notes v1?" {
+			t.Errorf("%q: first %q, want Notes v1?", q, out[0].Title)
+		}
+	}
 	// Twins behind a phrase that neither equals as typed name nothing — the
 	// rule of exactly one candidate holds.
 	in := list("Notes v1?", "Notes v1.")
