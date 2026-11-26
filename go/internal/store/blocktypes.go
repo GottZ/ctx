@@ -50,6 +50,10 @@ var (
 	// ErrBlockTypeBuiltin — delete guard: builtin rows are undeletable, always
 	// (§5.1(c); their CONFIG is editable, that is the point of the registry).
 	ErrBlockTypeBuiltin = errors.New("builtin block types cannot be deleted")
+	// ErrBlockTypeConfigChanged — an update whose config was merged over the
+	// row's stored config (BlockTypeUpdate.ExpectConfig) met another config:
+	// a concurrent write changed the row after the merge read it (409).
+	ErrBlockTypeConfigChanged = errors.New("block type config changed while this update was applied — read the type again and resend")
 )
 
 // BlockTypeInUseError — delete guard: blocks still reference the type. The
@@ -231,6 +235,14 @@ type BlockTypeUpdate struct {
 	DisplayName *string
 	Description *string
 	Config      json.RawMessage // nil = keep
+	// ExpectConfig is the stored config Config was computed from (issue #565:
+	// the handlers merge the request's config over it). The update writes only
+	// while the row still holds it — compared as jsonb in the UPDATE's own
+	// WHERE, which READ COMMITTED re-checks against the newest row version
+	// after a lock wait — and answers ErrBlockTypeConfigChanged otherwise, so
+	// two merges of one row never lose one another's fields. nil = no
+	// precondition.
+	ExpectConfig json.RawMessage
 }
 
 // UpdateBlockType patches one row by id inside an attributed transaction.
@@ -265,15 +277,33 @@ func UpdateBlockType(ctx context.Context, pool *pgxpool.Pool, id string, scopes 
 			args = append(args, id)
 			idIdx := idx
 			args = append(args, scopes)
+			expect := ""
+			if in.ExpectConfig != nil {
+				expect = fmt.Sprintf(" AND config = $%d::jsonb", idIdx+2)
+				args = append(args, string(in.ExpectConfig))
+			}
 
 			var err error
 			bt, err = scanBlockType(tx.QueryRow(ctx, fmt.Sprintf(
 				`UPDATE context_block_types SET %s
-				  WHERE id = $%d::uuid AND scope = ANY($%d::text[])
+				  WHERE id = $%d::uuid AND scope = ANY($%d::text[])%s
 				  RETURNING `+blockTypeCols,
-				strings.Join(set, ", "), idIdx, idIdx+1), args...))
+				strings.Join(set, ", "), idIdx, idIdx+1, expect), args...))
 			if err != nil {
 				return err
+			}
+			if bt == nil && in.ExpectConfig != nil {
+				// The row is there but holds another config: changed since the
+				// merge read it. A row that is gone stays a 404.
+				var exists bool
+				if err := tx.QueryRow(ctx,
+					`SELECT EXISTS (SELECT 1 FROM context_block_types WHERE id = $1::uuid AND scope = ANY($2::text[]))`,
+					id, scopes).Scan(&exists); err != nil {
+					return fmt.Errorf("store: update block type recheck: %w", err)
+				}
+				if exists {
+					return ErrBlockTypeConfigChanged
+				}
 			}
 			if bt == nil {
 				return pgxdb.ErrRollback // not found — no audit row, rollback is a no-op

@@ -226,15 +226,28 @@ func TestWriteInternalOnly(t *testing.T) {
 			ReadScopes: []string{store.GlobalScope}, TenantID: "_server", TenantRole: auth.RoleMember,
 		}
 		for _, name := range []string{derived.TypeInsight, derived.TypeCatalog} {
-			rec := typesWriteReq(t, pool, serverAdmin, http.MethodPut, "/api/types/"+name, `{"config":{"v":1}}`)
-			if rec.Code != http.StatusUnprocessableEntity {
-				t.Errorf("%s: PUT {\"v\":1} status = %d, want 422 (body %s) — RED: 200, and the row "+
-					"is full-pass + guard-checked + dream-linkable + trusted afterwards",
+			// Since issue #565 an update lays its config over the stored one, so
+			// the all-defaults body {"v":1} changes nothing (200, row as it was);
+			// the zero-value write this gate exists for is the body that drops the
+			// write section — named null, or false.
+			before := t565Stored(t, pool, name, store.GlobalScope)
+			if rec := typesWriteReq(t, pool, serverAdmin, http.MethodPut, "/api/types/"+name, `{"config":{"v":1}}`); rec.Code != http.StatusOK {
+				t.Errorf("%s: PUT {\"v\":1} status = %d, want 200 (an update that names nothing changes nothing; body %s)",
 					name, rec.Code, rec.Body.String())
-				continue
 			}
-			if !strings.Contains(rec.Body.String(), "write.internal_only") {
-				t.Errorf("%s: refused for an unrelated reason: %s", name, rec.Body.String())
+			if after := t565Stored(t, pool, name, store.GlobalScope); !jsonEqual(after, before) {
+				t.Errorf("%s: PUT {\"v\":1} changed the row: %s, was %s", name, after, before)
+			}
+			for _, drop := range []string{`{"config":{"v":1,"write":null}}`, `{"config":{"v":1,"write":{"internal_only":false}}}`} {
+				rec := typesWriteReq(t, pool, serverAdmin, http.MethodPut, "/api/types/"+name, drop)
+				if rec.Code != http.StatusUnprocessableEntity {
+					t.Errorf("%s: PUT %s status = %d, want 422 (body %s) — RED: 200, and the row "+
+						"is claimable afterwards", name, drop, rec.Code, rec.Body.String())
+					continue
+				}
+				if !strings.Contains(rec.Body.String(), "write.internal_only") {
+					t.Errorf("%s: refused for an unrelated reason: %s", name, rec.Body.String())
+				}
 			}
 			// The row must be UNCHANGED, not merely un-answered.
 			var hasWrite bool

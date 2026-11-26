@@ -123,6 +123,24 @@ func ClassifyBlockAfterUpsert(ctx context.Context, pool *pgxpool.Pool, set *bloc
 	return name, nil
 }
 
+// ClassifyWrittenBlock is ClassifyBlockAfterUpsert on the block a write
+// returned, for the write paths whose answer carries that block: a verdict the
+// hook wrote is set on b.TypeName as well, so the answer names the type the
+// row was filed as, not the one the write left before the hook ran (issue
+// #565: POST /api/store answered "knowledge" for a block stored as
+// audit-trail). The hook's UPDATE writes type_name and nothing else, and only
+// while the row still holds b's title and classify inputs (point 4 above), so
+// the verdict it reports is exactly what the row holds after b's write; an
+// unapplied verdict ("" — no rule, manual type, inputs replaced by a later
+// write) leaves b as the write returned it.
+func ClassifyWrittenBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, b *Block) error {
+	name, err := ClassifyBlockAfterUpsert(ctx, pool, set, b.ID, b.Title, b.Metadata)
+	if name != "" {
+		b.TypeName = name
+	}
+	return err
+}
+
 // classifyUpdateSQL writes the verdict $1 on block $2 while it is an auto
 // block that holds the inputs $4 (classifyInputs) under the flag keys $3.
 const classifyUpdateSQL = `UPDATE context_blocks SET type_name = $1

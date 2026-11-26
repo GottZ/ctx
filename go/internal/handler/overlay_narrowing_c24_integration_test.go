@@ -375,22 +375,37 @@ func TestC24OverlayWriteGate(t *testing.T) {
 		}
 	})
 
-	t.Run("B_partial_config_takes_the_wide_defaults_and_is_refused", func(t *testing.T) {
+	t.Run("B_partial_config_keeps_the_tight_overlay_and_a_named_widening_is_refused", func(t *testing.T) {
 		// The practically most common shape: an operator sends only the section
-		// they mean to change. DecodePolicy fills every ABSENT section with its
-		// WIDE default (policy.go:377-383), so such a body is a full widening of
-		// a tight base — and the gate has to see it as one. This is a property
-		// of the existing config semantics (the read-side merge replaces a
-		// policy wholesale too, registry.go:262-267), not of the gate.
+		// they mean to change. Until issue #565 the handlers wrote such a body
+		// as the whole config, DecodePolicy filled every ABSENT section with its
+		// WIDE default, and the gate refused it as a full widening (measured on
+		// 184c0012: 422 guard.check). An update now lays the body over the
+		// row's stored config, so the sections it leaves out keep the tight
+		// posture and the gate judges the merged policy: admitted, and the
+		// overlay still narrow on every axis.
 		rec := c24TypesReq(t, pool, reg, tenantAdmin, http.MethodPut, "/api/types/zzc24derived",
 			`{"config":{"v":1,"classify":{"priority":7}}}`)
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("partial overlay config over a tight base: status = %d, want 422 (body %s)",
+		if rec.Code != http.StatusOK {
+			t.Fatalf("partial overlay config over its own tight row: status = %d, want 200 (body %s)",
 				rec.Code, rec.Body.String())
 		}
 		p, ok := c24Policy(t, pool, "zzc24derived", c24Tenant)
-		if !ok || p.Classify.Priority == 7 {
-			t.Fatalf("the partial write persisted anyway: %+v (present %v)", p.Classify, ok)
+		if !ok || p.Classify.Priority != 7 || p.Retrieval.Kind != blocktype.RetrievalExcluded || !p.Retrieval.Untrusted ||
+			p.Guard.Check || p.Guard.Candidate || p.Dream.Linkable || p.Digest.Include || p.Overview.Include {
+			t.Fatalf("after the partial write: classify %+v retrieval %+v guard %+v dream %v digest %v overview %v (present %v) — want priority 7 and the tight posture kept",
+				p.Classify, p.Retrieval, p.Guard, p.Dream.Linkable, p.Digest.Include, p.Overview.Include, ok)
+		}
+		// A partial body that NAMES a widening is judged on the merged policy
+		// and refused as before.
+		rec = c24TypesReq(t, pool, reg, tenantAdmin, http.MethodPut, "/api/types/zzc24derived",
+			`{"config":{"v":1,"guard":{"check":true}}}`)
+		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "guard.check") {
+			t.Fatalf("partial body naming guard.check=true: status = %d, want 422 naming guard.check (body %s)",
+				rec.Code, rec.Body.String())
+		}
+		if p, _ := c24Policy(t, pool, "zzc24derived", c24Tenant); p.Guard.Check {
+			t.Fatal("the refused widening persisted anyway")
 		}
 	})
 

@@ -198,6 +198,11 @@ func overlayWriteViolation(ctx context.Context, pool *pgxpool.Pool, name, scope 
 // remaining axes of a zero-value body stay reachable for a server-admin on a
 // '_global' row; that is the general narrowing doctrine, which overlay_
 // narrowing.go names as D-01's decision rather than this wave's.
+//
+// SINCE ISSUE #565 an update is laid over the row's stored config, so the
+// `{"v":1}` body above changes nothing on an existing row. The clause still
+// refuses a create of the name (the B15 state below) and an update that names
+// the write section false or null.
 func internalOnlyWriteViolation(name string, overlay blocktype.Policy) string {
 	floor, ok := blocktype.BuiltinPolicy(name)
 	if !ok || !floor.Write.InternalOnly || overlay.Write.InternalOnly {
@@ -253,6 +258,25 @@ func overlayBasePolicy(ctx context.Context, pool *pgxpool.Pool, name string) (bl
 		return blocktype.Policy{}, false, err
 	}
 	return p, true, nil
+}
+
+// mergedTypeConfig is the config a type UPDATE writes, on both transports
+// (manage type-update and PUT /api/types on an existing row): the request's
+// config laid over the row's stored config (blocktype.MergeConfig, issue #565
+// — a field the request leaves out keeps its stored value, null resets it),
+// decoded against the ROW's identity (name/scope/builtin/is_default feed the
+// cross-field rules). The error is the 422 text: a request part that fails the
+// envelope checks, or a merged config that fails DecodePolicy.
+func mergedTypeConfig(cur *store.BlockTypeRow, config json.RawMessage) (json.RawMessage, blocktype.Policy, error) {
+	merged, err := blocktype.MergeConfig(cur.Name, cur.Config, config)
+	if err != nil {
+		return nil, blocktype.Policy{}, err
+	}
+	pol, err := blocktype.DecodePolicy(cur.Name, cur.Scope, cur.Builtin, cur.IsDefault, merged)
+	if err != nil {
+		return nil, blocktype.Policy{}, err
+	}
+	return merged, pol, nil
 }
 
 // HandlePut implements PUT /api/types/{name} — an upsert. The row is resolved
@@ -364,9 +388,9 @@ func (h *TypesHandler) putUpdate(w http.ResponseWriter, r *http.Request, ar *aut
 	}
 	upd := store.BlockTypeUpdate{DisplayName: p.DisplayName, Description: p.Description}
 	if len(p.Config) > 0 {
-		// Config validates against the ROW's identity (name/scope/builtin/
-		// is_default feed the cross-field rules) — same as manage type-update.
-		pol, err := blocktype.DecodePolicy(cur.Name, cur.Scope, cur.Builtin, cur.IsDefault, p.Config)
+		// The request's config over the row's stored one (#565), validated
+		// against the ROW's identity — same as manage type-update.
+		merged, pol, err := mergedTypeConfig(cur, p.Config)
 		if err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
 			return
@@ -380,7 +404,8 @@ func (h *TypesHandler) putUpdate(w http.ResponseWriter, r *http.Request, ar *aut
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
 			return
 		}
-		upd.Config = p.Config
+		upd.Config = merged
+		upd.ExpectConfig = cur.Config // written only over the config it was merged with
 	}
 	bt, err := store.UpdateBlockType(ctx, h.pool, cur.ID, typeVisibleScopes(ar), upd, &ar.ApiKeyID, reqID)
 	if err != nil {

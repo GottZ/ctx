@@ -233,8 +233,9 @@ func (h *StoreHandler) HandleStore(w http.ResponseWriter, r *http.Request) {
 	// The post-upsert classification reuses this request's set: one rule generation per request.
 	// The block is committed: a client that leaves now must not leave it
 	// unclassified (issue #453), so the classification runs detached.
+	// The answer below names the type the hook filed the block as (#565).
 	fctx, cancel := followUpContext(ctx)
-	if _, err := store.ClassifyBlockAfterUpsert(fctx, h.pool, classifySet, block.ID, block.Title, block.Metadata); err != nil {
+	if err := store.ClassifyWrittenBlock(fctx, h.pool, classifySet, block); err != nil {
 		slog.Warn("store: auto-classify failed", "error", err, "block_id", block.ID, "request_id", reqID)
 	}
 	cancel()

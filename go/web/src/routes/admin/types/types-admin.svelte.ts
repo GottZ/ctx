@@ -5,11 +5,13 @@
 //
 // Declarative field set (the Settings widgetFor precedent, settings.ts:16): the
 // policy fields of BlockTypeConfig are a CLOSED set → one descriptor per field,
-// so the form is generated, never hand-wired per key. The write path REPLACES
-// the whole config envelope server-side (types_write.go putUpdate: config is set
-// wholesale, not merged), so toWriteSpec merges the edited scalars back onto the
-// ORIGINAL config — a field this UI does not expose (classify.*, intent_patterns,
-// link_classes …) is preserved, never silently dropped on an edit.
+// so the form is generated, never hand-wired per key. toWriteSpec merges the
+// edited scalars back onto the ORIGINAL config and sends the whole envelope — a
+// field this UI does not expose (classify.*, intent_patterns, link_classes …) is
+// preserved, never silently dropped on an edit. Since issue #565 the server lays
+// an update's config over the stored one (types_write.go putUpdate,
+// blocktype.MergeConfig); a whole envelope writes exactly itself under that
+// rule and under the replace of the servers before it.
 
 import { ApiError } from '../../../lib/api'
 import type { BlockTypeConfig, BlockTypeView, BlockTypeWriteSpec } from '../../../lib/api/types'

@@ -78,12 +78,14 @@ import (
 // and classify.* carry no clause of either finding. They stay freely
 // overlayable, which is what keeps a legitimate per-tenant type usable.
 //
-// ONE CONSEQUENCE WORTH KNOWING. A config is a COMPLETE policy, not a patch:
-// DecodePolicy default-fills every absent section with its WIDE value
-// (policy.go:377-383). An overlay body that omits a section therefore requests
-// the wide default for it and is refused over a tight base. That is the
-// existing config semantics — the read-side merge replaces a policy wholesale
-// too — not an extra rule of this gate.
+// ONE CONSEQUENCE WORTH KNOWING. The gate judges the whole policy a write
+// leaves, and DecodePolicy default-fills every absent section with its WIDE
+// value. A CREATE body is that whole policy: one that omits a section requests
+// the wide default for it and is refused over a tight base. An UPDATE body is
+// laid over the row's stored config first (MergeConfig, issue #565), so a
+// section it omits keeps the overlay's stored value and only what it names can
+// widen. The read-side merge still replaces a policy wholesale — that is not a
+// rule of this gate either.
 
 // BuiltinPolicy returns a copy of the compiled-in floor policy of name.
 //

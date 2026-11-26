@@ -396,9 +396,11 @@ func builtinPolicies() []Policy {
 		// guard.candidate=false and retrieval-eligible once E-4 flips them to
 		// damped, so a client that could name them would own a corpus channel
 		// that never enters the dedup queue and never gets archived as a
-		// near-duplicate. The field additionally gives DecodePolicy a floor to
-		// refuse against, which is what stops a `{"v":1}` PUT on these two rows
-		// from resetting the whole posture above to its wide defaults.
+		// near-duplicate. The field additionally gives the type write gate a
+		// floor to refuse against: a write that drops it — before issue #565 the
+		// `{"v":1}` PUT that reset the whole posture above to its wide defaults;
+		// since updates merge, a create of the name or an update naming the
+		// write section false or null — is refused.
 		//
 		// The rest of the posture is shared and total: guard.check=false AND
 		// guard.candidate=false (a derivative must neither archive its ORIGINAL

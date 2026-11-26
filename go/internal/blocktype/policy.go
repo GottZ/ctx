@@ -410,23 +410,9 @@ func DecodePolicy(name, scope string, builtin, isDefault bool, rawConfig []byte)
 	if !nameFormat.MatchString(name) {
 		return p, fmt.Errorf("blocktype %q: name violates format ^[a-z0-9][a-z0-9-]{0,49}$", name)
 	}
-	if len(rawConfig) > maxConfigBytes {
-		return p, fmt.Errorf("blocktype %q: config exceeds %d bytes (%d)", name, maxConfigBytes, len(rawConfig))
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(rawConfig))
-	dec.DisallowUnknownFields()
-	var env cfgEnvelope
-	if err := dec.Decode(&env); err != nil {
-		return p, fmt.Errorf("blocktype %q: config: %w", name, err)
-	}
-	// The decoder matches keys without regard to case and merges a repeated
-	// key; the database's jsonb operators do neither (policy_keys.go).
-	if err := checkConfigKeys(rawConfig); err != nil {
-		return p, fmt.Errorf("blocktype %q: config: %w", name, err)
-	}
-	if env.V == nil || *env.V != 1 {
-		return p, fmt.Errorf("blocktype %q: config: unsupported or missing envelope version (want v=1)", name)
+	env, err := decodeEnvelope(name, rawConfig)
+	if err != nil {
+		return p, err
 	}
 
 	p = Policy{
@@ -450,6 +436,33 @@ func DecodePolicy(name, scope string, builtin, isDefault bool, rawConfig []byte)
 		return p, err
 	}
 	return p, nil
+}
+
+// decodeEnvelope is the envelope half of DecodePolicy: the size cap, the
+// strict decode (unknown keys at every level), the key spelling and
+// repetition check and the envelope version — everything a config is checked
+// for before defaults fill it and the cross-field rules read it. MergeConfig
+// runs it on the request's part of an update, which the cross-field rules
+// cannot judge alone (a damped policy whose factor the stored config holds).
+func decodeEnvelope(name string, rawConfig []byte) (cfgEnvelope, error) {
+	var env cfgEnvelope
+	if len(rawConfig) > maxConfigBytes {
+		return env, fmt.Errorf("blocktype %q: config exceeds %d bytes (%d)", name, maxConfigBytes, len(rawConfig))
+	}
+	dec := json.NewDecoder(bytes.NewReader(rawConfig))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&env); err != nil {
+		return env, fmt.Errorf("blocktype %q: config: %w", name, err)
+	}
+	// The decoder matches keys without regard to case and merges a repeated
+	// key; the database's jsonb operators do neither (policy_keys.go).
+	if err := checkConfigKeys(rawConfig); err != nil {
+		return env, fmt.Errorf("blocktype %q: config: %w", name, err)
+	}
+	if env.V == nil || *env.V != 1 {
+		return env, fmt.Errorf("blocktype %q: config: unsupported or missing envelope version (want v=1)", name)
+	}
+	return env, nil
 }
 
 // applyEnvelope overlays the present envelope fields onto the default-filled
