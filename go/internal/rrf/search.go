@@ -82,6 +82,14 @@ type SearchResult struct {
 	// a child kept raw), so omitempty keeps every non-fold wire shape byte-
 	// identical. Never serialized as the child itself (the child folded away).
 	MatchedComment *MatchedComment `json:"matched_comment,omitempty"`
+
+	// TitleFloorScore is the title floor's provenance (the query handler's
+	// Step 6d-title, issue #528): the score the block carried at the place the
+	// pipeline gave it, set only on the block the floor moved to the first
+	// place, which takes the score fields of that place. Nil and omitted for
+	// every other result, so the wire is byte-identical where the floor placed
+	// nothing.
+	TitleFloorScore *float64 `json:"title_floor_score,omitempty"`
 }
 
 // MatchedComment is the fold attribution attached to a folded parent issue

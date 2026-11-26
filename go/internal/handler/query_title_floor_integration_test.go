@@ -39,6 +39,7 @@ import (
 	"github.com/GottZ/ctx/internal/config"
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const titleFloorScope = "tf507"
@@ -54,6 +55,7 @@ func titleFloorVec(cos float64, k int) []float32 {
 
 type titleFloorEnv struct {
 	h      *QueryHandler
+	pool   *pgxpool.Pool
 	ids    map[string]string // title -> id
 	target string
 	twins  []string // two blocks whose titles fold to the same form
@@ -71,7 +73,7 @@ func titleFloorSetupWith(t *testing.T, mod func(*config.Config), synthCtx int) *
 	t.Helper()
 	pool := testdb.SetupTestDB(t)
 	ctx := context.Background()
-	env := &titleFloorEnv{ids: map[string]string{}}
+	env := &titleFloorEnv{ids: map[string]string{}, pool: pool}
 	k := 0
 	putIn := func(category, title, content string, cos float64) {
 		t.Helper()
@@ -136,6 +138,16 @@ func titleFloorSetupWith(t *testing.T, mod func(*config.Config), synthCtx int) *
 	putIn("decisions", "Build log batch 2026-08", "Summary, second copy.", 0.02)
 	env.twins = []string{env.ids["learnings/Build log batch 2026-08"], env.ids["decisions/Build log batch 2026-08"]}
 
+	env.h = titleFloorHandler(t, pool, mod, synthCtx)
+	return env
+}
+
+// titleFloorHandler is the query handler of the title-floor corpora: a stub
+// embed backend that hands every question the same vector and a stub synthesis
+// backend, with the default query configuration (translation off, UTC) that mod
+// may adjust; synthCtx is the synthesis backend's context window (0: 8192).
+func titleFloorHandler(t *testing.T, pool *pgxpool.Pool, mod func(*config.Config), synthCtx int) *QueryHandler {
+	t.Helper()
 	// The stub: one vector, axis 0, for every question; a fixed answer for
 	// the synthesis.
 	qvec := make([]float64, 1024)
@@ -173,8 +185,7 @@ func titleFloorSetupWith(t *testing.T, mod func(*config.Config), synthCtx int) *
 	if mod != nil {
 		mod(cfg)
 	}
-	env.h = NewQueryHandler(pool, config.NewStore(cfg), bpool, nil, blocktype.NewRegistry(), snapshotTestAdmitter(t))
-	return env
+	return NewQueryHandler(pool, config.NewStore(cfg), bpool, nil, blocktype.NewRegistry(), snapshotTestAdmitter(t))
 }
 
 type titleFloorResp struct {

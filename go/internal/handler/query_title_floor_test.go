@@ -166,6 +166,187 @@ func TestFloorTitleMatchTwinsPlaceTheHigherOne(t *testing.T) {
 	}
 }
 
+// Twins that fold to the same form (issue #528, point 2): the candidate whose
+// title equals the question before folding — case and white space aside — is
+// the named block, whatever the rank of its twin; the rank decides only when
+// the question equals none of them that way.
+func TestFloorTitleMatchTwinsPreferTheUnfoldedTitle(t *testing.T) {
+	filler := []string{"a", "c", "e", "f", "g", "h", "i", "j", "k", "l"}
+	list := func(higher, lower string) []rrf.SearchResult {
+		titles := append([]string{filler[0], higher}, filler[1:]...)
+		return titleFloorList(append(titles, lower)...)
+	}
+	cases := []struct {
+		name, higher, lower, q, want string
+	}{
+		{"closing mark on the higher twin", "Release notes?", "Release notes", "Release notes", "b11"},
+		{"the question names the twin with the mark", "Release notes?", "Release notes", "Release notes?", "b01"},
+		{"full-width form", "Ｒelease notes", "Release notes", "Release notes", "b11"},
+		{"superscript digit", "Plan v²", "Plan v2", "Plan v2", "b11"},
+		{"typographic apostrophe", "Orbit’s report", "Orbit's report", "Orbit's report", "b11"},
+		{"case and white space aside", "Release notes?", "Release notes", "  release   NOTES ", "b11"},
+		{"canonically equivalent spelling", "Übergabe 2026-08-31?", "U\u0308bergabe 2026-08-31", "Übergabe 2026-08-31", "b11"},
+		{"neither twin equals the question unfolded: the rank decides", "Release notes?", "Release notes.", "Release notes!", "b01"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := floorTitleMatch(list(c.higher, c.lower), c.q, nil)
+			if out[0].ID != c.want {
+				t.Errorf("first = %s (%q), want %s", out[0].ID, out[0].Title, c.want)
+			}
+		})
+	}
+}
+
+// Issue #528, review round 1 (L1): a twin asked inside quotation marks or
+// behind a leading phrase is told apart like the bare question — the
+// comparison as typed runs on the question without its pair of marks (and the
+// closing punctuation behind it) and without its phrase.
+func TestFloorTitleMatchTwinsQuotedOrBehindAPhrase(t *testing.T) {
+	filler := []string{"a", "c", "e", "f", "g", "h", "i", "j", "k", "l"}
+	list := func(higher, lower string) []rrf.SearchResult {
+		titles := append([]string{filler[0], higher}, filler[1:]...)
+		return titleFloorList(append(titles, lower)...)
+	}
+	cases := []struct {
+		name, higher, lower, q, want string
+	}{
+		{"low quote pair around the lower twin", "Notes v1", "Notes v1?", "„Notes v1?“", "b11"},
+		{"ASCII pair around the lower twin", "Notes v1", "Notes v1?", "\"Notes v1?\"", "b11"},
+		{"pair, then the question's own mark", "Notes v1?", "Notes v1", "„Notes v1“?", "b11"},
+		{"single marks", "Notes v1", "Notes v1?", "'Notes v1?'", "b11"},
+		{"full-width marks", "Notes v1", "Notes v1?", "\uff02Notes v1?\uff02", "b11"},
+		{"pair around the higher twin", "Notes v1?", "Notes v1", "„Notes v1?“", "b01"},
+		{"phrase before the lower twin", "Notes v1", "Notes v1?", "zeig mir Notes v1?", "b11"},
+		{"phrase and pair", "Notes v1", "Notes v1?", "Was steht in „Notes v1?“", "b11"},
+		{"typographic apostrophe in the phrase", "Notes v1", "Notes v1?", "What’s in Notes v1?", "b11"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := floorTitleMatch(list(c.higher, c.lower), c.q, nil)
+			if out[0].ID != c.want {
+				t.Errorf("%q: first = %s (%q), want %s", c.q, out[0].ID, out[0].Title, c.want)
+			}
+		})
+	}
+	// A title that itself carries the pair of marks is named by the question
+	// that equals it byte for byte, not by its twin without the marks (review
+	// round 1, F4): the question as typed comes before its form without the
+	// pair.
+	for _, c := range []struct{ name, higher, lower string }{
+		{"the title in marks ranked lower", "Notes v1?", "\"Notes v1?\""},
+		{"the title in marks ranked higher", "\"Notes v1?\"", "Notes v1?"},
+	} {
+		out := floorTitleMatch(list(c.higher, c.lower), "\"Notes v1?\"", nil)
+		if out[0].Title != "\"Notes v1?\"" {
+			t.Errorf("%s: question equal to the title in marks: first %q, want that title", c.name, out[0].Title)
+		}
+	}
+	// Closing punctuation behind the pair in a compatibility form (an ellipsis
+	// character, a full-width question mark) and a full-width apostrophe in the
+	// phrase read like their plain forms (review round 1, F5 and F6).
+	for _, q := range []string{"„Notes v1?“\u2026", "„Notes v1?“\uff1f", "What\uff07s in Notes v1?"} {
+		if out := floorTitleMatch(list("Notes v1", "Notes v1?"), q, nil); out[0].Title != "Notes v1?" {
+			t.Errorf("%q: first %q, want Notes v1?", q, out[0].Title)
+		}
+	}
+	// Twins behind a phrase that neither equals as typed name nothing — the
+	// rule of exactly one candidate holds.
+	in := list("Notes v1?", "Notes v1.")
+	if out := floorTitleMatch(in, "zeig mir Notes v1!", nil); titleFloorIDs(out) != titleFloorIDs(in) {
+		t.Errorf("phrase before neither twin as typed: order %s, want it unchanged", titleFloorIDs(out))
+	}
+}
+
+// A title asked inside one pair of quotation marks names the block (issue
+// #528, point 3); a question that contains a quotation is no title.
+func TestFloorTitleMatchQuotedTitle(t *testing.T) {
+	for _, q := range []string{
+		"„Orbit nightly report 2026-08-13“",
+		"\"Orbit nightly report 2026-08-13\"",
+		"“Orbit nightly report 2026-08-13”",
+		"»Orbit nightly report 2026-08-13«",
+		"«Orbit nightly report 2026-08-13»",
+		"'Orbit nightly report 2026-08-13'",
+		"‚Orbit nightly report 2026-08-13‘",
+		"`Orbit nightly report 2026-08-13`",
+		"\"Orbit nightly report 2026-08-13\"?",
+		"„Orbit nightly report 2026-08-13?“",
+		" \" Orbit nightly report 2026-08-13 \" ",
+	} {
+		if out := floorTitleMatch(familyList(), q, nil); out[0].ID != "b12" {
+			t.Errorf("%q: first = %s, want b12", q, out[0].ID)
+		}
+	}
+	// A title that holds the mark it is asked in.
+	apos := titleFloorList("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "Orbit's report")
+	if out := floorTitleMatch(apos, "'Orbit's report'", nil); out[0].ID != "b11" {
+		t.Errorf("title with an apostrophe asked in single quotes: first = %s, want b11", out[0].ID)
+	}
+	for _, q := range []string{
+		"Was steht in „Orbit nightly report 2026-08-13“ über den Build?",
+		"„Orbit nightly report 2026-08-13“ und „Orbit nightly report 2026-08-14“",
+		"\"Orbit nightly report 2026-08-13\" vs \"Orbit nightly report 2026-08-14\"",
+		"\"Orbit nightly report 2026-08-13",
+		"Orbit nightly report 2026-08-13\"",
+		"„Orbit nightly“ report 2026-08-13",
+		"\"Orbit nightly report 2026-08-13'",
+		"\"\"",
+	} {
+		before := titleFloorIDs(familyList())
+		if got := titleFloorIDs(floorTitleMatch(familyList(), q, nil)); got != before {
+			t.Errorf("%q: order changed:\n got %s\nwant %s", q, got, before)
+		}
+	}
+}
+
+// A title asked behind a leading phrase (issue #528, point 4) names the block
+// when the rest equals the title of exactly one candidate and no other
+// candidate's title contains it; a topic question with the same start moves
+// nothing.
+func TestFloorTitleMatchLeadingPhrase(t *testing.T) {
+	for _, q := range []string{
+		"zeig mir Orbit nightly report 2026-08-13",
+		"Zeig mir Orbit nightly report 2026-08-13",
+		"zeige mir Orbit nightly report 2026-08-13",
+		"was steht in Orbit nightly report 2026-08-13?",
+		"Was steht in „Orbit nightly report 2026-08-13“?",
+		"show me Orbit nightly report 2026-08-13",
+		"Show me \"Orbit nightly report 2026-08-13\"",
+		"what's in Orbit nightly report 2026-08-13?",
+		"What’s in Orbit nightly report 2026-08-13",
+		"what is in Orbit nightly report 2026-08-13",
+	} {
+		if out := floorTitleMatch(familyList(), q, nil); out[0].ID != "b12" {
+			t.Errorf("%q: first = %s, want b12", q, out[0].ID)
+		}
+	}
+	// Two candidates carry the rest as their title, byte for byte (twins that
+	// differ as typed are told apart: TestFloorTitleMatchTwinsQuotedOrBehindAPhrase).
+	twins := titleFloorList("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "Release notes", "m", "Release notes")
+	deploy := titleFloorList("Deploy runbook 1", "Deploy runbook 2", "a", "b", "c", "d", "e", "f", "g", "h", "i", "Deploy")
+	for _, c := range []struct {
+		name string
+		in   []rrf.SearchResult
+		q    string
+	}{
+		{"all of a family", familyList(), "zeig mir alle Orbit nightly reports"},
+		{"the family's topic", familyList(), "zeig mir Orbit nightly report"},
+		{"the rest is in the middle of a sentence", familyList(), "zeig mir was in Orbit nightly report 2026-08-13 steht"},
+		{"the phrase without a rest", familyList(), "zeig mir"},
+		{"a phrase that is not at the start", familyList(), "bitte zeig mir Orbit nightly report 2026-08-13"},
+		{"the rest is a title other titles contain", deploy, "zeig mir Deploy"},
+		{"the rest is the title of two candidates", twins, "zeig mir Release notes"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			before := titleFloorIDs(c.in)
+			if got := titleFloorIDs(floorTitleMatch(c.in, c.q, nil)); got != before {
+				t.Errorf("%q: order changed:\n got %s\nwant %s", c.q, got, before)
+			}
+		})
+	}
+}
+
 // The folded form (issue #507, round 1): what people add to a question or type
 // differently folds away; what tells two titles of one family apart stays.
 func TestFoldTitle(t *testing.T) {
@@ -182,6 +363,15 @@ func TestFoldTitle(t *testing.T) {
 		{"Übergabe 2026-08-31", "Übergabe 2026-08-31"},
 		{"Ｏｒｂｉｔ report", "Orbit report"},
 		{"  Orbit\tnightly\n report  ", "orbit nightly report"},
+		// Issue #528, point 3: one enclosing pair of quotation marks.
+		{"„Release notes“", "Release notes"},
+		{"\"Release notes\"?", "release notes"},
+		{"„Release notes?“", "Release notes"},
+		{"`Release notes`", "Release notes"},
+		{"'Release notes'", "Release notes"},
+		// The mark may occur inside the title (an apostrophe, a quotation).
+		{"'Orbit's report'", "Orbit's report"},
+		{"„Plan „Zielbild B“ final“", "Plan \"Zielbild B\" final"},
 	}
 	for _, c := range same {
 		if foldTitle(c[0]) != foldTitle(c[1]) {
@@ -195,6 +385,10 @@ func TestFoldTitle(t *testing.T) {
 		{"Plan \"Zielbild B\"", "Plan Zielbild B"},
 		{"Straße 2026", "Strasse 2026"},
 		{"? Orbit report", "Orbit report"},
+		// Issue #528, point 3: only a pair that encloses the whole text.
+		{"\"Release\" notes", "Release notes"},
+		{"\"Release notes", "Release notes"},
+		{"\"Release notes'", "Release notes"},
 	}
 	for _, c := range different {
 		if foldTitle(c[0]) == foldTitle(c[1]) {
@@ -203,5 +397,62 @@ func TestFoldTitle(t *testing.T) {
 	}
 	if got := foldTitle(" ?! "); got != "" {
 		t.Errorf("fold of punctuation only = %q, want empty", got)
+	}
+}
+
+// The placed block keeps its own score in TitleFloorScore (issue #528, point
+// 7): the score fields are the first place's, this one is the score it
+// carried where the pipeline put it. No other result carries one, and the
+// input is not modified.
+func TestFloorTitleMatchKeepsTheOwnScore(t *testing.T) {
+	in := familyList()
+	out := floorTitleMatch(in, "Orbit nightly report 2026-08-13", nil)
+	if out[0].TitleFloorScore == nil || *out[0].TitleFloorScore != in[12].RRFScore {
+		t.Fatalf("own score %v, want the block's %v", out[0].TitleFloorScore, in[12].RRFScore)
+	}
+	for i, r := range out[1:] {
+		if r.TitleFloorScore != nil {
+			t.Errorf("result %d carries an own score", i+2)
+		}
+	}
+	if in[12].TitleFloorScore != nil {
+		t.Error("input element was modified")
+	}
+	if out := floorTitleMatch(familyList(), "Orbit nightly report 2026-08-01", nil); out[0].TitleFloorScore != nil {
+		t.Error("a block already first was not placed and carries no own score")
+	}
+}
+
+// Issue #528, review round 1 (L2): a leading phrase ends at a word boundary —
+// a question whose first word only begins like the phrase's last word ("show
+// meNotes", "zeig mirNotes") is no phrase, and its rest names nothing.
+func TestFloorTitleMatchPhraseEndsAtAWordBoundary(t *testing.T) {
+	in := titleFloorList("a", "b", "c", "Notes")
+	for _, p := range titlePhrases {
+		q := strings.TrimSuffix(p, " ") + "Notes"
+		if out := floorTitleMatch(in, q, nil); titleFloorIDs(out) != titleFloorIDs(in) {
+			t.Errorf("%q: order %s, want it unchanged", q, titleFloorIDs(out))
+		}
+		if out := floorTitleMatch(in, p+"Notes", nil); out[0].Title != "Notes" {
+			t.Errorf("%q: first %q, want Notes", p+"Notes", out[0].Title)
+		}
+	}
+}
+
+// Issue #528, review round 1 (L2): only a quotation mark encloses a title — a
+// title that begins and ends with the same letter keeps both.
+func TestFoldTitleKeepsAnEnclosingLetter(t *testing.T) {
+	for in, want := range map[string]string{
+		"Level":      "level",
+		"Level?":     "level",
+		"abba":       "abba",
+		"'Level'":    "level",
+		"`Level`":    "level",
+		"1 to 1":     "1 to 1",
+		"(Level)":    "(level)",
+	} {
+		if got := foldTitle(in); got != want {
+			t.Errorf("foldTitle(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
