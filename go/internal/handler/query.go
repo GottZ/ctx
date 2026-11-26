@@ -610,6 +610,11 @@ type sourceResponse struct {
 	// low-confidence cap or the prompt budget kept out of the prompt, so the
 	// retrieval-only / eval.sh response bytes are unchanged.
 	CitationIndex *int `json:"citation_index,omitempty"`
+	// TitleFloorScore is the source's own score where the title floor placed it
+	// first (issue #528): the block takes the score fields of the first place,
+	// and this field keeps the one it carried where the pipeline put it.
+	// Absent on every other source.
+	TitleFloorScore *float64 `json:"title_floor_score,omitempty"`
 	// Untrusted is retrieval.untrusted of the source block's TYPE (V-11,
 	// design/02 §5.1 BA7 layer 3): the source is FOREIGN TEXT — captured tool
 	// output or a session transcript — and a consumer must read it as
@@ -679,6 +684,23 @@ func buildSourceResponses(sources []llm.Source, supersedesMap map[string][]strin
 				first := sl[0]
 				out[i].SupersededBy = &first
 			}
+		}
+	}
+	return out
+}
+
+// withTitleFloorScore copies the title floor's record of the placed block's own
+// score (rrf.SearchResult.TitleFloorScore) onto that block's source. The floor
+// places one block at most, the first result; a source list the score filter
+// cut keeps it, because the placed block carries the first place's score.
+func withTitleFloorScore(out []sourceResponse, results []rrf.SearchResult) []sourceResponse {
+	if len(results) == 0 || results[0].TitleFloorScore == nil {
+		return out
+	}
+	for i := range out {
+		if out[i].ID == results[0].ID {
+			own := *results[0].TitleFloorScore
+			out[i].TitleFloorScore = &own
 		}
 	}
 	return out
@@ -1501,19 +1523,9 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Step 7b: Retrieval-only mode (eval / sweep) — skip the LLM synthesis
 	// (Steps 8-10) and return the post-rerank sources directly. Deterministic +
 	// fast so an A/B sweep can score retrieval in isolation from synthesis
-	// variance. Confidence is classified from the max RAW RRF score (the
-	// threshold's scale), preferring RRFScoreOriginal where the reranker set it.
+	// variance. The label is the one the synthesis gives the same sources
+	// (llm.ClassifySources: the fusion's scale, issue #528).
 	if req.Synthesize != nil && !*req.Synthesize {
-		maxScore := 0.0
-		for _, s := range sources {
-			raw := s.Score
-			if s.RRFScoreOriginal != nil {
-				raw = *s.RRFScoreOriginal
-			}
-			if raw > maxScore {
-				maxScore = raw
-			}
-		}
 		go h.logAccess(ar, results, query, selectorDec, accessSourceFor(armRanks))
 		slog.Info("query pipeline complete (retrieval-only)",
 			"source_count", len(sources),
@@ -1523,8 +1535,8 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		)
 		resp := queryResponse{
 			Success:             true,
-			Sources:             buildSourceResponses(sources, supersedesMap, retrievalSnippetRunes(req.IncludeContent, cfg.Query.MaxSourceRunes, len(sources))),
-			Confidence:          llm.ClassifyConfidence(maxScore, cfg.SynthesisSettings()),
+			Sources:             withTitleFloorScore(buildSourceResponses(sources, supersedesMap, retrievalSnippetRunes(req.IncludeContent, cfg.Query.MaxSourceRunes, len(sources))), results),
+			Confidence:          llm.ClassifySources(sources, cfg.SynthesisSettings()),
 			Translated:          translated,
 			ActivatedDimWeights: activatedDimWeights(temporalResult),
 		}
@@ -1648,7 +1660,7 @@ func (h *QueryHandler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	go h.logAccess(ar, results, query, selectorDec, accessSourceAgent)
 
 	// Step 10: Build response.
-	respSources := buildSourceResponses(synthResult.Sources, supersedesMap, 0)
+	respSources := withTitleFloorScore(buildSourceResponses(synthResult.Sources, supersedesMap, 0), results)
 
 	resp := queryResponse{
 		Success:             true,

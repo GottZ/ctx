@@ -357,6 +357,35 @@ type SynthesisResult struct {
 	SkipLLM     bool     `json:"-"`
 }
 
+// LabelScore is the score a source's confidence label is read on: the
+// fusion's, before a stage behind it rescaled it — RRFScoreOriginal where the
+// temporal gravity or the reranker kept it, Score otherwise (a row the graph or
+// cluster stage injected has no fusion score of its own). It is the scale
+// query.confident_threshold is set on: the threshold (0.008) is older than the
+// gravity, which multiplies a dated block's score by up to 1.3 (issue #528).
+func LabelScore(src Source) float64 {
+	if src.RRFScoreOriginal != nil {
+		return *src.RRFScoreOriginal
+	}
+	return src.Score
+}
+
+// ClassifySources labels an answer from its sources: ClassifyConfidence over
+// the highest LabelScore among the sources the synthesis keeps (Score at or
+// above s.ScoreThreshold, FilterByScore). The retrieval-only path and the
+// synthesis both call it on the same source list, so one answer carries one
+// label on both paths (issue #528: they disagreed whenever the gravity lifted
+// the top score across the threshold).
+func ClassifySources(sources []Source, s SynthesisSettings) string {
+	maxScore := 0.0
+	for _, src := range sources {
+		if src.Score >= s.ScoreThreshold {
+			maxScore = max(maxScore, LabelScore(src))
+		}
+	}
+	return ClassifyConfidence(maxScore, s)
+}
+
 // ClassifyConfidence determines the confidence level from the max RRF score.
 func ClassifyConfidence(maxScore float64, s SynthesisSettings) string {
 	if maxScore >= s.ConfidentThreshold {
@@ -832,7 +861,7 @@ func applyCitationIndexes(responseSources, promptSources []Source) {
 // only shared '_global' backends (background/no-caller paths).
 func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quota *backends.QuotaAccountant, settings SynthesisSettings, querySens backends.Sensitivity, originalQuery string, sources []Source, temporalDates []TemporalDate, apiKeyID, scope string, adm Admission) (*SynthesisResult, error) {
 	// Step 1: Filter by score threshold.
-	filtered, maxScore := FilterByScore(sources, settings)
+	filtered, _ := FilterByScore(sources, settings)
 	if len(filtered) == 0 {
 		return &SynthesisResult{
 			Answer:     fmt.Sprintf(noResultsTemplate, originalQuery),
@@ -842,8 +871,9 @@ func Synthesize(ctx context.Context, db *pgxpool.Pool, bpool *backends.Pool, quo
 		}, nil
 	}
 
-	// Step 2: Classify confidence.
-	confidence := ClassifyConfidence(maxScore, settings)
+	// Step 2: Classify confidence, on the fusion's scale (ClassifySources —
+	// the function the retrieval-only path labels with).
+	confidence := ClassifySources(filtered, settings)
 
 	// Step 3: Build sources metadata (without content, for the response).
 	responseSources := make([]Source, len(filtered))

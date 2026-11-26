@@ -198,6 +198,20 @@ func cyclicGravityAnchor(dimWeights map[string]float64) float64 {
 	return sum
 }
 
+// keepFusionScore records the fusion's score in RRFScoreOriginal before a
+// stage rescales RRFScore — unless an earlier stage already did: the cyclic
+// gravity runs before the linear one, and the reranker after both, and each
+// of them used to overwrite the field with the score the previous one had
+// already boosted. The field means "before any post-fusion stage" (the ruling
+// in cluster.go), which is the scale query.confident_threshold is read on
+// (llm.ClassifySources, issue #528).
+func keepFusionScore(r *SearchResult) {
+	if r.RRFScoreOriginal == nil {
+		s := r.RRFScore
+		r.RRFScoreOriginal = &s
+	}
+}
+
 // ApplyGravityBoost reranks search results using temporal gravity.
 // Blocks without dates get boost_factor=1.0 (neutral — no penalty).
 // The boost saturates against maxDateGravity, so the factor of a block depends
@@ -228,8 +242,7 @@ func ApplyGravityBoost(results []SearchResult, blockDates map[string][]time.Time
 	boosted := make([]SearchResult, len(results))
 	copy(boosted, results)
 	for i := range boosted {
-		origScore := boosted[i].RRFScore
-		boosted[i].RRFScoreOriginal = &origScore
+		keepFusionScore(&boosted[i])
 		factor := 1.0 + params.BoostWeight*math.Min(gravities[i]/anchor, 1.0)
 		boosted[i].RRFScore *= factor
 	}
@@ -540,8 +553,7 @@ func ApplyCyclicGravityBoost(
 	boosted := make([]SearchResult, len(results))
 	copy(boosted, results)
 	for i := range boosted {
-		origScore := boosted[i].RRFScore
-		boosted[i].RRFScoreOriginal = &origScore
+		keepFusionScore(&boosted[i])
 		factor := 1.0 + boostWeight*(gravities[i]/anchor)
 		boosted[i].RRFScore *= factor
 	}

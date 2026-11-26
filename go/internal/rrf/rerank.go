@@ -449,10 +449,16 @@ func applyRerankScores(results []SearchResult, rerankScores []float64, docCount 
 	for i := range reranked {
 		originalRRF := reranked[i].RRFScore
 		rrfNorm := originalRRF / maxRRF
-		originalRRFRounded := float64(int(originalRRF*10000+0.5)) / 10000
-		reranked[i].RRFScoreOriginal = &originalRRFRounded
+		// The fusion's score, unless the gravity already kept it (issue #528:
+		// rrf_score_original means "before any post-fusion stage").
+		if reranked[i].RRFScoreOriginal == nil {
+			originalRRFRounded := float64(int(originalRRF*10000+0.5)) / 10000
+			reranked[i].RRFScoreOriginal = &originalRRFRounded
+		}
 
-		if i < docCount {
+		// The callers hand in one score per reranked doc (docCount of them);
+		// the second bound states it where the index is read.
+		if i < docCount && i < len(rerankScores) {
 			// This doc was reranked: blend the rerank score with RRF.
 			rerankNorm := rerankScores[i] / maxRerank
 			reranked[i].RRFScore = rerankWeight*rerankNorm + (1.0-rerankWeight)*rrfNorm

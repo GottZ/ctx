@@ -166,6 +166,125 @@ func TestFloorTitleMatchTwinsPlaceTheHigherOne(t *testing.T) {
 	}
 }
 
+// Twins that fold to the same form (issue #528, point 2): the candidate whose
+// title equals the question before folding — case and white space aside — is
+// the named block, whatever the rank of its twin; the rank decides only when
+// the question equals none of them that way.
+func TestFloorTitleMatchTwinsPreferTheUnfoldedTitle(t *testing.T) {
+	filler := []string{"a", "c", "e", "f", "g", "h", "i", "j", "k", "l"}
+	list := func(higher, lower string) []rrf.SearchResult {
+		titles := append([]string{filler[0], higher}, filler[1:]...)
+		return titleFloorList(append(titles, lower)...)
+	}
+	cases := []struct {
+		name, higher, lower, q, want string
+	}{
+		{"closing mark on the higher twin", "Release notes?", "Release notes", "Release notes", "b11"},
+		{"the question names the twin with the mark", "Release notes?", "Release notes", "Release notes?", "b01"},
+		{"full-width form", "Ｒelease notes", "Release notes", "Release notes", "b11"},
+		{"superscript digit", "Plan v²", "Plan v2", "Plan v2", "b11"},
+		{"typographic apostrophe", "Orbit’s report", "Orbit's report", "Orbit's report", "b11"},
+		{"case and white space aside", "Release notes?", "Release notes", "  release   NOTES ", "b11"},
+		{"canonically equivalent spelling", "Übergabe 2026-08-31?", "U\u0308bergabe 2026-08-31", "Übergabe 2026-08-31", "b11"},
+		{"neither twin equals the question unfolded: the rank decides", "Release notes?", "Release notes.", "Release notes!", "b01"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := floorTitleMatch(list(c.higher, c.lower), c.q, nil)
+			if out[0].ID != c.want {
+				t.Errorf("first = %s (%q), want %s", out[0].ID, out[0].Title, c.want)
+			}
+		})
+	}
+}
+
+// A title asked inside one pair of quotation marks names the block (issue
+// #528, point 3); a question that contains a quotation is no title.
+func TestFloorTitleMatchQuotedTitle(t *testing.T) {
+	for _, q := range []string{
+		"„Orbit nightly report 2026-08-13“",
+		"\"Orbit nightly report 2026-08-13\"",
+		"“Orbit nightly report 2026-08-13”",
+		"»Orbit nightly report 2026-08-13«",
+		"«Orbit nightly report 2026-08-13»",
+		"'Orbit nightly report 2026-08-13'",
+		"‚Orbit nightly report 2026-08-13‘",
+		"`Orbit nightly report 2026-08-13`",
+		"\"Orbit nightly report 2026-08-13\"?",
+		"„Orbit nightly report 2026-08-13?“",
+		" \" Orbit nightly report 2026-08-13 \" ",
+	} {
+		if out := floorTitleMatch(familyList(), q, nil); out[0].ID != "b12" {
+			t.Errorf("%q: first = %s, want b12", q, out[0].ID)
+		}
+	}
+	// A title that holds the mark it is asked in.
+	apos := titleFloorList("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "Orbit's report")
+	if out := floorTitleMatch(apos, "'Orbit's report'", nil); out[0].ID != "b11" {
+		t.Errorf("title with an apostrophe asked in single quotes: first = %s, want b11", out[0].ID)
+	}
+	for _, q := range []string{
+		"Was steht in „Orbit nightly report 2026-08-13“ über den Build?",
+		"„Orbit nightly report 2026-08-13“ und „Orbit nightly report 2026-08-14“",
+		"\"Orbit nightly report 2026-08-13\" vs \"Orbit nightly report 2026-08-14\"",
+		"\"Orbit nightly report 2026-08-13",
+		"Orbit nightly report 2026-08-13\"",
+		"„Orbit nightly“ report 2026-08-13",
+		"\"Orbit nightly report 2026-08-13'",
+		"\"\"",
+	} {
+		before := titleFloorIDs(familyList())
+		if got := titleFloorIDs(floorTitleMatch(familyList(), q, nil)); got != before {
+			t.Errorf("%q: order changed:\n got %s\nwant %s", q, got, before)
+		}
+	}
+}
+
+// A title asked behind a leading phrase (issue #528, point 4) names the block
+// when the rest equals the title of exactly one candidate and no other
+// candidate's title contains it; a topic question with the same start moves
+// nothing.
+func TestFloorTitleMatchLeadingPhrase(t *testing.T) {
+	for _, q := range []string{
+		"zeig mir Orbit nightly report 2026-08-13",
+		"Zeig mir Orbit nightly report 2026-08-13",
+		"zeige mir Orbit nightly report 2026-08-13",
+		"was steht in Orbit nightly report 2026-08-13?",
+		"Was steht in „Orbit nightly report 2026-08-13“?",
+		"show me Orbit nightly report 2026-08-13",
+		"Show me \"Orbit nightly report 2026-08-13\"",
+		"what's in Orbit nightly report 2026-08-13?",
+		"What’s in Orbit nightly report 2026-08-13",
+		"what is in Orbit nightly report 2026-08-13",
+	} {
+		if out := floorTitleMatch(familyList(), q, nil); out[0].ID != "b12" {
+			t.Errorf("%q: first = %s, want b12", q, out[0].ID)
+		}
+	}
+	twins := titleFloorList("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "Release notes", "m", "Release notes?")
+	deploy := titleFloorList("Deploy runbook 1", "Deploy runbook 2", "a", "b", "c", "d", "e", "f", "g", "h", "i", "Deploy")
+	for _, c := range []struct {
+		name string
+		in   []rrf.SearchResult
+		q    string
+	}{
+		{"all of a family", familyList(), "zeig mir alle Orbit nightly reports"},
+		{"the family's topic", familyList(), "zeig mir Orbit nightly report"},
+		{"the rest is in the middle of a sentence", familyList(), "zeig mir was in Orbit nightly report 2026-08-13 steht"},
+		{"the phrase without a rest", familyList(), "zeig mir"},
+		{"a phrase that is not at the start", familyList(), "bitte zeig mir Orbit nightly report 2026-08-13"},
+		{"the rest is a title other titles contain", deploy, "zeig mir Deploy"},
+		{"the rest is the title of two candidates", twins, "zeig mir Release notes"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			before := titleFloorIDs(c.in)
+			if got := titleFloorIDs(floorTitleMatch(c.in, c.q, nil)); got != before {
+				t.Errorf("%q: order changed:\n got %s\nwant %s", c.q, got, before)
+			}
+		})
+	}
+}
+
 // The folded form (issue #507, round 1): what people add to a question or type
 // differently folds away; what tells two titles of one family apart stays.
 func TestFoldTitle(t *testing.T) {
@@ -182,6 +301,15 @@ func TestFoldTitle(t *testing.T) {
 		{"Übergabe 2026-08-31", "Übergabe 2026-08-31"},
 		{"Ｏｒｂｉｔ report", "Orbit report"},
 		{"  Orbit\tnightly\n report  ", "orbit nightly report"},
+		// Issue #528, point 3: one enclosing pair of quotation marks.
+		{"„Release notes“", "Release notes"},
+		{"\"Release notes\"?", "release notes"},
+		{"„Release notes?“", "Release notes"},
+		{"`Release notes`", "Release notes"},
+		{"'Release notes'", "Release notes"},
+		// The mark may occur inside the title (an apostrophe, a quotation).
+		{"'Orbit's report'", "Orbit's report"},
+		{"„Plan „Zielbild B“ final“", "Plan \"Zielbild B\" final"},
 	}
 	for _, c := range same {
 		if foldTitle(c[0]) != foldTitle(c[1]) {
@@ -195,6 +323,10 @@ func TestFoldTitle(t *testing.T) {
 		{"Plan \"Zielbild B\"", "Plan Zielbild B"},
 		{"Straße 2026", "Strasse 2026"},
 		{"? Orbit report", "Orbit report"},
+		// Issue #528, point 3: only a pair that encloses the whole text.
+		{"\"Release\" notes", "Release notes"},
+		{"\"Release notes", "Release notes"},
+		{"\"Release notes'", "Release notes"},
 	}
 	for _, c := range different {
 		if foldTitle(c[0]) == foldTitle(c[1]) {
@@ -203,5 +335,28 @@ func TestFoldTitle(t *testing.T) {
 	}
 	if got := foldTitle(" ?! "); got != "" {
 		t.Errorf("fold of punctuation only = %q, want empty", got)
+	}
+}
+
+// The placed block keeps its own score in TitleFloorScore (issue #528, point
+// 7): the score fields are the first place's, this one is the score it
+// carried where the pipeline put it. No other result carries one, and the
+// input is not modified.
+func TestFloorTitleMatchKeepsTheOwnScore(t *testing.T) {
+	in := familyList()
+	out := floorTitleMatch(in, "Orbit nightly report 2026-08-13", nil)
+	if out[0].TitleFloorScore == nil || *out[0].TitleFloorScore != in[12].RRFScore {
+		t.Fatalf("own score %v, want the block's %v", out[0].TitleFloorScore, in[12].RRFScore)
+	}
+	for i, r := range out[1:] {
+		if r.TitleFloorScore != nil {
+			t.Errorf("result %d carries an own score", i+2)
+		}
+	}
+	if in[12].TitleFloorScore != nil {
+		t.Error("input element was modified")
+	}
+	if out := floorTitleMatch(familyList(), "Orbit nightly report 2026-08-01", nil); out[0].TitleFloorScore != nil {
+		t.Error("a block already first was not placed and carries no own score")
 	}
 }
