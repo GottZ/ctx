@@ -38,6 +38,12 @@ Digests and facts are stored as ctx's block type `session-digest` (GottZ/ctx#289
   with its own bound (2 s) and only while Hermes' 8 s wait for the prefetch leaves room; a failure
   keeps the five. Over REST the other type names (`type-list`, once per client) go into
   `types_exclude`.
+- **A slow first write.** The writes of an entry wait for the one that asks. Over REST a digest
+  that asks and hangs holds the required facts of a compaction that starts meanwhile for up to its
+  `api_timeout` (measured 0.4 s → 20.2 s for the hook); facts its deadline then leaves unstored
+  fall to the next compaction (the ledger releases them, the chain holds their wording). The ask
+  keeps the client's bound: a shorter one would give up on a write that 0.18.0 completes within
+  `api_timeout` and send a second one while the first may still land.
 - **The required facts.** A required fact refused for its type is sent again in the same run by
   `ChainWriter.store_paced`, admitted as a call of its own: the refusal is released as an error
   answer of the entry (Hermes counts it), without a slot of the window (ctx checks the type before
