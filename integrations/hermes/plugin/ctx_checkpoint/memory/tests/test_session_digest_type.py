@@ -241,3 +241,125 @@ def test_writes_side_by_side_all_name_the_type_on_a_server_that_knows_it():
     assert refused == [] and len(stored) == 8
     assert [s.get("type") for s in stored] == [SESSION_DIGEST_TYPE] * 8
     assert entry.type_to_send(SESSION_DIGEST_TYPE) == "known"
+
+
+# -- fail-closed: only ctx's refusal of the type is read as one (review of #564) --------------------
+
+_OTHER_REFUSALS = [
+    pytest.param(422, "reserved_type", id="reserved_type_422"),
+    pytest.param(422, "parent_required", id="parent_required_422"),
+    pytest.param(422, "", id="uncoded_422"),
+    pytest.param(403, "scope_denied", id="scope_denied_403"),
+    pytest.param(None, "timeout", id="timeout"),
+    pytest.param(422, "UNKNOWN_TYPE", id="unknown_type_upper_case"),
+]
+
+
+@pytest.mark.parametrize(("status", "code"), _OTHER_REFUSALS)
+def test_another_refusal_of_a_typed_write_is_raised_and_no_verdict(status, code):
+    """A write that names the type and is refused for anything but ``unknown_type`` (another 422, any
+    other coded error) is not sent again without the type — that would store foreign text unframed on
+    a server that knows the type — and leaves the question open for the next write."""
+    entry = _cp.EntryState()
+    sent: list = []
+
+    def store(**kwargs):
+        sent.append(kwargs)
+        raise CtxApiError(f"HTTP {status} [{code}]: refused", status=status, code=code)
+
+    with pytest.raises(CtxApiError):
+        _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, wait_s=0.0, title="fact")
+    assert [s.get("type") for s in sent] == [SESSION_DIGEST_TYPE]
+    assert entry.type_to_send(SESSION_DIGEST_TYPE) == _cp.TYPE_ASK
+
+
+def test_a_returned_envelope_with_another_code_is_returned_and_no_verdict():
+    entry = _cp.EntryState()
+    sent: list = []
+    envelope = {"success": False, "code": "reserved_type", "error": "type is reserved"}
+
+    def store(**kwargs):
+        sent.append(kwargs)
+        return envelope
+
+    assert _cp.store_typed(entry, SESSION_DIGEST_TYPE, store, wait_s=0.0, title="fact") is envelope
+    assert [s.get("type") for s in sent] == [SESSION_DIGEST_TYPE]
+    assert entry.type_to_send(SESSION_DIGEST_TYPE) == _cp.TYPE_ASK
+
+
+class ReservingServer(FakeClient):
+    """A server that knows the type but refuses this key's claim of it (HTTP 422 ``reserved_type``)."""
+
+    def store(self, category, title, content, sensitivity=None, tags=None, **extra):
+        if extra.get("type") == SESSION_DIGEST_TYPE:
+            self.calls.append({"category": category, "title": title, "content": content, **extra})
+            raise CtxApiError("HTTP 422 [reserved_type]: refused", status=422, code="reserved_type")
+        return super().store(category, title, content, sensitivity, tags, **extra)
+
+
+def test_a_required_fact_refused_for_another_reason_is_never_sent_without_the_type(make_provider, monkeypatch):
+    monkeypatch.setattr(provider_mod, "CtxClient", ReservingServer)
+    p, client = make_provider()
+    p.on_pre_compress(_fact_turns(), require_checkpoint=True)
+    facts = [c for c in client.calls if c["category"] == CATEGORY_LEARNINGS]
+    assert facts, "the first required fact was sent"
+    assert _typed(facts) == [SESSION_DIGEST_TYPE] * len(facts), facts
+    p.shutdown()
+
+
+class _HeldFirstWrite(FakeClient):
+    """Holds the first write that names the type until ``release`` is set (a slow ask)."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.inside = threading.Event()
+        self.release = threading.Event()
+
+    def store(self, category, title, content, sensitivity=None, tags=None, **extra):
+        if extra.get("type") and not self.inside.is_set():
+            self.inside.set()
+            assert self.release.wait(10)
+        return super().store(category, title, content, sensitivity, tags, **extra)
+
+
+def test_a_digest_or_fact_write_waits_for_the_write_that_asks(make_provider):
+    """The provider's writes outside the chain writer wait for the answer to the write that asks
+    (``TYPE_ASK_WAIT_S``): on a server that knows the type the second one names it too."""
+    p, _client = make_provider()
+    client = _HeldFirstWrite()
+    results: list = []
+
+    def write(title: str) -> None:
+        results.append(
+            p._store_typed(client, SESSION_DIGEST_TYPE, category=CATEGORY_LEARNINGS, title=title, content=title)
+        )
+
+    first = threading.Thread(target=write, args=("fact one",))
+    first.start()
+    assert client.inside.wait(5)
+    second = threading.Thread(target=write, args=("fact two",))
+    second.start()
+    second.join(0.3)
+    assert second.is_alive(), "the second write waits for the answer to the first"
+    client.release.set()
+    first.join(5)
+    second.join(5)
+    assert [c.get("type") for c in client.calls] == [SESSION_DIGEST_TYPE] * 2
+    p.shutdown()
+
+
+def test_the_required_facts_wait_for_a_write_that_asks(make_provider):
+    """``store_paced`` waits for another write's ask (up to its deadline) instead of going without the
+    type at once: on a server that knows the type every required fact names it."""
+    p, client = make_provider()
+    entry = _cp.entry_state(p._entry_key())
+    assert entry.type_to_send(SESSION_DIGEST_TYPE) == _cp.TYPE_ASK  # another write asks
+    answer = threading.Timer(0.5, entry.type_answered, (SESSION_DIGEST_TYPE, True))
+    answer.start()
+    try:
+        receipt = p.on_pre_compress(_fact_turns(), require_checkpoint=True)
+    finally:
+        answer.cancel()
+    assert f"stored {len(FACTS)} fact block(s)" in receipt, receipt
+    assert _typed(client.calls, CATEGORY_LEARNINGS) == [SESSION_DIGEST_TYPE] * len(FACTS)
+    p.shutdown()
