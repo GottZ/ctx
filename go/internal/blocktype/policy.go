@@ -100,7 +100,8 @@ const globalScope = "_global"
 var reservedGraphClasses = []string{"topical", "factual", "causal", "recurrent", "supersedes"}
 
 // maxConfigBytes caps one config JSONB (R1 resource-exhaustion guard, §3.3:
-// the Set cache is server-shared memory across N tenants).
+// the Set cache is server-shared memory across N tenants), measured by
+// configSize — the same measure on the write paths and on Reload.
 const maxConfigBytes = 16 * 1024
 
 // Array caps (R1, §3.3): every string array in the vocabulary is bounded.
@@ -446,8 +447,8 @@ func DecodePolicy(name, scope string, builtin, isDefault bool, rawConfig []byte)
 // cannot judge alone (a damped policy whose factor the stored config holds).
 func decodeEnvelope(name string, rawConfig []byte) (cfgEnvelope, error) {
 	var env cfgEnvelope
-	if len(rawConfig) > maxConfigBytes {
-		return env, fmt.Errorf("blocktype %q: config exceeds %d bytes (%d)", name, maxConfigBytes, len(rawConfig))
+	if n := configSize(rawConfig); n > maxConfigBytes {
+		return env, fmt.Errorf("blocktype %q: config exceeds %d bytes (%d)", name, maxConfigBytes, n)
 	}
 	dec := json.NewDecoder(bytes.NewReader(rawConfig))
 	dec.DisallowUnknownFields()
