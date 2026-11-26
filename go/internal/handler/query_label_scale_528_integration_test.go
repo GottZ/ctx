@@ -1,0 +1,249 @@
+//go:build integration
+
+// Issue #528, review round 1, through the production request path (POST
+// /api/query, HandleQuery with stub backends) on corpora written through
+// store.UpsertBlock, store.StoreEmbedding, store.RefreshTemporal and
+// dream.WriteLinks: the confidence label is read on the fusion's scale whatever
+// stages ran behind the fusion —
+//   - the graph reinforcement without a gravity before it (M1);
+//   - the cyclic gravity before the linear one (M2);
+//   - the gravity before the reranker (L2);
+//
+// a synthesis rejection of an answer the gravity alone lifted reads that label
+// (M3), and the retrieval-only label counts only the sources at or above
+// query.score_threshold (L2). Every threshold is read off a response whose
+// numbers do not depend on the change (a source's score, or the fusion score
+// of a run in which a single stage recorded it), so the tests read the same
+// corpus the same way before and after it.
+
+package handler
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/blocktype"
+	"github.com/GottZ/ctx/internal/config"
+	"github.com/GottZ/ctx/internal/dream"
+	"github.com/GottZ/ctx/internal/store"
+	"github.com/GottZ/ctx/internal/testdb"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// scaleResp reads the fields the label tests need.
+type scaleResp struct {
+	Confidence string             `json:"confidence"`
+	DimWeights map[string]float64 `json:"activated_dim_weights"`
+	Sources    []struct {
+		ID               string   `json:"id"`
+		Score            float64  `json:"score"`
+		RRFScoreOriginal *float64 `json:"rrf_score_original"`
+		CitationIndex    *int     `json:"citation_index"`
+	} `json:"sources"`
+}
+
+func (r scaleResp) maxScore() float64 {
+	m := 0.0
+	for _, s := range r.Sources {
+		m = max(m, s.Score)
+	}
+	return m
+}
+
+// scaleEnv is a corpus in the title-floor scope and the stub backends of its
+// handlers: the embed stub hands every question the vector on axis 0, the
+// chat stub answers chatAnswer, the rerank stub scores the documents in
+// reverse order of their place.
+type scaleEnv struct {
+	pool       *pgxpool.Pool
+	ids        []string
+	srv        *httptest.Server
+	chatAnswer atomic.Value // string
+}
+
+func newScaleEnv(t *testing.T, n int, title func(j int) string, content func(j int) string, temporal bool) *scaleEnv {
+	t.Helper()
+	e := &scaleEnv{pool: testdb.SetupTestDB(t)}
+	e.chatAnswer.Store("The report says the build was green [1].")
+	ctx := context.Background()
+	for j := 0; j < n; j++ {
+		b, err := store.UpsertBlock(ctx, e.pool, "learnings", title(j), content(j), nil, nil, titleFloorScope, true, store.SensitivityWrite{}, "knowledge")
+		if err != nil {
+			t.Fatalf("seed %d: %v", j, err)
+		}
+		if err := store.StoreEmbedding(ctx, e.pool, b.ID, "stub-tf507", titleFloorVec(0.90-0.02*float64(j), j)); err != nil {
+			t.Fatalf("seed %d: embedding: %v", j, err)
+		}
+		if temporal {
+			// The dimension rows of the content's dates (the content anchors
+			// only, as the temporal ranking test writes them).
+			if _, err := store.RefreshTemporal(ctx, e.pool, b.ID, b.Content, time.Time{}); err != nil {
+				t.Fatalf("seed %d: temporal: %v", j, err)
+			}
+		}
+		e.ids = append(e.ids, b.ID)
+	}
+	qvec := make([]float64, 1024)
+	qvec[0] = 1
+	e.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/embed":
+			_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": [][]float64{qvec}})
+		case "/api/chat":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"message": map[string]any{"role": "assistant", "content": e.chatAnswer.Load().(string)},
+				"done":    true, "eval_count": 1, "prompt_eval_count": 1,
+			})
+		case "/v1/rerank":
+			var req struct {
+				Documents []string `json:"documents"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			res := make([]map[string]any, len(req.Documents))
+			for i := range req.Documents {
+				res[i] = map[string]any{"index": i, "relevance_score": float64(i + 1)}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"model": "stub-rerank", "object": "list", "results": res})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(e.srv.Close)
+	return e
+}
+
+// handler is a query handler on the env's stubs with the default query
+// configuration (translation off, UTC) that mod may adjust.
+func (e *scaleEnv) handler(t *testing.T, mod func(*config.Config)) *QueryHandler {
+	t.Helper()
+	bpool := backends.NewPool(nil, nil)
+	bpool.SeedSnapshotForTest([]backends.Backend{
+		{ID: "e", Name: "sc528-embed", Host: e.srv.URL, Protocol: backends.ProtocolOllama, Model: "stub-tf507",
+			Trust: backends.TrustFull, Enabled: true, Priority: 1, Roles: []string{backends.RoleEmbed}},
+		{ID: "s", Name: "sc528-synthesis", Host: e.srv.URL, Protocol: backends.ProtocolOllama, Model: "stub-chat",
+			Trust: backends.TrustFull, Enabled: true, Priority: 1, NumCtx: 32768, Roles: []string{backends.RoleSynthesis}},
+		{ID: "r", Name: "sc528-rerank", Host: e.srv.URL, Protocol: "rerank", Model: "stub-rerank",
+			Trust: backends.TrustFull, Enabled: true, Priority: 1, Roles: []string{backends.RoleRerank}},
+	})
+	cfg := bw2Config()
+	q := config.Defaults().Query
+	q.Timezone = time.UTC
+	q.Translate = "off"
+	cfg.Query = q
+	if mod != nil {
+		mod(cfg)
+	}
+	return NewQueryHandler(e.pool, config.NewStore(cfg), bpool, nil, blocktype.NewRegistry(), snapshotTestAdmitter(t))
+}
+
+func (e *scaleEnv) ask(t *testing.T, h *QueryHandler, q string, synthesize bool) scaleResp {
+	t.Helper()
+	body := map[string]any{"query": q, "limit": 10}
+	if !synthesize {
+		body["synthesize"] = false
+	}
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/query", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	ar := &auth.AuthResult{ApiKeyID: "sc528-key", HomeScope: titleFloorScope, ReadScopes: []string{titleFloorScope}, IsValid: true}
+	req = req.WithContext(context.WithValue(req.Context(), authResultKey, ar))
+	rec := httptest.NewRecorder()
+	h.HandleQuery(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%q: status %d: %s", q, rec.Code, rec.Body.String())
+	}
+	var out scaleResp
+	if err := json.Unmarshal(bytes.TrimSpace(rec.Body.Bytes()), &out); err != nil {
+		t.Fatalf("%q: decode: %v", q, err)
+	}
+	return out
+}
+
+// ptrVal prints a score pointer as its value ("<nil>" for none).
+func ptrVal(p *float64) any {
+	if p == nil {
+		return "<nil>"
+	}
+	return *p
+}
+
+func withThreshold(thr float64, mod func(*config.Config)) func(*config.Config) {
+	return func(c *config.Config) {
+		if mod != nil {
+			mod(c)
+		}
+		c.Query.ConfidentThreshold = thr
+	}
+}
+
+func graphOn(c *config.Config) {
+	c.Graph = config.Defaults().Graph
+	c.Graph.Enabled = true
+}
+
+// M1: the graph reinforcement keeps the fusion score, so the label of an
+// undated answer the graph lifted across the threshold reads the fusion like
+// the label of a dated one — and like the label of the same answer with the
+// graph off.
+func TestQueryLabelReadsTheFusionBehindTheGraph(t *testing.T) {
+	e := newScaleEnv(t, 12,
+		func(j int) string { return fmt.Sprintf("Cache layer note %02d", j) },
+		func(j int) string { return fmt.Sprintf("Cache layer note %02d: eviction, warm-up, sizing.", j) }, false)
+	// The second and the third note link to the first (production write
+	// path), so the graph reinforces the list's first.
+	reg := blocktype.NewRegistry()
+	reg.Boot(context.Background(), e.pool)
+	for _, src := range e.ids[1:3] {
+		n, err := dream.WriteLinks(context.Background(), e.pool, reg.Snapshot(), src, titleFloorScope, 1.0,
+			[]dream.Link{{TargetID: e.ids[0], Relationship: "topical", Confidence: 0.95}})
+		if err != nil || n != 1 {
+			t.Fatalf("dream link from %s: written %d, err %v", src, n, err)
+		}
+	}
+	const q = "How is the cache layer sized?"
+	off := e.ask(t, e.handler(t, nil), q, false)
+	on := e.ask(t, e.handler(t, graphOn), q, false)
+	fusion := map[string]float64{}
+	fusionMax := 0.0
+	for _, s := range off.Sources {
+		fusion[s.ID] = s.Score
+		fusionMax = max(fusionMax, s.Score)
+	}
+	reinforced := 0
+	for _, s := range on.Sources {
+		f, ok := fusion[s.ID]
+		if !ok || s.Score == f {
+			continue
+		}
+		reinforced++
+		if s.RRFScoreOriginal == nil || *s.RRFScoreOriginal != f {
+			t.Errorf("source %s reinforced by the graph (%v → %v): rrf_score_original %v, want its fusion score", s.ID, f, s.Score, ptrVal(s.RRFScoreOriginal))
+		}
+	}
+	thr := on.maxScore()
+	if reinforced == 0 || !(thr > fusionMax) {
+		t.Fatalf("precondition: the graph lifted no score above the list's fusion maximum (%d reinforced, %v vs %v)", reinforced, thr, fusionMax)
+	}
+	// The threshold at the graph's maximum: the fusion stays below it.
+	hOff := e.handler(t, withThreshold(thr, nil))
+	hOn := e.handler(t, withThreshold(thr, graphOn))
+	for _, c := range []struct {
+		what string
+		h    *QueryHandler
+		syn  bool
+	}{{"graph off, retrieval-only", hOff, false}, {"graph on, retrieval-only", hOn, false}, {"graph off, synthesis", hOff, true}, {"graph on, synthesis", hOn, true}} {
+		if got := e.ask(t, c.h, q, c.syn).Confidence; got != "low_confidence" {
+			t.Errorf("%s: label %q, want low_confidence (fusion maximum %v below the threshold %v)", c.what, got, fusionMax, thr)
+		}
+	}
+}

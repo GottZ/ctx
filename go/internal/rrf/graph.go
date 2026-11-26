@@ -646,7 +646,8 @@ type accumulator struct {
 //
 //   - Neighbor already present in results (by id):
 //     result.RRFScore *= (1 + BoostWeight * min(accum,1)). ViaGraph stays false
-//     (it was a native hit; the graph only reinforced it).
+//     (it was a native hit; the graph only reinforced it). RRFScoreOriginal
+//     keeps the fusion's score (keepFusionScore).
 //   - Neighbor NEW: synthScore = (min RRFScore across the current results) *
 //     0.5 * BoostWeight * min(accum,1) — deliberately low so a graph-only
 //     neighbor cannot outrank a native top hit before the reranker. Appended as
@@ -743,7 +744,9 @@ func fuseNeighborsReport(results []SearchResult, edges []graphEdge, cfg GraphCon
 			continue
 		}
 		if i, ok := idx[id]; ok {
-			// Reinforce an existing result.
+			// Reinforce an existing result; its fusion score stays readable
+			// (keepFusionScore, issue #528).
+			keepFusionScore(&out[i])
 			out[i].RRFScore *= 1.0 + cfg.BoostWeight*capped
 			continue
 		}

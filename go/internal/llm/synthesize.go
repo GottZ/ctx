@@ -358,9 +358,11 @@ type SynthesisResult struct {
 }
 
 // LabelScore is the score a source's confidence label is read on: the
-// fusion's, before a stage behind it rescaled it — RRFScoreOriginal where the
-// temporal gravity or the reranker kept it, Score otherwise (a row the graph or
-// cluster stage injected has no fusion score of its own). It is the scale
+// fusion's, before a stage behind it rescaled it — RRFScoreOriginal where a
+// stage kept it (the temporal gravity, the cluster prior, the graph
+// reinforcement, the aggregate fold, the reranker), Score otherwise (no stage
+// changed it, or the graph or cluster stage injected the row, which then has
+// no fusion score of its own and is read at its placement score). It is the scale
 // query.confident_threshold is set on: the threshold (0.008) is older than the
 // gravity, which multiplies a dated block's score by up to 1.3 (issue #528).
 func LabelScore(src Source) float64 {

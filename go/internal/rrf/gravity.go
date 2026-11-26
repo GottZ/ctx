@@ -199,12 +199,14 @@ func cyclicGravityAnchor(dimWeights map[string]float64) float64 {
 }
 
 // keepFusionScore records the fusion's score in RRFScoreOriginal before a
-// stage rescales RRFScore — unless an earlier stage already did: the cyclic
-// gravity runs before the linear one, and the reranker after both, and each
-// of them used to overwrite the field with the score the previous one had
-// already boosted. The field means "before any post-fusion stage" (the ruling
-// in cluster.go), which is the scale query.confident_threshold is read on
-// (llm.ClassifySources, issue #528).
+// stage rescales RRFScore — unless an earlier stage already did. Every stage
+// behind the fusion that changes the score of a row the fusion returned calls
+// it before it writes: the cyclic and the linear gravity, the cluster prior
+// (fuseClusters), the graph reinforcement (fuseNeighborsReport); the reranker's
+// blend keeps a recorded value the same way. The field therefore means "before
+// any post-fusion stage" whichever of them ran, which is the scale
+// query.confident_threshold is read on (llm.ClassifySources, issue #528) — a
+// stage that left it unset made the label read its boosted score instead.
 func keepFusionScore(r *SearchResult) {
 	if r.RRFScoreOriginal == nil {
 		s := r.RRFScore

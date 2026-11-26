@@ -281,11 +281,12 @@ func pickWinners(shares map[string]float64, cfg ClusterConfig) map[string]float6
 // would reorder untouched ties away from the RRF order and break exactly that.
 // Determinism is not lost: the incoming order is itself deterministic.
 //
-// RRFScoreOriginal is NOT overwritten. The codebase is split here — the gravity
-// stages save the pre-boost value, the graph stage does not — and this stage runs
-// BETWEEN them, so without a ruling rrf_score_original would mean "pre-gravity"
-// or "pre-cluster" depending on flags. Ruling: follow graph.go, so the field
-// keeps meaning "before ANY post-RRF augmentation".
+// RRFScoreOriginal keeps meaning "before ANY post-RRF augmentation": a boosted
+// row records its fusion score through keepFusionScore unless the gravity, which
+// runs before this stage, already did — never the gravity's boosted value. The
+// confidence label reads the field (llm.ClassifySources, issue #528), so a stage
+// that left it unset made the label read the cluster-boosted score when no
+// gravity ran and the fusion score when one did.
 func fuseClusters(results []SearchResult, memberOf map[string]string, winners map[string]float64, cfg ClusterConfig, rep *graphcache.BudgetReport) []SearchResult {
 	out := make([]SearchResult, len(results))
 	copy(out, results)
@@ -298,6 +299,7 @@ func fuseClusters(results []SearchResult, memberOf map[string]string, winners ma
 		if !ok {
 			continue
 		}
+		keepFusionScore(&out[i])
 		out[i].RRFScore *= 1.0 + cfg.BoostWeight*share
 		out[i].ClusterBoost = share
 		rep.Add(graphcache.TravClusterBoosted)

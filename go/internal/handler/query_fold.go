@@ -279,7 +279,7 @@ func applyParentFold(results []rrf.SearchResult, folds map[string]childFold, hyd
 			continue
 		}
 		if cur, seen := parentBest[cf.parentID]; !seen || r.RRFScore > cur.score {
-			parentBest[cf.parentID] = childHit{score: r.RRFScore, id: r.ID, content: r.Content}
+			parentBest[cf.parentID] = childHit{score: r.RRFScore, orig: r.RRFScoreOriginal, id: r.ID, content: r.Content}
 		}
 	}
 
@@ -300,6 +300,7 @@ func applyParentFold(results []rrf.SearchResult, folds map[string]childFold, hyd
 			case !emitted[cf.parentID]: // hydrate parent at this (best-ranked) child's slot
 				p := hydrated[cf.parentID]
 				best := parentBest[cf.parentID]
+				p.RRFScoreOriginal = foldedFusionScore(p, best)
 				p.RRFScore = best.score
 				p.MatchedComment = matchedCommentOf(best) // §4.4: WHY the issue ranked
 				out = append(out, p)
@@ -310,6 +311,7 @@ func applyParentFold(results []rrf.SearchResult, folds map[string]childFold, hyd
 		// r is a normal block or an in-set parent that has folded children.
 		if best, isParent := parentBest[r.ID]; isParent && inSet[r.ID] {
 			if !emitted[r.ID] {
+				r.RRFScoreOriginal = foldedFusionScore(r, best)
 				if best.score > r.RRFScore {
 					r.RRFScore = best.score // K13: max(parent, child), no bonus
 				}
@@ -328,8 +330,27 @@ func applyParentFold(results []rrf.SearchResult, folds map[string]childFold, hyd
 // feeds the K13 max merge, its id+content feed the matched_comment annotation.
 type childHit struct {
 	score   float64
+	orig    *float64 // the child's RRFScoreOriginal (foldedFusionScore)
 	id      string
 	content string
+}
+
+// foldedFusionScore is a parent's RRFScoreOriginal after the fold: K13 —
+// max(parent, child), no bonus — on the fusion's scale as well (rawRRFScore),
+// the scale the confidence label reads (llm.ClassifySources, issue #528). A
+// hydrated parent has no score of its own and takes the child's. Unset when
+// neither carries the field: no stage rescaled either score, so RRFScore is
+// already the fusion's maximum.
+func foldedFusionScore(parent rrf.SearchResult, child childHit) *float64 {
+	if parent.RRFScoreOriginal == nil && child.orig == nil {
+		return nil
+	}
+	childFusion := child.score
+	if child.orig != nil {
+		childFusion = *child.orig
+	}
+	s := max(rawRRFScore(&parent), childFusion)
+	return &s
 }
 
 // matchedCommentOf builds the §4.4 matched_comment attribution from the best
