@@ -45,11 +45,19 @@ func TestStagesKeepTheFusionScore(t *testing.T) {
 			t.Errorf("after the reranker: %s rrf_score_original = %v, want the fusion score %v", r.ID, deref(r.RRFScoreOriginal), want)
 		}
 	}
-	// Without a stage before it, the reranker records the fusion score
-	// rounded to four decimals, as before.
-	alone := applyRerankScores([]SearchResult{{ID: "a", RRFScore: 0.007549}}, []float64{0.5}, 1, 0.5)
-	if alone[0].RRFScoreOriginal == nil || *alone[0].RRFScoreOriginal != 0.0075 {
-		t.Errorf("reranker alone: rrf_score_original = %v, want 0.0075", deref(alone[0].RRFScoreOriginal))
+	// Without a stage before it, the reranker records the fusion score as it
+	// is, like every other stage (review round 1): a copy rounded to four
+	// decimals read a fusion score just below the confident threshold
+	// (0.007951 against 0.008) as above it.
+	alone := applyRerankScores([]SearchResult{{ID: "a", RRFScore: 0.007951}, {ID: "b", RRFScore: 0.007549}}, []float64{0.5, 0.4}, 2, 0.5)
+	for _, r := range alone {
+		want := 0.007951
+		if r.ID == "b" {
+			want = 0.007549
+		}
+		if r.RRFScoreOriginal == nil || *r.RRFScoreOriginal != want {
+			t.Errorf("reranker alone: %s rrf_score_original = %v, want the fusion score %v", r.ID, deref(r.RRFScoreOriginal), want)
+		}
 	}
 }
 

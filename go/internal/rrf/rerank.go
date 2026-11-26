@@ -449,12 +449,11 @@ func applyRerankScores(results []SearchResult, rerankScores []float64, docCount 
 	for i := range reranked {
 		originalRRF := reranked[i].RRFScore
 		rrfNorm := originalRRF / maxRRF
-		// The fusion's score, unless a stage before it already kept it (issue
-		// #528: rrf_score_original means "before any post-fusion stage").
-		if reranked[i].RRFScoreOriginal == nil {
-			originalRRFRounded := float64(int(originalRRF*10000+0.5)) / 10000
-			reranked[i].RRFScoreOriginal = &originalRRFRounded
-		}
+		// The fusion's score, unless a stage before it already kept it — the
+		// one rule of every post-fusion stage (keepFusionScore, issue #528).
+		// Exact: a copy rounded to four decimals carried a fusion score just
+		// below query.confident_threshold across it (0.00795 read as 0.0080).
+		keepFusionScore(&reranked[i])
 
 		// The callers hand in one score per reranked doc (docCount of them);
 		// the second bound states it where the index is read, which gosec's
