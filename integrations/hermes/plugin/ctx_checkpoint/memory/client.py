@@ -101,6 +101,9 @@ class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
 MAX_ANSWER_BYTES = 64 * 1024 * 1024
 # The size of each read of a body.
 READ_CHUNK_BYTES = 64 * 1024
+# The least share of the time left that one address of a host gets for its connect when the host has
+# several (the last one always gets all that is left): a connect over a slow route still fits in it.
+CONNECT_SHARE_MIN_S = 0.1
 
 
 class _AnswerTooLarge(http.client.HTTPException):
@@ -187,15 +190,19 @@ class _DeadlineConnection:
         self.response_class = functools.partial(_DeadlineResponse, deadline=self._deadline)
 
     def _connect_by_deadline(self, address: tuple, _timeout: Any = None, source_address: Any = None) -> socket.socket:
-        """``socket.create_connection``, each address tried with what is left of the deadline (the
-        stdlib gives every address the whole timeout). The host name lookup is not bounded."""
+        """``socket.create_connection`` within the deadline (the stdlib gives every address the whole
+        timeout): each address gets an equal share of what is left among the ones not tried yet, at
+        least :data:`CONNECT_SHARE_MIN_S` and never more than is left, so an address that never answers
+        (an IPv6 address without a route) leaves time for the ones after it, and the last one gets all
+        that is left. The host name lookup is not bounded."""
         host, port = address
         errors: list[OSError] = []
-        for family, kind, proto, _name, peer in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+        infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        for tried, (family, kind, proto, _name, peer) in enumerate(infos):
             left = _time_left(self._deadline)
             sock = socket.socket(family, kind, proto)
             try:
-                sock.settimeout(left)
+                sock.settimeout(min(left, max(CONNECT_SHARE_MIN_S, left / (len(infos) - tried))))
                 if source_address:
                     sock.bind(source_address)
                 sock.connect(peer)

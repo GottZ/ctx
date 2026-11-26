@@ -585,7 +585,8 @@ serve several profiles without mixing their stores.
   Every other failure degrades gracefully (log + no-op) — a down CTX never crashes the agent.
 - **Every REST call ends within its timeout (0.19.1, #566).** The timeout of a call
   (`api_timeout`, `synthesis_timeout`, or what a deadline leaves: the recall's second query,
-  a checkpoint's writes) bounds the call as a whole — each address of the connect, the
+  a checkpoint's writes) bounds the call as a whole — the connect (each address of the host
+  gets an equal share of what is left, so one that never answers leaves time for the next), the
   request, the status line, the headers and the body — not each socket operation on its own:
   before, an answer that arrived a few bytes at a time, each within the timeout, held a call
   for as long as it kept coming (measured: the recall 30 s against Hermes' 8 s wait). A call

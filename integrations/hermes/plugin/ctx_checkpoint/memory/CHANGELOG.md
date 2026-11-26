@@ -16,10 +16,13 @@ Every REST call ends within its bound — status line, headers and body (#566).
   long as it kept sending. Measured against a double that sends one byte per 0.5 s for 30 s: the
   prefetch, its second query and its `type-list`, the chain's head search and writes, a required
   fact and the agent tools each ran 30 s, past their bounds — the prefetch past Hermes' 8 s wait,
-  which then dropped it whole. Now every address of the connect and every read of the answer wait
-  at most for what is left of the call's timeout, and the request goes out within what was left
-  when the connection stood (`client._DeadlineConnection`, `client._DeadlineReader`): the same
-  calls end at their bounds. The error at the bound is the
+  which then dropped it whole. Now every read of the answer waits at most for what is left of the
+  call's timeout, each address of the connect gets an equal share of what is left among the
+  addresses not tried yet (at least 0.1 s; the last one gets all of it, so an address that never
+  answers — IPv6 without a route — leaves time for the next), and the request goes out within what
+  was left when the connection stood (`client._DeadlineConnection`, `client._DeadlineReader`): the
+  same calls end at their bounds. A host whose first address never answers and whose second does
+  is reached in half the bound (the stdlib gave each address the whole timeout: once the bound). The error at the bound is the
   one a server that stops sending gives (`connection error: timed out`, over HTTPS `connection
   error: The read operation timed out`; no status, no code), so every caller reads it as before; a
   call given up on closes its connection. An answer that ends before its `Content-Length` still

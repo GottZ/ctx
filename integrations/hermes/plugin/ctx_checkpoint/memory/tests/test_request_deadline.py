@@ -724,3 +724,91 @@ def test_a_write_given_up_that_landed_reads_as_a_timeout_did(wire, tmp_path, mon
     assert len(titles) == 3 and sum(" part " in t for t in titles) == 1, titles
     assert rest.noops == 1 and p._last_chain_receipt.reused == 1
     p.shutdown()
+
+
+# -- review round 1: a host whose first address never answers ---------------------------------------
+
+
+def _resolving(monkeypatch, host: str, addresses: list[tuple[str, int]]) -> None:
+    """``host`` resolves to ``addresses`` in this order (any other name as before)."""
+    real = socket.getaddrinfo
+
+    def getaddrinfo(name, port, *args, **kwargs):
+        if name == host:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", a) for a in addresses]
+        return real(name, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+
+
+def _address(w: Wire) -> tuple[str, int]:
+    return "127.0.0.1", int(w.url.rsplit(":", 1)[1])
+
+
+@pytest.mark.parametrize("dead", [1, 2])
+def test_a_host_whose_first_addresses_never_answer_is_reached_on_its_live_one(wire, full_backlog, monkeypatch, dead):
+    """A name that resolves first to addresses that never answer the connect (an IPv6 address without
+    a route, say) and then to a live one: each address gets a share of the time left, so the live one
+    is still tried within the bound. Before the share, the first dead address took the whole bound and
+    the call failed where the stdlib's connect (every address the whole timeout) had only been slow."""
+    w = wire(lambda *_: answer(SEARCH_ANSWER))
+    _resolving(monkeypatch, "dual.test", [full_backlog() for _ in range(dead)] + [_address(w)])
+    client = CtxClient("http://dual.test:8080", KEY, timeout=3 * TIMEOUT_S)
+    assert client.search("q") == SEARCH_ANSWER
+    assert w.paths() == ["/api/search"]
+
+
+@pytest.fixture
+def spy(monkeypatch):
+    """Every socket timeout the client sets, with the time it was set: the client's ``socket`` module
+    seen through a socket class that records its ``settimeout`` calls (the double's sockets are not)."""
+    sets: list[tuple[float, float]] = []
+
+    class Recording(socket.socket):
+        __slots__ = ()
+
+        def settimeout(self, value):
+            sets.append((time.monotonic(), value))
+            super().settimeout(value)
+
+    class View:
+        """The socket module as the client sees it, read at each use (a patched ``getaddrinfo`` too)."""
+
+        socket = Recording
+
+        def __getattr__(self, name):
+            return getattr(socket, name)
+
+    monkeypatch.setattr(client_mod, "socket", View())
+    return sets
+
+
+def _assert_within(sets: list[tuple[float, float]], bound: float, eps: float = 0.05) -> None:
+    """The exact measure: no timeout the client set reaches past the call's deadline. The deadline is
+    fixed when the connection is made, before the first timeout is set, so it lies at most ``bound``
+    after that first one: every timeout set at ``t`` with value ``v`` has ``t + v`` within it."""
+    assert sets, "the client set no socket timeout"
+    first = sets[0][0]
+    late = [(round(t - first, 3), round(v, 3)) for t, v in sets if t + v > first + bound + eps]
+    assert not late, late
+
+
+def test_dead_addresses_share_the_bound_and_the_call_ends_at_it(full_backlog, monkeypatch, spy):
+    """Three addresses that never answer: the first gets a third of the bound, the next ones what is
+    left divided among them, and the call ends at the bound — not before (the last address gets all
+    that is left), not after."""
+    _resolving(monkeypatch, "dead.test", [full_backlog() for _ in range(3)])
+    bound = 3 * TIMEOUT_S
+    _, error, took = _timed(lambda: CtxClient("http://dead.test:8080", KEY, timeout=bound).search("q"))
+    assert isinstance(error, CtxApiError) and "timed out" in str(error), error
+    assert took >= 0.9 * bound, took
+    assert spy[0][1] <= bound / 3 + 0.01, spy
+    _assert_within(spy, bound)
+
+
+def test_a_connect_to_a_live_address_after_a_dead_one_keeps_the_rest_of_the_bound(wire, full_backlog, monkeypatch, spy):
+    w = wire(lambda *_: answer(SEARCH_ANSWER))
+    _resolving(monkeypatch, "dual.test", [full_backlog(), _address(w)])
+    bound = 3 * TIMEOUT_S
+    assert CtxClient("http://dual.test:8080", KEY, timeout=bound).search("q") == SEARCH_ANSWER
+    _assert_within(spy, bound)
