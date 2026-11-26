@@ -246,6 +246,16 @@ func TestApplyParentFoldKeepsTheFusionScale(t *testing.T) {
 	if o := out[0].RRFScoreOriginal; out[0].RRFScore != 0.0095 || o == nil || *o != 0.0072 {
 		t.Errorf("in-set parent: score %v rrf_score_original %v, want 0.0095 and 0.0072", out[0].RRFScore, v(o))
 	}
+	// The child wins on the boosted scale, the parent on the fusion's: the
+	// parent keeps its own fusion score.
+	inSet3 := []rrf.SearchResult{
+		{ID: "issue", RRFScore: 0.0080, RRFScoreOriginal: f(0.0075)},
+		{ID: "comment", RRFScore: 0.0090, RRFScoreOriginal: f(0.0072)},
+	}
+	out, _, _ = applyParentFold(inSet3, map[string]childFold{"comment": {parentID: "issue", visible: true}}, nil)
+	if o := out[0].RRFScoreOriginal; out[0].RRFScore != 0.0090 || o == nil || *o != 0.0075 {
+		t.Errorf("in-set parent: score %v rrf_score_original %v, want 0.0090 and 0.0075", out[0].RRFScore, v(o))
+	}
 	// Hydrated parent: the child's score and the child's fusion score.
 	hyd := []rrf.SearchResult{{ID: "comment", RRFScore: 0.0090, RRFScoreOriginal: f(0.0072)}, {ID: "other", RRFScore: 0.0050}}
 	out, _, _ = applyParentFold(hyd, map[string]childFold{"comment": {parentID: "issue", visible: true}},
