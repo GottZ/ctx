@@ -302,6 +302,21 @@ func warnWorkflowForgeMap(p Policy) {
 	}
 }
 
+// warnUntrustedDropped logs a WARN when a builtin type's name is served from an
+// operator's own row (builtin=false) without the untrusted mark its compiled-in
+// definition carries (#289 review). The row wins: a seed migration inserts with
+// ON CONFLICT DO NOTHING and never overwrites a tuned row, so the blocks of that
+// type reach every read surface without the foreign-text frame. Once per Reload
+// and name — a name has one _global row. The row is served as stored.
+func warnUntrustedDropped(p Policy, compiled map[string]Policy) {
+	b, ok := compiled[p.Name]
+	if !ok || p.Builtin || !b.Retrieval.Untrusted || p.Retrieval.Untrusted {
+		return
+	}
+	slog.Warn("blocktype: an operator row serves a builtin type without its untrusted mark — its blocks are read without the foreign-text frame until the row sets retrieval.untrusted",
+		"name", p.Name, "scope", p.Scope)
+}
+
 // InvalidateTenant drops exactly one tenant's cached generation; the next
 // SnapshotForRequest/SnapshotForTenant for that scope rebuilds it lazily. Called
 // by the NOTIFY listener dispatch on a tenant-scope registry write
@@ -403,8 +418,10 @@ func (r *Registry) Reload(ctx context.Context, pool *pgxpool.Pool) error {
 	defer rows.Close()
 
 	merged := make(map[string]Policy)
+	compiled := make(map[string]Policy)
 	for _, b := range builtinPolicies() {
 		merged[b.Name] = b
+		compiled[b.Name] = b
 	}
 	seen := make(map[string]bool)
 	for rows.Next() {
@@ -421,6 +438,7 @@ func (r *Registry) Reload(ctx context.Context, pool *pgxpool.Pool) error {
 			return err // corrupt row: whole reload fails, previous snapshot stays
 		}
 		warnWorkflowForgeMap(p)
+		warnUntrustedDropped(p, compiled)
 		merged[p.Name] = p
 		seen[p.Name] = true
 	}
