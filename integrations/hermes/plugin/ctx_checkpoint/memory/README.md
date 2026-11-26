@@ -119,8 +119,8 @@ are clamped, unknown values fall back to the default.
 | `auto_compress_extract` | `true` | Fact extraction before compaction |
 | `facts_from_user` | `none` | User turns as facts: `none` = never, `false` = declarative turns only (no request/question/feedback markers), `true` = all |
 | `facts_reject_cjk_codeswitch` | `false` | Also reject a fact that contains *any* CJK character inside Latin text (model code-switch artifacts). The `>20 % CJK` rule always applies. Leave off if you write Chinese/Japanese/Korean |
-| `api_timeout` | `10` | Seconds for retrieval and write calls (1–30) |
-| `synthesis_timeout` | `90` | Seconds for `synthesize: true` queries (15–300) |
+| `api_timeout` | `10` | Seconds for retrieval and write calls (1–30), each call as a whole over `transport: rest`: connect, request and the whole answer (0.19.1) |
+| `synthesis_timeout` | `90` | Seconds for `synthesize: true` queries (15–300), the whole call over `transport: rest` (0.19.1) |
 | `checkpoint_mode` | `best_effort` | `off` = legacy v1 hook (raw transcript, no chain); `best_effort` / `required` = checkpoint API v2 (identical in the plugin — fail-closed is requested by the host, see below) |
 | `checkpoint_budget_s` | `60` | Time budget for the synchronous pre-compress writes, chain and required facts share it (5–600; plugin key `budget_s`); a paced chain adds 61 s for every rate window after the first |
 | `checkpoint_chain` | `true` | Write the transcript chain (needs `checkpoint_mode` ≠ `off`); independent of `auto_compress_extract`. `false` saves no wording: under `compression.checkpoint_required` every compaction is refused |
@@ -233,8 +233,15 @@ that names no type, `--all-types` included.
   text surfaces — and the context asks the model to say an agent produced it when citing
   it. It is kept under `prefetch_untrusted: drop`: the block was lifted into a trusted type
   on purpose. A hit without the record renders byte for byte as before.
+- Hermes waits 8 s for a provider's prefetch and drops it after that. Over `transport:
+  rest` the prefetch's query, and a search after a failed query, end within what that wait
+  leaves less 0.5 s, each at most `api_timeout` (0.19.1): a ctx server (or a proxy) that is
+  slow or sends its answer a little at a time ends the recall before Hermes stops waiting,
+  with nothing recalled, as a failed query and search do — no call keeps running behind the
+  wait (Hermes counts such a call as stuck). An answer in the last 0.5 s of the wait is
+  given up. Over MCP the transport keeps the recall's timeout.
 - `queue_prefetch` pre-warms the next turn's recall in the background; a matching
-  result younger than 60 s is consumed by the next prefetch.
+  result younger than 60 s is consumed by the next prefetch. Its query keeps `api_timeout`.
 - The host's recall indicator (`🧠 CTX — recalled N memories`) reports the number of
   injected blocks.
 
@@ -576,6 +583,21 @@ serve several profiles without mixing their stores.
   CTX is back). Over MCP the provider makes no call at startup (Hermes connects the server
   entry itself); setup and the status run a connection test instead.
   Every other failure degrades gracefully (log + no-op) — a down CTX never crashes the agent.
+- **Every REST call ends within its timeout (0.19.1, #566).** The timeout of a call
+  (`api_timeout`, `synthesis_timeout`, or what a deadline leaves: the recall's second query,
+  a checkpoint's writes) bounds the call as a whole — each address of the connect, the
+  request, the status line, the headers and the body — not each socket operation on its own:
+  before, an answer that arrived a few bytes at a time, each within the timeout, held a call
+  for as long as it kept coming (measured: the recall 30 s against Hermes' 8 s wait). A call
+  given up on closes its connection. A synthesis that runs longer than `synthesis_timeout`
+  now ends there although ctx keeps the connection alive with a space every 25 s; raise
+  `synthesis_timeout` (up to 300) for slower synthesis backends. An answer body larger than
+  64 MiB ends the call as an error (`connection error: answer larger than …`) instead of
+  growing the process: ctx's largest answers to the plugin's calls are a search of ten rows
+  that each carry the tags of a block at the store's 1 MiB request cap (59.8 MB) and a get of
+  a block from one write at that cap (6.3 MB); only a block whose metadata was merged from
+  more than about ten such writes reads larger. The host name lookup before the connect is
+  not bounded (the resolver's own timeouts apply).
 - **Embedding backfill:** right after stores, `/api/query` may time out until embeddings
   are ready — `/api/search` and `/api/store` work immediately; recall falls back to
   search automatically.

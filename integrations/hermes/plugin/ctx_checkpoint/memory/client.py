@@ -22,10 +22,14 @@ Auth: ``X-Context-Key: <key>`` (alternative ``Authorization: Bearer``).
 
 from __future__ import annotations
 
+import functools
 import http.client
+import io
 import json
 import logging
+import socket
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -87,9 +91,153 @@ class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-# The default opener's handlers (proxies from the environment, https, error processing) with
-# the redirect handler replaced.
-_OPENER = urllib.request.build_opener(_RefuseRedirect)
+# The most bytes of one answer's body the client reads (#566); a server or a proxy that sends more
+# ends the call as an error instead of growing the process. Measured against ctx's handlers: a
+# retrieval query at its 20-source clamp at most 0.26 MB, type-list 8 KB; a block from one write at
+# the 1 MiB request cap, HTML-escaped on the way out (six bytes per character), 6.3 MB in a get or a
+# store answer; a search at the plugin's largest limit (10) with every row carrying such a block's
+# tags 59.8 MB. Only a block whose metadata was merged from more than about ten such writes (each
+# adds 6 MB to its answers) reads larger.
+MAX_ANSWER_BYTES = 64 * 1024 * 1024
+# The size of each read of a body.
+READ_CHUNK_BYTES = 64 * 1024
+
+
+class _AnswerTooLarge(http.client.HTTPException):
+    """The body passed :data:`MAX_ANSWER_BYTES`; nothing more of it is read."""
+
+
+def _time_left(deadline: float) -> float:
+    """Seconds until ``deadline`` (``time.monotonic``); ``TimeoutError`` once it has passed — the
+    error a socket raises at its timeout, so every caller reads both alike."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("timed out")
+    return left
+
+
+class _DeadlineReader(io.RawIOBase):
+    """The raw stream under an answer's buffer: each read waits at most until the deadline. A socket
+    timeout bounds one read; set to what is left before every read, it bounds them all together."""
+
+    def __init__(self, sock: socket.socket, deadline: float) -> None:
+        super().__init__()
+        self._sock = sock
+        self._raw = sock.makefile("rb", buffering=0)
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int | None:
+        self._sock.settimeout(_time_left(self._deadline))
+        return self._raw.readinto(buffer)
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def close(self) -> None:
+        try:
+            self._raw.close()
+        finally:
+            super().close()
+
+
+class _DeadlineResponse(http.client.HTTPResponse):
+    """An answer read against the request's deadline — status line, headers and body — whose whole
+    body (``read()``) is read in pieces of :data:`READ_CHUNK_BYTES`, at most :data:`MAX_ANSWER_BYTES`."""
+
+    def __init__(self, sock: socket.socket, *args: Any, deadline: float, **kwargs: Any) -> None:
+        # HTTPResponse takes nothing from the socket but its reading file.
+        reads = types.SimpleNamespace(makefile=lambda *_: io.BufferedReader(_DeadlineReader(sock, deadline)))
+        super().__init__(reads, *args, **kwargs)
+
+    def read(self, amt: int | None = None) -> bytes:
+        if amt is not None and amt >= 0:
+            return super().read(amt)
+        if self.length is not None and self.length > MAX_ANSWER_BYTES:
+            raise _AnswerTooLarge(f"answer larger than {MAX_ANSWER_BYTES} bytes, the most the client reads")
+        parts: list[bytes] = []
+        size = 0
+        while chunk := super().read(READ_CHUNK_BYTES):
+            size += len(chunk)
+            if size > MAX_ANSWER_BYTES:
+                raise _AnswerTooLarge(f"answer larger than {MAX_ANSWER_BYTES} bytes, the most the client reads")
+            parts.append(chunk)
+        if self.length:
+            # The connection ended before the announced length: a piece read stays silent about it
+            # (http.client), the whole read raised — so does this one.
+            raise http.client.IncompleteRead(b"".join(parts), self.length)
+        return b"".join(parts)
+
+
+class _DeadlineConnection:
+    """An ``http.client`` connection whose whole exchange ends within the ``timeout`` it was made with
+    (#566): every address of the connect and every read of the answer wait at most for what is left of
+    it, and the request goes out within what was left when the connection stood (one send call is
+    bounded by the socket's timeout as a whole). ``http.client`` hands the timeout to each socket
+    operation on its own, so an answer sent a byte at a time held a call for as long as it kept coming."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if self.timeout < 0:
+            raise ValueError("Timeout value must be non-negative")  # what socket.settimeout says
+        self._deadline = time.monotonic() + self.timeout
+        self._create_connection = self._connect_by_deadline
+        self.response_class = functools.partial(_DeadlineResponse, deadline=self._deadline)
+
+    def _connect_by_deadline(self, address: tuple, _timeout: Any = None, source_address: Any = None) -> socket.socket:
+        """``socket.create_connection``, each address tried with what is left of the deadline (the
+        stdlib gives every address the whole timeout). The host name lookup is not bounded."""
+        host, port = address
+        errors: list[OSError] = []
+        for family, kind, proto, _name, peer in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+            left = _time_left(self._deadline)
+            sock = socket.socket(family, kind, proto)
+            try:
+                sock.settimeout(left)
+                if source_address:
+                    sock.bind(source_address)
+                sock.connect(peer)
+                # What follows before the answer — a TLS handshake, the request — is bounded by the
+                # socket's timeout as a whole.
+                sock.settimeout(_time_left(self._deadline))
+                return sock
+            except OSError as exc:
+                sock.close()
+                errors.append(exc)
+            except BaseException:
+                sock.close()
+                raise
+        if errors:
+            raise errors[0]
+        raise OSError("getaddrinfo returns an empty list")
+
+
+class _DeadlineHTTPConnection(_DeadlineConnection, http.client.HTTPConnection):
+    pass
+
+
+class _DeadlineHTTPHandler(urllib.request.HTTPHandler):
+    def do_open(self, http_class: Any, req: urllib.request.Request, **http_conn_args: Any) -> Any:
+        return super().do_open(_DeadlineHTTPConnection, req, **http_conn_args)
+
+
+_HANDLERS: list[Any] = [_RefuseRedirect, _DeadlineHTTPHandler]
+if hasattr(http.client, "HTTPSConnection"):  # Python built with ssl
+
+    class _DeadlineHTTPSConnection(_DeadlineConnection, http.client.HTTPSConnection):
+        pass
+
+    class _DeadlineHTTPSHandler(urllib.request.HTTPSHandler):
+        def do_open(self, http_class: Any, req: urllib.request.Request, **http_conn_args: Any) -> Any:
+            return super().do_open(_DeadlineHTTPSConnection, req, **http_conn_args)
+
+    _HANDLERS.append(_DeadlineHTTPSHandler)
+
+# The default opener's handlers (proxies from the environment, error processing) with the redirect
+# handler replaced and the HTTP(S) handlers bounded by the request's timeout as a whole.
+_OPENER = urllib.request.build_opener(*_HANDLERS)
 
 
 # The wait before the one retry of a 429 (per-key write rate limit) or a 409 write_conflict.
@@ -100,7 +248,9 @@ _sleep = time.sleep
 
 
 def _urlopen(req: urllib.request.Request, *, timeout: float) -> Any:
-    """``urllib.request.urlopen`` without following redirects (see ``_RefuseRedirect``)."""
+    """``urllib.request.urlopen`` without following redirects (see ``_RefuseRedirect``), the whole
+    exchange within ``timeout`` seconds: the connect, the request, the answer's status line and
+    headers, and its body through ``read()`` — at most :data:`MAX_ANSWER_BYTES` of it (#566)."""
     return _OPENER.open(req, timeout=timeout)
 
 
@@ -282,8 +432,9 @@ class CtxClient:
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         req = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310 — http(s) only, see __init__
         t = timeout if timeout is not None else self._timeout
-        # The timeout bounds the whole request: the one 429 retry and the wait before it included,
-        # so a caller's deadline (a checkpoint passes the time it leaves) also holds for the retry.
+        # The timeout bounds the whole request — connect, request, the answer's head and body
+        # (``_urlopen``, #566), the one 429 retry and the wait before it included — so a caller's
+        # deadline (a checkpoint passes the time it leaves) holds for all of it.
         end = _monotonic() + t
         last_error: CtxApiError | None = None
 
@@ -361,14 +512,18 @@ class CtxClient:
         synthesize: bool = False,
         include_content: bool = True,
         types_exclude: list[str] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
+        """``timeout``: the call's bound (the recall passes what Hermes' wait for the prefetch leaves);
+        default ``synthesis_timeout`` for a synthesis, else the client's timeout."""
         payload: dict[str, Any] = {"query": text, "synthesize": synthesize}
         if include_content:
             payload["include_content"] = True
         if types_exclude:
             payload["types_exclude"] = list(types_exclude)
-        t = self._synthesis_timeout if synthesize else None
-        return self._request("POST", "/api/query", payload, timeout=t)
+        if timeout is None and synthesize:
+            timeout = self._synthesis_timeout
+        return self._request("POST", "/api/query", payload, timeout=timeout)
 
     def query_types(self, text: str, types: list[str], *, limit: int, timeout: float | None = None) -> dict[str, Any]:
         """Retrieval-only ``/api/query`` that sees only blocks of ``types`` (GottZ/ctx#289): the REST query
@@ -457,11 +612,16 @@ class CtxClient:
     def get_block(self, block_id: str, timeout: float | None = None) -> dict[str, Any]:
         # Live-verified v4.x contract (2026-08-13): /api/manage expects "id" at
         # top level; the nested data.id form is rejected with
-        # "Missing required field: id". Fall back for older server versions.
+        # "Missing required field: id". Fall back for older server versions — within the one bound
+        # of the call (#566): the second form gets what the first left.
+        end = _monotonic() + (timeout if timeout is not None else self._timeout)
         payload: dict[str, Any] = {"action": "get", "id": block_id}
         try:
             return self._request("POST", "/api/manage", payload, timeout=timeout)
         except CtxApiError as exc:
             if "Missing required field: id" not in str(exc):
                 raise
-        return self._request("POST", "/api/manage", {"action": "get", "data": {"id": block_id}}, timeout=timeout)
+        left = end - _monotonic()
+        if left <= 0:
+            raise CtxApiError("connection error: timed out")  # what the bound ends a call with
+        return self._request("POST", "/api/manage", {"action": "get", "data": {"id": block_id}}, timeout=left)

@@ -225,7 +225,10 @@ older server refuses them, and the plugin then recalls through the `search` tool
 (lexical hybrid: fulltext + trigram) after one refused call, until the provider
 connects again.
 `transport: rest` (plus `CTX_BASE_URL`/`CTX_KEY` in the profile's `.env`, or
-`rest_base_url` in the section) enables the CLI's read/write commands.
+`rest_base_url` in the section) enables the CLI's read/write commands. There every call
+ends within its timeout as a whole — connect, request and the whole answer, also when a
+server or a proxy sends it a few bytes at a time — and the recall within Hermes' 8 s wait
+for it (0.19.1, #566; [engine README](memory/README.md#notes--pitfalls)).
 
 **Two tool surfaces.** With `memory: true` the model sees this plugin's `ctx_*`
 tools next to the `mcp__ctx__*` tools of the same server entry. Nothing breaks;

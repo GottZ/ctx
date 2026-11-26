@@ -656,7 +656,7 @@ class CtxMemoryProvider(MemoryProvider):
                 self._last_recall_count = cached[2]
                 return cached[1]
         try:
-            context, self._last_recall_count = self._recall(q, client, entry)
+            context, self._last_recall_count = self._recall(q, client, entry, within_host_wait=True)
             return context
         except Exception as exc:
             logger.debug("CTX prefetch failed (non-fatal): %s", self._error_text(exc))
@@ -705,7 +705,12 @@ class CtxMemoryProvider(MemoryProvider):
         return list(self._config.get("prefetch_types_exclude") or [])
 
     def _recall(
-        self, text: str, client: CtxClient | None = None, entry: _cp.EntryState | None = None
+        self,
+        text: str,
+        client: CtxClient | None = None,
+        entry: _cp.EntryState | None = None,
+        *,
+        within_host_wait: bool = False,
     ) -> tuple[str, int]:
         """Retrieval-only recall → ``(context block, hit count)``. Query path with search
         fallback (embedding backfill can make /api/query time out right after stores). Both
@@ -713,17 +718,36 @@ class CtxMemoryProvider(MemoryProvider):
         ``client`` pins the call to a binding (prefetch, warm-ups); default: the current client.
         ``entry``: that binding's server entry (:meth:`_recall_entry`) — with it, after an answer of
         the query path, the second query of :meth:`_session_digest_sources` may add digests and facts
-        behind the recalled blocks."""
+        behind the recalled blocks.
+        ``within_host_wait`` (the prefetch, #566): over REST the query and a fallback search end within
+        what Hermes' wait for the prefetch leaves less the margin, each at most ``api_timeout`` — Hermes
+        drops an answer after its wait anyway, and a call still running then counts as a stuck one. A
+        warm-up keeps ``api_timeout``; over MCP the transport owns the recall's timeout, as before."""
         if client is None:
             client = self._client
         if not client:
             return "", 0
         started = self._now()
         types_exclude = self._types_exclude()
+        deadline = None
+        if within_host_wait and getattr(client, "transport", "") != "mcp":
+            deadline = started + HOST_PREFETCH_WAIT_S - SESSION_DIGEST_RECALL_MARGIN_S
+
+        def bound(now: float | None = None) -> dict[str, float]:
+            """The bound of a read that starts at ``now`` (default: the clock's time)."""
+            if deadline is None:
+                return {}
+            left = deadline - (self._now() if now is None else now)
+            if left <= 0:
+                raise CtxApiError("recall: no time left of Hermes' wait for the prefetch", code="timeout")
+            return {"timeout": min(float(self._config.get("api_timeout") or 10.0), left)}
+
         if self._config.get("prefetch_mode") == "search":
-            return self._format_search_results(client.search(text, types_exclude=types_exclude))
+            return self._format_search_results(client.search(text, types_exclude=types_exclude, **bound(started)))
         try:
-            data = client.query(text, synthesize=False, include_content=True, types_exclude=types_exclude)
+            data = client.query(
+                text, synthesize=False, include_content=True, types_exclude=types_exclude, **bound(started)
+            )
             if data.get("success"):
                 sources = data.get("sources") or []
                 shown: list[dict[str, Any]] = []
@@ -735,7 +759,7 @@ class CtxMemoryProvider(MemoryProvider):
             return "", 0
         except Exception:
             try:
-                return self._format_search_results(client.search(text, types_exclude=types_exclude))
+                return self._format_search_results(client.search(text, types_exclude=types_exclude, **bound()))
             except Exception:
                 return "", 0
 

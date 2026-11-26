@@ -6,6 +6,49 @@ from ctx_checkpoint 0.6.0 on the engine is versioned with the plugin (`../VERSIO
 `../plugin.yaml`) and this file records engine-level changes only. Internal phase names
 (P1–P6) refer to the ctx-plugin-v2 work packages.
 
+## [ctx_checkpoint 0.19.1] — 2026-11-26
+
+Every REST call ends within its bound — status line, headers and body (#566).
+
+- **The bound of a call.** `transport: rest` calls ctx through urllib, which gives the timeout to
+  each socket operation on its own (the connect, every read), not to the call: a ctx server or a
+  proxy that sent its answer a few bytes at a time, each within the timeout, held the call for as
+  long as it kept sending. Measured against a double that sends one byte per 0.5 s for 30 s: the
+  prefetch, its second query and its `type-list`, the chain's head search and writes, a required
+  fact and the agent tools each ran 30 s, past their bounds — the prefetch past Hermes' 8 s wait,
+  which then dropped it whole. Now every address of the connect and every read of the answer wait
+  at most for what is left of the call's timeout, and the request goes out within what was left
+  when the connection stood (`client._DeadlineConnection`, `client._DeadlineReader`): the same
+  calls end at their bounds. The error at the bound is the
+  one a server that stops sending gives (`connection error: timed out`, over HTTPS `connection
+  error: The read operation timed out`; no status, no code), so every caller reads it as before; a
+  call given up on closes its connection. An answer that ends before its `Content-Length` still
+  raises `IncompleteRead`.
+- **The prefetch** over REST bounds its query, and a search after a failed query, by what Hermes'
+  8 s wait leaves less 0.5 s, each at most `api_timeout` (default 10 s, longer than the wait): a
+  slow or trickling server ends the recall at 7.5 s with nothing recalled, as a failed query does,
+  instead of running past the wait, where Hermes dropped the recall and counted the call as stuck.
+  Warm-ups (`queue_prefetch`) keep `api_timeout`; over MCP nothing changes (the transport's own
+  timeout applies there, as before).
+- **The answer's size.** A body over 64 MiB ends the call as an error (`connection error: answer
+  larger than 67108864 bytes, …`), a `Content-Length` over it as soon as the head arrives; before,
+  a server or a proxy that kept sending grew the process until the call's end. The largest answers
+  measured against ctx's handlers for the plugin's calls: a search at the plugin's largest limit
+  (10) whose rows carry the tags of blocks at the store's 1 MiB request cap 59.8 MB, a get or store
+  answer of such a block 6.3 MB (its metadata grows by 6 MB with every write merged into it), a
+  retrieval query at its 20-source clamp 0.26 MB, `type-list` 8 KB.
+- **`get_block`** sends its form for older servers with what the first left of the call's bound
+  (before: a second whole timeout).
+- **Declared changes.** A call whose answer arrives after its bound fails where it used to arrive
+  late, as a silent server's always did: a `synthesize: true` query (the `ctx_query` tool, `hermes
+  ctx_checkpoint query`) that runs longer than `synthesis_timeout` ends there — ctx's keepalive
+  space every 25 s kept it going until the answer before (raise `synthesis_timeout`, up to 300 s, for
+  a slower synthesis backend); a checkpoint whose head search or write answers after `api_timeout`
+  fails closed at `api_timeout`; an error answer (429, 5xx) whose body does not arrive within the
+  bound keeps its status but not the server's code and text. A prefetch answer in the last 0.5 s of
+  Hermes' wait is given up. The host name lookup before the connect is not bounded (the
+  resolver's own timeouts apply).
+
 ## [ctx_checkpoint 0.19.0] — 2026-11-26
 
 Digests and facts are stored as ctx's block type `session-digest` (GottZ/ctx#289, point 4).
