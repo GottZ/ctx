@@ -409,3 +409,22 @@ func TestUpdateConfig565_ShippedFieldsNamed(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateConfig565_ShippedTopLevelField: the top-level structural_link_classes
+// is a field like any section field — a repair of a broken issue row that
+// leaves it out or names it null is refused, the whole config is written.
+// Killed mutant: a top-level key named null counted as named.
+func TestUpdateConfig565_ShippedTopLevelField(t *testing.T) {
+	const whole = `{"v":1,"guard":{"mode":"flag","candidates":"same-scope","threshold_duplicate":0.97,"threshold_review":0.9},"digest":{"include":false},"overview":{"include":false},"workflow":{"states":["backlog","in-progress","done"],"initial":"backlog","terminal":["done"],"forge_state_map":{"open":"backlog","closed":"done"}},"structural_link_classes":["references","duplicate-of"]}`
+	if out, err := UpdateConfig("issue", globalScope, true, false, []byte(`[]`), []byte(whole)); err != nil || !jsonSame(out, whole) {
+		t.Fatalf("the whole issue config over a broken row: %s, %v", out, err)
+	}
+	for _, update := range []string{
+		strings.Replace(whole, `["references","duplicate-of"]`, `null`, 1),
+		strings.Replace(whole, `,"structural_link_classes":["references","duplicate-of"]`, ``, 1),
+	} {
+		if _, err := UpdateConfig("issue", globalScope, true, false, []byte(`[]`), []byte(update)); err == nil || !strings.Contains(err.Error(), "structural_link_classes") {
+			t.Errorf("issue without its link classes over a broken row: %v — want a refusal naming structural_link_classes", err)
+		}
+	}
+}
