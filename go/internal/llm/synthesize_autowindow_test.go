@@ -36,6 +36,9 @@ type autoStub struct {
 
 func newAutoStub(t *testing.T, endpointsJSON string) *autoStub {
 	t.Helper()
+	// The production cache is keyed by host and model; a port httptest reuses
+	// would serve this test the endpoints of an earlier one (issue #369).
+	backends.DefaultEndpointCache().ResetForTest()
 	s := &autoStub{endpointsJSON: endpointsJSON}
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/endpoints") {

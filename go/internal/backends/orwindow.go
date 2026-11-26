@@ -121,6 +121,16 @@ var defaultEndpointCache = NewEndpointCache()
 // DefaultEndpointCache returns the process-wide discovery cache.
 func DefaultEndpointCache() *EndpointCache { return defaultEndpointCache }
 
+// ResetForTest drops every cached entry. The cache is keyed by host and
+// model, and httptest hands a closed server's port to a later one: a test
+// that serves its own discovery route through the process-wide cache calls
+// this first, or it can read the endpoints an earlier test cached.
+func (c *EndpointCache) ResetForTest() {
+	c.mu.Lock()
+	c.entries = map[string]*endpointEntry{}
+	c.mu.Unlock()
+}
+
 // Endpoints resolves the per-provider endpoint list of model on backend b,
 // serving the cache when it is fresh. ok=false means "no data" — the caller
 // must then behave exactly as it did before this wave existed (declared

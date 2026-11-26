@@ -75,8 +75,9 @@ the caller's timeout (``hermes_cli/plugins_context.py`` ``call_mcp``) and cancel
 its MCP loop when it runs out (``tools/mcp_tool_loop.py`` ``_run_on_mcp_loop``), which releases
 the RPC lock. Its envelope (``{"ok", "result"|"error", …}``) is read as the dispatch's answer; an
 answer Hermes cut at its 64 KB plugin cap fails the call. A refused grant (``PermissionError``,
-raised before any transport work) sends that call and every later one of this client through
-the dispatch, as without a grant.
+raised before any transport work) sends that call and every later one of the checkpoint through
+the dispatch, as without a grant; the next checkpoint asks again (``forget_host_refusal``,
+GottZ/ctx#289).
 """
 
 from __future__ import annotations
@@ -382,8 +383,8 @@ class McpClient:
         self._server = server_name
         # Hermes' call_mcp for bounded calls, asked per call with the tool: the provider returns it
         # while the operator's grant lists this entry and Hermes registered the tool, else None (see
-        # the module docstring). A refusal of the grant by Hermes sends this client's calls through
-        # the dispatch from then on.
+        # the module docstring). A refusal of the grant by Hermes sends the calls of the checkpoint
+        # that got it through the dispatch (forget_host_refusal ends it for the next one).
         self._host_call = host_call
         self._host_call_refused = False
         # The ctx keys the provider binds (read per error): foreign error texts are redacted with
@@ -486,6 +487,12 @@ class McpClient:
                 return payload, payload["result"]
         return payload, raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
 
+    def forget_host_refusal(self) -> None:
+        """A new checkpoint starts (GottZ/ctx#289): Hermes' refusal of the grant held for the
+        checkpoint that received it. The provider reads the grant again before each checkpoint, and
+        a grant restored meanwhile is used from the next call on instead of after a reconnect."""
+        self._host_call_refused = False
+
     def _granted_host_call(self, tool: str) -> Callable[..., Any] | None:
         if self._host_call is None or self._host_call_refused:
             return None
@@ -512,8 +519,8 @@ class McpClient:
         if isinstance(error, PermissionError):
             self._host_call_refused = True
             logger.info(
-                "ctx MCP: Hermes refused this plugin's grant for mcp_servers.%s; calls go through the tool "
-                "dispatch until the provider connects again",
+                "ctx MCP: Hermes refused this plugin's grant for mcp_servers.%s; the calls of this checkpoint go "
+                "through the tool dispatch",
                 self._server,
             )
             return _NOT_THROUGH_HOST

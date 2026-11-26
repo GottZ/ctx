@@ -57,14 +57,33 @@ setup adds the entry to `plugins.entries.ctx_checkpoint.mcp_allowlist`, and the
 checkpoint's calls go through Hermes' `call_mcp` with their own time limit: Hermes
 cancels a call that runs out and frees the entry — as far as the MCP transport
 honours the cancellation. Such a call may take up to its time limit plus one second.
+Measured against ctx over Streamable HTTP with the MCP SDK Hermes ships (0.18.0): the
+entry is free within milliseconds of the time limit and the next call goes out at
+once (through the dispatch it waited for the entry's tool timeout); ctx itself does
+not stop a call it is working on, so a store the checkpoint gave up on can still be
+saved — the checkpoint keeps that write's slot, and a retry meets the saved block. On
+an entry with `trust: untrusted` Hermes asks the user before every `store` (ctx marks
+only its reads read-only), and the time limit starts after the answer: a store the
+checkpoint gave up on while the question was open is sent when the user approves it
+later, and neither the grant nor the checkpoint can end it then. The plugin does not
+refuse such an entry, because a checkpoint whose stores are approved in time (or for
+the session) completes. If Hermes refuses the grant during a checkpoint (its own
+reading of `config.yaml` no longer lists the entry), that checkpoint's calls go
+through the dispatch and the next checkpoint asks again (0.18.0; before, until the
+provider connected again).
 The grant gives the plugin no other server than the one it already reaches, and the
 checkpoint sends through `call_mcp` only its own tools (`search`, `get`, `store`) and
 only those Hermes registered for the entry (its `tools.include`/`tools.exclude` filter
 holds as before); `call_mcp` itself skips the argument check and the hosted-scope
 refusal of Hermes' tool dispatch and reaches every tool of a granted server. Recall
 and the agent tools keep the dispatch. Without the grant, or on a Hermes that hands
-the plugin no `call_mcp` (also under `plugins.isolation: host`), nothing changes; the
-terminal setup's summary says so. The Desktop memory form has an on/off switch; the
+the plugin no `call_mcp`, nothing changes; the terminal setup's summary says so. Under
+`plugins.isolation: host` the MCP transport does not reach ctx at all: Hermes loads the
+plugin in its plugin host process, which has neither the MCP entry's tools nor a way
+to call them in Hermes (measured with Hermes at the CI pin: every call answers
+`Unknown tool: mcp__ctx__search`, so a required checkpoint fails and Hermes keeps the
+conversation uncompacted, and the notices of the plugin do not reach the user). Run
+the plugin in process there, or use `transport: rest` (not measured under the host). The Desktop memory form has an on/off switch; the
 web dashboard offers keep (the default), on and off, because it sends back every
 field it loaded and would otherwise restore a grant taken back elsewhere meanwhile;
 `hermes memory setup` asks after the operating mode and names the current state. With
@@ -265,11 +284,17 @@ so two checkpoints of one conversation wrote at the same time (GottZ/ctx#299).
 With the default `max_parts` and `budget_s` up to three extra minutes (326 parts)
 fit a 300 s window; a smaller `max_parts` multiplies the minutes. On a Hermes
 without that wait, or with it switched off, nothing is bounded beyond the budget.
-A store that ctx refuses for its write limit (other
-writers on the same key) waits for a free slot — the first refusal adds one
-minute to the budget — at the latest until just before the deadline, and stops
-at the second refusal in a row: the third would open Hermes' circuit breaker
-for the ctx server. Since 0.17.0 both counts belong to the server entry, not to
+A part, manifest or head that ctx refuses for its write limit (other
+writers on the same key) waits for a free slot and is sent again — the first
+refusal adds one minute to the budget — as long as a try fits before the
+deadline: when none does, the checkpoint stops at that first refusal. It stops
+at the second refusal in a row of the same write (no answer of the entry in
+between): the third error answer in a row would open Hermes' circuit breaker for
+the ctx server. A write whose refusals have answers of the entry between them
+(other checkpoints writing meanwhile) keeps trying — a read and a write about
+once a minute — until its deadline. A required fact is not sent again: its first
+refusal ends the facts (after a saved transcript the checkpoint stands and the
+fact is left for a later compaction). Since 0.17.0 both counts belong to the server entry, not to
 one checkpoint: the checkpoints of one Hermes process on one connection (several
 sessions of a gateway, a compaction and its retry, profiles that share the
 connection) share `max_parts` + 2 writes per minute and are served in the order
@@ -281,20 +306,31 @@ needs. If they do
 not all fit into Hermes' wait, the ones that started first complete; a checkpoint
 that would complete in time alone but not behind them stops before its next write
 with `other checkpoints of this Hermes process started first …` instead of failing at
-the end of the wait, and a checkpoint too long for the wait even alone saves the
+the end of the wait — judged by its transcript: required facts after it that do not
+fit are left for a later compaction (0.18.0; before, they stopped the whole
+checkpoint) — and a checkpoint too long for the wait even alone saves the
 parts that fit after them; either way the next attempt continues from what was
 saved. A checkpoint that waits for others says so once. Calls: at most two of one
 process are in flight on one entry, one while the entry's last answer was an error
 (also on `transport: rest`). Writes draw no more than two error answers in a row
 from the entry: after two, no checkpoint of the process writes before an answer of
 the entry has ended the run (Hermes' breaker resets on it too). A checkpoint that
-wants to write then first sends one read, alone (a search in its category, one
-row) — the only way the process learns that the entry answers again (it does not
-see the answers to recall or the agent's tools); a checkpoint that starts then
-sends its head search the same way. If such a read fails, its checkpoint stops; it
+wants to write then first sends one read, alone — a listing of its category, one
+row, which ctx answers from an index in about a millisecond however many
+checkpoints it holds (0.18.0; the search for `Compaction checkpoint head` before
+it read and ranked every head of the category: about 1 s at 100 000 heads, 15 to
+18 s at 1 000 000 — longer than the plugin's own 10 s bound of a call; the index
+is ctx's since v5.83.0, an older server walks the category for it) — the
+only way the process learns that the entry answers again (it does not see the
+answers to recall or the agent's tools); one checkpoint sends it, the others wait
+for its answer (0.18.0; before, each could send one), and a checkpoint that starts
+then sends its head search the same way. If such a read fails, its checkpoint stops; it
 is then the entry's third error answer in a row from this process, where Hermes
 opens its breaker unless another call of the entry succeeded in between (while the
-breaker is open Hermes answers further calls itself, without counting them). A
+breaker is open Hermes answers further calls itself, without counting them). That
+is kept: the read is the only call that can end the run, and without it every later
+checkpoint of the process would stay stopped; before 0.17.0 the next checkpoint's
+first call was the same third call. A
 checkpoint gives up on a write only when ctx refused it twice with no answer of the
 entry in between, so refusals of other checkpoints do not stop it. The required
 facts after a checkpoint count against the same minute and the same run of
@@ -306,7 +342,10 @@ entry's tool timeout). Then one minute can hold one such write more than
 handles like any refusal. Several Hermes processes of one profile (two terminals on
 one profile) do not share this state: each counts its own writes, and ctx's limit of
 100 per key and minute, of which a checkpoint takes `max_parts` + 2, is what is left
-between them. Every title of a checkpoint derives from the root session
+between them (measured with two processes, ctx's limit set to 10 and `max_parts` 8:
+ctx booked 10 writes in the first minute and refused one write of each process, each
+process saw one error answer and both checkpoints completed a minute later; each
+process has its own breaker in Hermes). Every title of a checkpoint derives from the root session
 and the transcript's SHA-256, so a retry of the same transcript (Hermes' retry of a
 stalled compaction, `/compress` without new messages) meets the parts an earlier one
 stored and ctx confirms them without a write (since 0.6.1 every single call over MCP is bounded by the remaining
