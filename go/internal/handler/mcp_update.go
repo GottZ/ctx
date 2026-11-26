@@ -203,7 +203,9 @@ func finishBlockUpdate(ctx context.Context, pool *pgxpool.Pool, blocktypes *bloc
 // skips the re-classify, as a nil registry does.
 func finishBlockUpdateSet(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, data store.UpdateBlockData, block *store.Block, reqID string) {
 	if set != nil && (data.Title != nil || data.Metadata != nil || data.MetadataMerge != nil) {
-		if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, block.ID, block.Title, block.Metadata); err != nil {
+		// block is what manage update and a batch's update item answer with:
+		// it names the re-classified type (#565).
+		if err := store.ClassifyWrittenBlock(ctx, pool, set, block); err != nil {
 			slog.Warn("update afterwork: re-classify failed", "error", err, "block_id", block.ID, "request_id", reqID)
 		}
 	}

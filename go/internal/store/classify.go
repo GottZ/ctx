@@ -2,11 +2,13 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"github.com/GottZ/ctx/internal/blocktype"
 	"github.com/GottZ/ctx/internal/derived"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -68,6 +70,16 @@ import (
 // confirmed updates). Returns the applied type name ("" when nothing was
 // written) for caller logging.
 func ClassifyBlockAfterUpsert(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, blockID, title string, metadata map[string]any) (typeName string, err error) {
+	return classifyBlock(ctx, pool, set, blockID, title, metadata, nil)
+}
+
+// classifyBlock is ClassifyBlockAfterUpsert; with origin non-nil the UPDATE
+// also returns the untrusted_origin the row holds after it (trg_block_retype
+// writes it when the verdict takes the block out of a type marked untrusted)
+// and stores it in *origin. Only ClassifyWrittenBlock asks for it: the column
+// arrived with migration 174, and ClassifyBlockAfterUpsert keeps its statement
+// for every other caller.
+func classifyBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, blockID, title string, metadata map[string]any, origin *string) (typeName string, err error) {
 	if set == nil {
 		// Loud, not silent: a nil set means the caller skipped the registry
 		// wiring — falling back to any compiled-in behaviour here would hide
@@ -110,7 +122,18 @@ func ClassifyBlockAfterUpsert(ctx context.Context, pool *pgxpool.Pool, set *bloc
 	}
 
 	flags := set.ClassifyMetadataFlags()
-	tag, err := pool.Exec(ctx, classifyUpdateSQL, name, blockID, flags, classifyInputs(flags, title, metadata))
+	args := []any{name, blockID, flags, classifyInputs(flags, title, metadata)}
+	if origin != nil {
+		err := pool.QueryRow(ctx, classifyUpdateSQL+` RETURNING `+untrustedOriginCol, args...).Scan(origin)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil // nothing applied, as below
+		}
+		if err != nil {
+			return "", fmt.Errorf("store: classify block: %w", err)
+		}
+		return name, nil
+	}
+	tag, err := pool.Exec(ctx, classifyUpdateSQL, args...)
 	if err != nil {
 		return "", fmt.Errorf("store: classify block: %w", err)
 	}
@@ -121,6 +144,29 @@ func ClassifyBlockAfterUpsert(ctx context.Context, pool *pgxpool.Pool, set *bloc
 	}
 
 	return name, nil
+}
+
+// ClassifyWrittenBlock is ClassifyBlockAfterUpsert on the block a write
+// returned, for the write paths whose answer carries that block: a verdict the
+// hook wrote is set on b.TypeName as well, so the answer names the type the
+// row was filed as, not the one the write left before the hook ran (issue
+// #565: POST /api/store answered "knowledge" for a block stored as
+// audit-trail). The hook's UPDATE writes type_name and nothing else, and only
+// while the row still holds b's title and classify inputs (point 4 above), so
+// the verdict it reports is exactly what the row holds after b's write; an
+// unapplied verdict ("" — no rule, manual type, inputs replaced by a later
+// write) leaves b as the write returned it. An applied verdict that takes the
+// block out of a type marked untrusted makes trg_block_retype record that type;
+// b.UntrustedOrigin then carries the record as the UPDATE returned it, so the
+// answer pairs the new type with the origin the row holds (PR #567 review).
+func ClassifyWrittenBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, b *Block) error {
+	var origin string
+	name, err := classifyBlock(ctx, pool, set, b.ID, b.Title, b.Metadata, &origin)
+	if name != "" {
+		b.TypeName = name
+		b.UntrustedOrigin = origin
+	}
+	return err
 }
 
 // classifyUpdateSQL writes the verdict $1 on block $2 while it is an auto

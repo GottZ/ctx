@@ -259,7 +259,9 @@ func (h *ManageHandler) handleTypeUpdate(w http.ResponseWriter, r *http.Request,
 	}
 	upd := store.BlockTypeUpdate{DisplayName: p.DisplayName, Description: p.Description}
 	if len(p.Config) > 0 {
-		pol, err := blocktype.DecodePolicy(cur.Name, cur.Scope, cur.Builtin, cur.IsDefault, p.Config)
+		// The request's config over the row's stored one (#565): a field the
+		// request leaves out keeps its value. One function for both transports.
+		merged, pol, err := mergedTypeConfig(cur, p.Config)
 		if err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": err.Error()})
 			return
@@ -279,7 +281,8 @@ func (h *ManageHandler) handleTypeUpdate(w http.ResponseWriter, r *http.Request,
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"success": false, "error": msg})
 			return
 		}
-		upd.Config = p.Config
+		upd.Config = merged
+		upd.ExpectConfig = cur.Config // written only over the config it was merged with
 	}
 
 	bt, err := store.UpdateBlockType(ctx, h.pool, cur.ID, typeVisibleScopes(ar), upd, &ar.ApiKeyID, reqID)
@@ -436,7 +439,8 @@ func writeBlockTypeStoreError(w http.ResponseWriter, action string, err error, r
 	switch {
 	case errors.Is(err, store.ErrBlockTypeExists),
 		errors.Is(err, store.ErrBlockTypeDefaultExists),
-		errors.Is(err, store.ErrBlockTypeBuiltin):
+		errors.Is(err, store.ErrBlockTypeBuiltin),
+		errors.Is(err, store.ErrBlockTypeConfigChanged):
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": err.Error()})
 	case errors.As(err, &inUse):
 		writeJSON(w, http.StatusConflict, map[string]any{

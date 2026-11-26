@@ -227,6 +227,13 @@ func (r *Registry) buildTenantSet(ctx context.Context, base *Set, pool *pgxpool.
 	defer rows.Close()
 
 	var tenantPolicies []Policy
+	// The tenant rows are measured against the COMPILED definitions, not the
+	// '_global' row (issue #565): a '_global' row that lost the mark is no
+	// reason to stay silent about a tenant row without it.
+	compiled := make(map[string]Policy)
+	for _, b := range builtinPolicies() {
+		compiled[b.Name] = b
+	}
 	for rows.Next() {
 		var (
 			name, sc           string
@@ -288,7 +295,17 @@ func (r *Registry) buildTenantSet(ctx context.Context, base *Set, pool *pgxpool.
 	for _, n := range names {
 		policies = append(policies, merged[n])
 	}
-	return NewSet(policies)
+	set, err := NewSet(policies)
+	if err != nil {
+		return nil, err
+	}
+	// Only a set that is served speaks about its rows: a build that fails
+	// serves the base instead and is retried on the next read, and a WARN
+	// from it would name a row nobody is served — once per request.
+	for _, tp := range tenantPolicies {
+		warnUntrustedDropped(tp, compiled)
+	}
+	return set, nil
 }
 
 // warnWorkflowForgeMap logs a stored type whose forge_state_map contradicts
@@ -305,12 +322,17 @@ func warnWorkflowForgeMap(p Policy) {
 // warnUntrustedDropped logs a WARN when a builtin type's name is served from a
 // row without the untrusted mark its compiled-in definition carries (#289
 // review). Any row: an operator's own (builtin=false) wins over the seed, which
-// inserts with ON CONFLICT DO NOTHING; the builtin row itself loses the mark
-// when type-update or PUT /api/types writes a config that leaves it out (they
-// replace the whole config, and an absent axis decodes to its default). Either
-// way the blocks of that type reach every read surface without the
-// foreign-text frame. Once per Reload and name — a name has one _global row.
-// The row is served as stored.
+// inserts with ON CONFLICT DO NOTHING; the builtin row itself lost the mark
+// when type-update or PUT /api/types wrote a config that left it out before
+// those merged an update over the stored config (issue #565), or loses it when
+// an update names it false or null. A tenant row (buildTenantSet, issue #565)
+// is served to its tenant over the '_global' one: a tenant type created under
+// the name before the builtin shipped, or a row written past the narrowing
+// gate. Either way the blocks of that type reach every read surface of that
+// reader without the foreign-text frame. Once per Reload and name for the
+// '_global' row; once per build of a tenant's set that is served — after a
+// Reload or the tenant's invalidation, on the tenant's next read, never per
+// request — and name for a tenant row. The row is served as stored.
 func warnUntrustedDropped(p Policy, compiled map[string]Policy) {
 	b, ok := compiled[p.Name]
 	if !ok || !b.Retrieval.Untrusted || p.Retrieval.Untrusted {

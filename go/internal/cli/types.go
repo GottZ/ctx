@@ -102,10 +102,14 @@ func typesSetCmd(getClient func() (*Client, error)) *cobra.Command {
 		Long: "Create or update a block type. Writes go to your own tenant namespace\n" +
 			"(operator keys write the _global namespace); the scope is pinned by your\n" +
 			"key's role, not a flag. --config takes the raw policy-config JSON envelope\n" +
-			"(see `ctx types get` for the shape); it is validated server-side.",
+			"(see `ctx types get` for the shape); it is validated server-side. On an\n" +
+			"existing type it is laid over the stored config: a field you leave out\n" +
+			"keeps its value, a field or section set to null goes back to the decoder\n" +
+			"default (the wide value: full-pass, guard on, trusted), not the shipped one.",
 		Example: `  ctx types set sprint --display "Sprint"
   ctx types set sprint --description "a time-boxed iteration"
-  ctx types set incident --config '{"v":1,"retrieval":{"policy":"full-pass"}}'`,
+  ctx types set incident --config '{"v":1,"retrieval":{"policy":"full-pass"}}'
+  ctx types set incident --config '{"v":1,"retrieval":{"damping_factor":0.7}}'`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			payload := map[string]any{}

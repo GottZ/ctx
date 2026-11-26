@@ -838,7 +838,8 @@ func storeBatchItemAnswer(it storeBatchItem) map[string]any {
 // /api/store and the store tool. The write booking is the caller's: the direct
 // path books per block, a confirmed batch paid at stage time.
 func finishStoredBlock(ctx context.Context, pool *pgxpool.Pool, set *blocktype.Set, b *store.Block, reqID string) {
-	if _, err := store.ClassifyBlockAfterUpsert(ctx, pool, set, b.ID, b.Title, b.Metadata); err != nil {
+	// b is the block the item's answer carries: it names the classified type (#565).
+	if err := store.ClassifyWrittenBlock(ctx, pool, set, b); err != nil {
 		slog.Warn("store batch: auto-classify failed", "error", err, "block_id", b.ID, "request_id", reqID)
 	}
 	if _, err := store.RefreshBlockTemporal(ctx, pool, b); err != nil {
