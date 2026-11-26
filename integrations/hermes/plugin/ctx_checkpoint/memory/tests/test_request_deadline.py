@@ -14,11 +14,15 @@ the host does not turn it red; what a call must not do (wait for the trickle) is
 
 from __future__ import annotations
 
+import datetime
+import ipaddress
 import json
 import select
 import socket
+import ssl
 import threading
 import time
+import urllib.request
 from collections.abc import Callable, Iterator
 from typing import Any, ClassVar
 
@@ -151,10 +155,13 @@ def _peer_closed_within(conn: socket.socket, seconds: float) -> bool:
 class Wire:
     """A REST double on a real socket: each request is answered by ``plan(method, path, body)``,
     whose steps are bytes to send or seconds to wait. Records the requests, the bytes it sent per
-    connection and when the client closed a connection before the answer was complete."""
+    connection and when the client closed a connection before the answer was complete. ``tls``: the
+    server's TLS context; ``handshake_delay``: seconds it waits after the accept before its handshake."""
 
-    def __init__(self, plan: Plan) -> None:
+    def __init__(self, plan: Plan, tls: ssl.SSLContext | None = None, handshake_delay: float = 0.0) -> None:
         self.plan = plan
+        self.tls = tls
+        self.handshake_delay = handshake_delay
         self.requests: list[tuple[str, str, Any]] = []
         self.sent: list[int] = []
         self.closed_by_client: list[float] = []
@@ -181,8 +188,17 @@ class Wire:
 
     def _serve(self, conn: socket.socket) -> None:
         sent = 0
+        conn.settimeout(10.0)
+        if self.tls is not None:
+            try:
+                if self._stop.wait(self.handshake_delay):  # waits without reading the client's hello
+                    conn.close()
+                    return
+                conn = self.tls.wrap_socket(conn, server_side=True)
+            except OSError:
+                conn.close()
+                return
         with conn:
-            conn.settimeout(10.0)
             request = _read_request(conn)
             if request is None:
                 return
@@ -216,8 +232,8 @@ class Wire:
 def wire():
     made: list[Wire] = []
 
-    def make(plan: Plan) -> Wire:
-        made.append(Wire(plan))
+    def make(plan: Plan, **tls: Any) -> Wire:
+        made.append(Wire(plan, **tls))
         return made[-1]
 
     yield make
@@ -726,7 +742,7 @@ def test_a_write_given_up_that_landed_reads_as_a_timeout_did(wire, tmp_path, mon
     p.shutdown()
 
 
-# -- review round 1: a host whose first address never answers ---------------------------------------
+# -- review round 1: a dead first address, the exact bounds, TLS, the cap's value -------------------
 
 
 def _resolving(monkeypatch, host: str, addresses: list[tuple[str, int]]) -> None:
@@ -793,6 +809,14 @@ def _assert_within(sets: list[tuple[float, float]], bound: float, eps: float = 0
     assert not late, late
 
 
+def test_every_timeout_set_for_a_trickling_answer_ends_within_the_bound(wire, spy):
+    w = wire(lambda *_: trickled_body(SEARCH_ANSWER))
+    _, error, _ = _timed(lambda: CtxClient(w.url, KEY, timeout=TIMEOUT_S).search("q"))
+    assert isinstance(error, CtxApiError)
+    assert len(spy) > 3  # the connect, then one per read
+    _assert_within(spy, TIMEOUT_S)
+
+
 def test_dead_addresses_share_the_bound_and_the_call_ends_at_it(full_backlog, monkeypatch, spy):
     """Three addresses that never answer: the first gets a third of the bound, the next ones what is
     left divided among them, and the call ends at the bound — not before (the last address gets all
@@ -806,9 +830,148 @@ def test_dead_addresses_share_the_bound_and_the_call_ends_at_it(full_backlog, mo
     _assert_within(spy, bound)
 
 
+def test_more_dead_addresses_than_the_bound_has_room_for_get_the_least_share_each(full_backlog, monkeypatch, spy):
+    """Six addresses that never answer and a bound of half a second: an equal share would be 83 ms; each
+    gets at least ``CONNECT_SHARE_MIN_S`` (a connect over a slow route still fits), the addresses after
+    the bound are not tried, and the call ends at the bound."""
+    _resolving(monkeypatch, "six.dead.test", [full_backlog() for _ in range(6)])
+    _, error, took = _timed(lambda: CtxClient("http://six.dead.test:8080", KEY, timeout=TIMEOUT_S).search("q"))
+    assert isinstance(error, CtxApiError) and "timed out" in str(error), error
+    shares = [round(v, 3) for _, v in spy]
+    assert shares[0] >= client_mod.CONNECT_SHARE_MIN_S and len(shares) <= 5, shares
+    assert TIMEOUT_S * 0.9 <= took < SLACK * TIMEOUT_S, took
+    _assert_within(spy, TIMEOUT_S)
+
+
 def test_a_connect_to_a_live_address_after_a_dead_one_keeps_the_rest_of_the_bound(wire, full_backlog, monkeypatch, spy):
     w = wire(lambda *_: answer(SEARCH_ANSWER))
     _resolving(monkeypatch, "dual.test", [full_backlog(), _address(w)])
     bound = 3 * TIMEOUT_S
     assert CtxClient("http://dual.test:8080", KEY, timeout=bound).search("q") == SEARCH_ANSWER
     _assert_within(spy, bound)
+
+
+@pytest.mark.parametrize("length, refused", [(64 * MIB + 1, True), (64 * MIB, False)])
+def test_the_size_cap_is_64_mib(wire, length, refused):
+    """At the real cap, without sending it: a ``Content-Length`` one byte over 64 MiB is refused when the
+    head arrives; one of exactly 64 MiB is waited for (here it never comes, so the call times out)."""
+
+    def plan(*_):
+        yield _head(200, length)
+        yield TRICKLE_S
+
+    w = wire(plan)
+    _, error, took = _timed(lambda: CtxClient(w.url, KEY, timeout=TIMEOUT_S).search("q"))
+    assert isinstance(error, CtxApiError)
+    if refused:
+        assert str(error).startswith("connection error: answer larger than 67108864 bytes"), str(error)
+        assert took < TIMEOUT_S, took
+    else:
+        assert str(error) == "connection error: timed out", str(error)
+
+
+@pytest.fixture(scope="module")
+def tls_files(tmp_path_factory):
+    """A CA and a server certificate for 127.0.0.1 and localhost, made for this module (the extensions
+    the strict X.509 checks of Python 3.13+ ask for)."""
+    x509 = pytest.importorskip("cryptography.x509")
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    usage = dict(content_commitment=False, key_encipherment=False, data_encipherment=False, key_agreement=False)
+    usage.update(encipher_only=False, decipher_only=False)
+
+    def build(subject, issuer, key, signer, extensions):
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(minutes=5))
+            .not_valid_after(now + datetime.timedelta(days=1))
+        )
+        for extension, critical in extensions:
+            builder = builder.add_extension(extension, critical=critical)
+        return builder.sign(signer, hashes.SHA256())
+
+    ca_key, key = ec.generate_private_key(ec.SECP256R1()), ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ctx_checkpoint test CA")])
+    ca = build(
+        ca_name,
+        ca_name,
+        ca_key,
+        ca_key,
+        [
+            (x509.BasicConstraints(ca=True, path_length=None), True),
+            (x509.KeyUsage(digital_signature=True, key_cert_sign=True, crl_sign=True, **usage), True),
+            (x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), False),
+        ],
+    )
+    leaf = build(
+        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]),
+        ca_name,
+        key,
+        ca_key,
+        [
+            (
+                x509.SubjectAlternativeName(
+                    [x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+                ),
+                False,
+            ),
+            (x509.BasicConstraints(ca=False, path_length=None), True),
+            (x509.KeyUsage(digital_signature=True, key_cert_sign=False, crl_sign=False, **usage), True),
+            (x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), False),
+            (x509.SubjectKeyIdentifier.from_public_key(key.public_key()), False),
+            (x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), False),
+        ],
+    )
+    folder = tmp_path_factory.mktemp("tls")
+    pem = serialization.Encoding.PEM
+    (folder / "ca.pem").write_bytes(ca.public_bytes(pem))
+    (folder / "server.pem").write_bytes(leaf.public_bytes(pem))
+    (folder / "server.key").write_bytes(
+        key.private_bytes(pem, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    )
+    return folder
+
+
+@pytest.fixture
+def tls(tls_files, monkeypatch):
+    """The server's TLS context; the client trusts the test CA the way it trusts any: ``SSL_CERT_FILE``,
+    which urllib's HTTPS handler reads when the opener is built (in Hermes: when the plugin loads), so
+    the opener is built again as the module builds it. No verification is turned off."""
+    monkeypatch.setenv("SSL_CERT_FILE", str(tls_files / "ca.pem"))
+    monkeypatch.setattr(client_mod, "_OPENER", urllib.request.build_opener(*client_mod._HANDLERS))
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(tls_files / "server.pem", tls_files / "server.key")
+    return context
+
+
+def _https(w: Wire, host: str = "127.0.0.1") -> str:
+    return f"https://{host}:{_address(w)[1]}"
+
+
+def test_over_tls_an_answer_arrives_and_a_trickling_one_ends_at_the_bound(wire, tls):
+    ok = wire(lambda *_: answer(SEARCH_ANSWER), tls=tls)
+    assert CtxClient(_https(ok), KEY, timeout=SLOW_BOUND_S).search("q") == SEARCH_ANSWER
+    w = wire(lambda *_: trickled_body(SEARCH_ANSWER), tls=tls)
+    _, error, took = _timed(lambda: CtxClient(_https(w), KEY, timeout=TIMEOUT_S).search("q"))
+    assert isinstance(error, CtxApiError) and "timed out" in str(error), error
+    assert (error.status, error.code) == (None, "")
+    assert TIMEOUT_S * 0.9 <= took < SLACK * TIMEOUT_S, took
+    assert _wait_for(lambda: bool(w.closed_by_client), SLACK * TIMEOUT_S), "the double never saw the close"
+
+
+def test_over_tls_a_handshake_longer_than_the_connect_share_keeps_the_rest_of_the_bound(
+    wire, tls, full_backlog, monkeypatch
+):
+    """The live address comes first of two, so its connect gets half the bound; the handshake after it
+    takes longer than that half and still has the rest of the bound."""
+    bound = SLOW_BOUND_S
+    w = wire(lambda *_: answer(SEARCH_ANSWER), tls=tls, handshake_delay=0.7 * bound)
+    _resolving(monkeypatch, "localhost", [_address(w), full_backlog()])
+    assert CtxClient(_https(w, "localhost"), KEY, timeout=bound).search("q") == SEARCH_ANSWER
