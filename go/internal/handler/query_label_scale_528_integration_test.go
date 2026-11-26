@@ -247,3 +247,42 @@ func TestQueryLabelReadsTheFusionBehindTheGraph(t *testing.T) {
 		}
 	}
 }
+
+// dayTuesday is a Tuesday more than the point cutoff (14 days) before any day
+// the test runs on, so the linear gravity of "am Dienstag" leaves every block
+// at factor 1 and the cyclic one alone boosts the Tuesday blocks.
+var dayTuesday = time.Date(2024, 3, 5, 0, 0, 0, 0, time.UTC)
+
+// M2: a question with a weekday runs the cyclic gravity before the linear one;
+// the linear stage kept the cyclic stage's boosted score as the "original",
+// so the retrieval-only label read the cyclic boost and the synthesis the
+// full one. Both now read the fusion.
+func TestQueryLabelCyclicThenLinearGravity(t *testing.T) {
+	e := newScaleEnv(t, 12,
+		func(j int) string { return fmt.Sprintf("Operations log %02d", j) },
+		func(j int) string {
+			return "Operations log of " + dayTuesday.AddDate(0, 0, j).Format("2006-01-02") + ": rotation, backups, one restart."
+		}, true)
+	const q = "Was war am Dienstag?"
+	ro := e.ask(t, e.handler(t, nil), q, false)
+	if ro.DimWeights["linear"] <= 0 || ro.DimWeights["weekday"] <= 0 {
+		t.Fatalf("precondition: %q activates %v, want the linear and the weekday dimension", q, ro.DimWeights)
+	}
+	if len(ro.Sources) == 0 || ro.Sources[0].ID != e.ids[0] {
+		t.Fatalf("precondition: the Tuesday block is not the first source")
+	}
+	top := ro.Sources[0]
+	if top.RRFScoreOriginal == nil || !(*top.RRFScoreOriginal < top.Score) {
+		t.Errorf("Tuesday block: rrf_score_original %v, want its fusion score below the boosted %v", ptrVal(top.RRFScoreOriginal), top.Score)
+	}
+	// The threshold at the boosted maximum: only the cyclic stage boosted it,
+	// so a label read on the cyclic stage's output reaches it, one read on the
+	// fusion does not.
+	h := e.handler(t, withThreshold(ro.maxScore(), nil))
+	if got := e.ask(t, h, q, false).Confidence; got != "low_confidence" {
+		t.Errorf("retrieval-only label %q, want low_confidence (read on the fusion, below the threshold %v)", got, ro.maxScore())
+	}
+	if got := e.ask(t, h, q, true).Confidence; got != "low_confidence" {
+		t.Errorf("synthesis label %q, want low_confidence (read on the fusion, below the threshold %v)", got, ro.maxScore())
+	}
+}
