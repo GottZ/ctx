@@ -776,10 +776,29 @@ func TestRecordingViewContent(t *testing.T) {
 		if int(total) != len(bs) || total < 3 {
 			t.Fatalf("whole detail: %s", body)
 		}
+		// The audit row of a page names the blocks it served by their
+		// addresses — positions alone do not survive the retention or a
+		// change of the decomposition rules.
+		lastAudit := func() (first, last string) {
+			t.Helper()
+			if err := w.f.seed.QueryRow(context.Background(), `SELECT COALESCE(new_value->>'first_block', ''), COALESCE(new_value->>'last_block', '')
+				FROM context_settings_audit WHERE entity_type = 'model_recording' AND entity_key = $1 AND action = 'read'
+				ORDER BY created_at DESC, id DESC LIMIT 1`, id).Scan(&first, &last); err != nil {
+				t.Fatal(err)
+			}
+			return first, last
+		}
+		addr := func(b any) string { return b.(map[string]any)["address"].(string) }
+		if first, last := lastAudit(); first != addr(bs[0]) || last != addr(bs[len(bs)-1]) {
+			t.Errorf("audit of the whole detail: first %q last %q, want %q and %q", first, last, addr(bs[0]), addr(bs[len(bs)-1]))
+		}
 		_, body, page := w.adminCall(t, "model-recording-get", map[string]any{"id": id, "block_offset": 1, "block_limit": 1})
 		pb, _ := page["blocks"].([]any)
 		if len(pb) != 1 || page["blocks_total"] != total || pb[0].(map[string]any)["address"] != bs[1].(map[string]any)["address"] {
 			t.Errorf("block page [1,2): %s", body)
+		}
+		if first, last := lastAudit(); first != addr(bs[1]) || last != addr(bs[1]) {
+			t.Errorf("audit of the page [1,2): first %q last %q, want %q for both", first, last, addr(bs[1]))
 		}
 		if status, body, _ := w.adminCall(t, "model-recording-get", map[string]any{"id": id, "block_limit": 501}); status != http.StatusBadRequest {
 			t.Errorf("a page past 500 blocks: %d %s", status, body)

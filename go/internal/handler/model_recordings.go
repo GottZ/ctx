@@ -325,6 +325,19 @@ type recordingDetail struct {
 	total             int
 }
 
+// auditDetail is the audit value of a detail page: its position and size,
+// and the addresses of its first and last block — the page is a contiguous
+// run of the recording's block order, and an address, unlike a position,
+// still names the block after the retention cleared the body or a later
+// release split a body into more blocks.
+func (p recordingDetail) auditDetail(offset int) map[string]any {
+	detail := map[string]any{"block_offset": offset, "blocks": len(p.blocks), "blocks_total": p.total}
+	if n := len(p.blocks); n > 0 {
+		detail["first_block"], detail["last_block"] = p.blocks[0].Address, p.blocks[n-1].Address
+	}
+	return detail
+}
+
 // recordingBlockView is one block of the detail.
 type recordingBlockView struct {
 	recblocks.Block
@@ -414,8 +427,7 @@ func (h *ManageHandler) handleModelRecordingGet(w http.ResponseWriter, r *http.R
 		writeRecordingStoreError(w, r, err, "model-recording-get")
 		return
 	}
-	if !h.auditRecordingRead(w, r, ar, meta, store.RecordingAuditRead,
-		map[string]any{"block_offset": d.BlockOffset, "blocks": len(page.blocks), "blocks_total": page.total}) {
+	if !h.auditRecordingRead(w, r, ar, meta, store.RecordingAuditRead, page.auditDetail(d.BlockOffset)) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
