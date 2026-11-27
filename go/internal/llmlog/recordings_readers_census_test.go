@@ -38,6 +38,9 @@ var recordingsReaders = map[string]recordingsReader{
 	// The writer (Open, Finish, Insert) and the retention janitor's statement
 	// (evictRecordingBodies, run by EvictBodies) — no SELECT anywhere.
 	"internal/llmlog/recordings.go": {4, "writes: open, finish, insert; the retention janitor NULLs the bodies"},
+	// The janitor's presence probe (EvictBodies: no table before migration
+	// 197) — a catalog lookup, no row read.
+	"internal/llmlog/llmlog.go": {1, "catalog: to_regclass presence probe of the janitor"},
 	// Text only: the refusal of record_bodies without its confirmation names
 	// the table (recordConfirmRefusal) — no statement.
 	"internal/handler/model_consumers.go": {1, "text: the confirmation refusal names the table"},

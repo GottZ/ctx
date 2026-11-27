@@ -218,6 +218,15 @@ func EvictBodies(ctx context.Context, pool *pgxpool.Pool, retentionDays int) (in
 	if err != nil {
 		return 0, fmt.Errorf("llmlog: evict bodies: %w", err)
 	}
+	// A schema before migration 197 (or after its way back) has no
+	// recordings: nothing to evict there.
+	var present bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('context_llm_recordings') IS NOT NULL`).Scan(&present); err != nil {
+		return tag.RowsAffected(), fmt.Errorf("llmlog: evict recording bodies: %w", err)
+	}
+	if !present {
+		return tag.RowsAffected(), nil
+	}
 	rec, err := pool.Exec(ctx, evictRecordingBodies, retentionDays)
 	if err != nil {
 		return tag.RowsAffected(), fmt.Errorf("llmlog: evict recording bodies: %w", err)
