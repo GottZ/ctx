@@ -22,6 +22,7 @@ const ADMIN: GatewayStatus = {
   top_consumers_1h: [],
   consumers_used_1h: 3,
   consumers_expiring: 2,
+  recording_consumers: [],
   auth: { invalid_key: 5 },
 }
 
@@ -34,6 +35,7 @@ const TENANT_GATEWAY: GatewayStatus = {
   top_consumers_1h: [],
   consumers_used_1h: 1,
   consumers_expiring: 0,
+  recording_consumers: [],
 }
 
 function tt(origin: string, depth: string): DispatchTenantTarget {

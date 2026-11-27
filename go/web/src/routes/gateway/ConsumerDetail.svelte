@@ -17,7 +17,7 @@
   import { ConsumerDetailModel } from './consumer.svelte'
   import { auditEntries, keyChain } from './chain'
   import { callRows } from './calls'
-  import { STATUS_LABEL, consumerTone, fmtDay, fmtMinute, keyTone } from './format'
+  import { STATUS_LABEL, consumerTone, fmtDay, fmtMinute, keyTone, recordingText } from './format'
   import LimitsCard from './LimitsCard.svelte'
   import UsagePanel from './UsagePanel.svelte'
 
@@ -90,6 +90,10 @@
         <dd>{c.admission_lane}</dd>
         <dt>network</dt>
         <dd>{c.allowed_cidrs === null ? 'any source' : c.allowed_cidrs.join(', ')}</dd>
+        {#if c.record_bodies}
+          <dt>recording</dt>
+          <dd data-consumer-recording>{recordingText}</dd>
+        {/if}
         <dt>last used</dt>
         <dd>{c.last_used_at === null ? 'never' : fmtMinute(c.last_used_at)}</dd>
       </dl>

@@ -50,6 +50,12 @@ type ConsumerAuth struct {
 	IsValid           bool
 	AdmissionLane     string // 'urgent' | 'bulk' — the external lane ceiling (design/03)
 	PeerInstanceID    string // a ctx-peer's bound instance id; "" = not bound
+	// RecordBodies is the consumer's recording switch (migration 197): every
+	// request is held in full in context_llm_recordings before it is served,
+	// with the answer it got, embedding vectors excepted (internal/oai
+	// record.go). It is read once at the door, like every other column: a
+	// switch applies from the next request on.
+	RecordBodies bool
 }
 
 // consumerKind maps the kind column; anything but 'ctx-peer' is an app.
@@ -92,15 +98,15 @@ func AuthenticateModelKey(ctx context.Context, q ModelAuthQuerier, keyHash strin
 	var (
 		keyID, consumerID, tenantID, scope, peer *string
 		kind, sens, lane                         string
-		all, valid                               bool
+		all, valid, record                       bool
 		weight                                   int16
 		expires                                  *time.Time
 	)
 	// Columns by name and in the function's order (K20: new columns go last).
 	err := q.QueryRow(ctx,
-		`SELECT model_key_id, consumer_id, tenant_id, tenant_scope, kind, all_models, prompt_sensitivity, fair_weight, key_expires_at, is_valid, admission_lane, peer_instance_id FROM ctx_model_auth($1, $2, $3)`,
+		`SELECT model_key_id, consumer_id, tenant_id, tenant_scope, kind, all_models, prompt_sensitivity, fair_weight, key_expires_at, is_valid, admission_lane, peer_instance_id, record_bodies FROM ctx_model_auth($1, $2, $3)`,
 		keyHash, addrArg(ip), secure,
-	).Scan(&keyID, &consumerID, &tenantID, &scope, &kind, &all, &sens, &weight, &expires, &valid, &lane, &peer)
+	).Scan(&keyID, &consumerID, &tenantID, &scope, &kind, &all, &sens, &weight, &expires, &valid, &lane, &peer, &record)
 	if err != nil {
 		return nil, fmt.Errorf("auth: query ctx_model_auth: %w", err)
 	}
@@ -123,6 +129,7 @@ func AuthenticateModelKey(ctx context.Context, q ModelAuthQuerier, keyHash strin
 		KeyExpiresAt:      expires,
 		IsValid:           true,
 		AdmissionLane:     lane,
+		RecordBodies:      record,
 	}
 	if scope != nil {
 		ca.TenantScope = *scope

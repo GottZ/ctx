@@ -172,6 +172,11 @@ type Gateway struct {
 	// forensics ("which requests ran over the leaked key?") through the
 	// consumer index plus this field (§8 d01 (3)); never a column.
 	ModelKeyID string
+	// Recorded and RecordingID are metadata.gw.recorded and recording_id
+	// (recordings.go): GatewayEntry sets them from the GatewayRow; a writer
+	// never sets them itself.
+	Recorded    bool
+	RecordingID string
 }
 
 // gatewayWire is metadata.gw as stored: the keys the rollup trigger reads
@@ -190,6 +195,10 @@ type gatewayWire struct {
 	Finish       string   `json:"finish,omitempty"`
 	ModelKeyID   string   `json:"model_key_id,omitempty"`
 	PeerInstance string   `json:"peer_instance,omitempty"`
+	// The recording marker (issue #571): absent on every row of a consumer
+	// without the switch, so those rows stay byte-identical.
+	Recorded    bool   `json:"recorded,omitempty"`
+	RecordingID string `json:"recording_id,omitempty"`
 }
 
 // StampGateway records WHO made a /v1 request and how it ran: the
@@ -256,6 +265,12 @@ func (g Gateway) wire() gatewayWire {
 	}
 	if u, err := uuid.Parse(g.PeerInstance); err == nil {
 		w.PeerInstance = u.String()
+	}
+	if g.Recorded {
+		w.Recorded = true
+		if u, err := uuid.Parse(g.RecordingID); err == nil {
+			w.RecordingID = u.String()
+		}
 	}
 	return w
 }
@@ -356,6 +371,16 @@ type GatewayRow struct {
 	// does a row whose Telemetry.RequiredSensitivity is credentials, empty
 	// or unknown.
 	BodyLogging string
+	// Recorded is the consumer's recording switch as the door read it
+	// (auth.ConsumerAuth.RecordBodies, migration 197), RecordingID the
+	// request's row in context_llm_recordings (recordings.go), which holds
+	// its request whole and its answer (an embeddings answer without its
+	// vectors). The row here is the row of every other
+	// consumer without its bodies — none under any body policy: the
+	// recording is their one place — plus metadata.gw.recorded and
+	// recording_id.
+	Recorded    bool
+	RecordingID string
 }
 
 // GatewayEntry builds the ONE row of a /v1 request: pipeline, StampGateway,
@@ -377,6 +402,10 @@ func GatewayEntry(r GatewayRow) Entry {
 	}
 	if r.ConsumerID == "" {
 		wiringError(&lastConsumerWarn, "llmlog: a gateway row without a consumer — the request is unattributed", "pipeline", r.Pipeline)
+	}
+	g.Recorded, g.RecordingID = r.Recorded, ""
+	if r.Recorded {
+		g.RecordingID = r.RecordingID
 	}
 	e.StampGateway(r.ConsumerID, g)
 
@@ -400,7 +429,10 @@ func GatewayEntry(r GatewayRow) Entry {
 	case BodyLoggingErrors:
 		store = r.Err != nil
 	}
-	if store && bodiesAllowed(e.RequiredSensitivity, e.Pipeline) {
+	// A recording consumer's request and answer are in context_llm_recordings
+	// alone (recordings.go): its row here carries no bodies under any policy,
+	// so no reader of the LLM log — its detail, its export — has them.
+	if store && !r.Recorded && bodiesAllowed(e.RequiredSensitivity, e.Pipeline) {
 		e.RequestUser, e.ResponseContent = capBody(r.Request), capBody(r.Response)
 	}
 	return e.Slimmed(false)

@@ -10,8 +10,9 @@ package handler
 //     release" (consumerGrant): a tenant-admin may only narrow a consumer
 //     unless gateway.enabled and gateway.tenant_self_service are both on, and
 //     kind=ctx-peer, a lower prompt_sensitivity, allow_plaintext=true, a higher
-//     fair_weight and admission_lane=urgent stay server-admin even then (E3,
-//     V-01-a, design/03 §3.1);
+//     fair_weight, admission_lane=urgent and record_bodies=true stay
+//     server-admin even then (E3, V-01-a, design/03 §3.1; issue #571 — the
+//     recording switch also needs confirm_record_bodies);
 //   - the peer row tier (V-01-b): every granting change of a ctx-peer
 //     consumer is server-admin only;
 //   - the tenant binding (N12 helpers resolveKeyMintTenant /
@@ -295,6 +296,8 @@ func writeConsumerStoreError(w http.ResponseWriter, r *http.Request, err error, 
 	switch {
 	case errors.Is(err, errFieldTier):
 		writeAdminRequired(w)
+	case errors.Is(err, errRecordConfirm):
+		writeConsumerError(w, http.StatusBadRequest, recordConfirmRefusal)
 	case errors.As(err, &mErr):
 		writeModelsError(w, mErr)
 	case errors.Is(err, errModelsNotWired):
@@ -502,7 +505,11 @@ type consumerCreateRequest struct {
 	AdmissionLane     *string    `json:"admission_lane"`
 	AllowedCIDRs      []string   `json:"allowed_cidrs"`
 	AllowPlaintext    bool       `json:"allow_plaintext"`
-	ExpiresAt         *time.Time `json:"expires_at"`
+	// RecordBodies switches recording on (migration 197): server-admin
+	// only, and only with ConfirmRecordBodies (recordConfirmRefusal).
+	RecordBodies        bool       `json:"record_bodies"`
+	ConfirmRecordBodies bool       `json:"confirm_record_bodies"`
+	ExpiresAt           *time.Time `json:"expires_at"`
 	// Limits are the consumer's starting limits per op (FOLGE-Z Z3): each
 	// op's dimensions are written as the consumer's row of the CALLER's tier
 	// in the create's transaction — validated like gateway-limits-set.
@@ -553,19 +560,33 @@ func (d *consumerCreateRequest) validate() ([]netip.Prefix, error) {
 }
 
 // grant ranks a create against the fail-closed column defaults of migration
-// 161 (app, credentials, fair_weight 1, bulk, no plaintext): creating is
-// itself granting; a field above those defaults may be server-admin only.
+// 161 (app, credentials, fair_weight 1, bulk, no plaintext) and 197 (no
+// recording): creating is itself granting; a field above those defaults may
+// be server-admin only.
 func (d *consumerCreateRequest) grant() consumerGrant {
 	switch {
 	case d.Kind == "ctx-peer",
 		d.PromptSensitivity != nil && sensitivityLowered("credentials", *d.PromptSensitivity),
 		d.AllowPlaintext,
 		d.FairWeight != nil && *d.FairWeight > consumerFairWeightMin,
-		d.AdmissionLane != nil && *d.AdmissionLane == "urgent":
+		d.AdmissionLane != nil && *d.AdmissionLane == "urgent",
+		d.RecordBodies:
 		return grantServerAdmin
 	}
 	return grantSelfService
 }
+
+// recordConfirmRefusal is the 400 of switching recording on without
+// confirm_record_bodies (the confirm_trust_elevation pattern): the switch
+// stores what the consumer sends in clear text, credentials in a prompt
+// included.
+const recordConfirmRefusal = "record_bodies:true holds every request of this consumer in full in context_llm_recordings, with the answer it got " +
+	"(embedding vectors excepted) — credentials in a prompt included, in clear text, readable in the database — " +
+	"requires confirm_record_bodies:true"
+
+// errRecordConfirm is the refusal of recordConfirmRefusal under the consumer
+// lock (store.UpdateConsumerChecked); it surfaces as that 400.
+var errRecordConfirm = errors.New("record_bodies needs confirm_record_bodies")
 
 func (h *ManageHandler) handleModelConsumerCreate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	var d consumerCreateRequest
@@ -586,6 +607,10 @@ func (h *ManageHandler) handleModelConsumerCreate(w http.ResponseWriter, r *http
 	pol := h.consumerPolicy()
 	if !pol.allowed(ar, d.grant(), false) {
 		writeAdminRequired(w)
+		return
+	}
+	if d.RecordBodies && !d.ConfirmRecordBodies {
+		writeConsumerError(w, http.StatusBadRequest, recordConfirmRefusal)
 		return
 	}
 	if len(d.Models) > 0 && h.modelAliases == nil {
@@ -631,6 +656,7 @@ func (h *ManageHandler) handleModelConsumerCreate(w http.ResponseWriter, r *http
 	spec := store.ModelConsumerSpec{Limits: limits,
 		TenantID: tenant, Label: d.Label, Description: d.Description, Kind: d.Kind,
 		TenantScope: d.TenantScope, AllModels: d.AllModels, Models: d.Models, AllowPlaintext: d.AllowPlaintext,
+		RecordBodies: d.RecordBodies,
 	}
 	if d.PromptSensitivity != nil {
 		spec.PromptSensitivity = *d.PromptSensitivity
@@ -668,6 +694,9 @@ func (h *ManageHandler) handleModelConsumerCreate(w http.ResponseWriter, r *http
 func (h *ManageHandler) freshConsumerView(r *http.Request, ar *auth.AuthResult, pol consumerPolicy, written store.ModelConsumer, keys []store.ModelKeyInfo) consumerView {
 	now := time.Now()
 	c, err := store.GetConsumer(r.Context(), h.pool, written.ID, accessOf(ar), now)
+	if err == nil {
+		err = h.readRecordBodies(r, []*store.ModelConsumer{&c})
+	}
 	if err != nil {
 		slog.Warn("manage: consumer re-read after write failed", "error", err, "request_id", RequestIDFromContext(r.Context()))
 		c = written
@@ -676,6 +705,24 @@ func (h *ManageHandler) freshConsumerView(r *http.Request, ar *auth.AuthResult, 
 		}
 	}
 	return newConsumerView(c, c.Keys, ar, now, pol.expiryWarn)
+}
+
+// readRecordBodies fills RecordBodies of consumers the caller has read
+// (store.ConsumerRecordBodies — the switch is not part of the shared
+// consumer read, migration 197).
+func (h *ManageHandler) readRecordBodies(r *http.Request, cs []*store.ModelConsumer) error {
+	ids := make([]string, len(cs))
+	for i, c := range cs {
+		ids[i] = c.ID
+	}
+	on, err := store.ConsumerRecordBodies(r.Context(), h.pool, ids)
+	if err != nil {
+		return err
+	}
+	for _, c := range cs {
+		c.RecordBodies = on[c.ID]
+	}
+	return nil
 }
 
 // consumerUpdateFields is the closed field set of model-consumer-update.
@@ -687,14 +734,17 @@ var consumerUpdateFields = map[string]bool{
 	"models":             true,
 	"prompt_sensitivity": true, "fair_weight": true, "admission_lane": true,
 	"allowed_cidrs": true, "allow_plaintext": true, "active": true,
+	"record_bodies": true, "confirm_record_bodies": true,
 }
 
 // consumerUpdate is a decoded update: the store patch plus what the field
-// tiers compare (the parsed CIDR list).
+// tiers compare (the parsed CIDR list) and the confirmation of switching
+// recording on.
 type consumerUpdate struct {
-	id    string
-	patch store.ModelConsumerPatch
-	cidrs []netip.Prefix
+	id            string
+	patch         store.ModelConsumerPatch
+	cidrs         []netip.Prefix
+	confirmRecord bool
 }
 
 // decodeConsumerUpdate decodes model-consumer-update's payload. A field present
@@ -722,6 +772,7 @@ func decodeConsumerUpdate(raw json.RawMessage) (consumerUpdate, error) {
 		{"label", &p.Label}, {"description", &p.Description}, {"all_models", &p.AllModels},
 		{"prompt_sensitivity", &p.PromptSensitivity}, {"fair_weight", &p.FairWeight},
 		{"admission_lane", &p.AdmissionLane}, {"allow_plaintext", &p.AllowPlaintext}, {"active", &p.Active},
+		{"record_bodies", &p.RecordBodies}, {"confirm_record_bodies", &u.confirmRecord},
 	} {
 		raw, ok := fields[f.name]
 		if !ok {
@@ -849,8 +900,24 @@ func (u consumerUpdate) serverAdminOnly(cur store.ModelConsumer) bool {
 		return true // above ctx's own background work (design/03 §3.1)
 	case p.AllowPlaintext != nil && *p.AllowPlaintext && !cur.AllowPlaintext:
 		return true // credential transport without TLS (B24)
+	case u.recordsOn(cur):
+		return true // every body of the consumer in clear text in the log (issue #571)
 	}
 	return false
+}
+
+// recordsOn reports an update that switches recording on (off → on).
+func (u consumerUpdate) recordsOn(cur store.ModelConsumer) bool {
+	return u.patch.RecordBodies != nil && *u.patch.RecordBodies && !cur.RecordBodies
+}
+
+// recordConfirmed is the confirmation rule of switching recording on: an
+// update that does needs confirm_record_bodies (errRecordConfirm).
+func (u consumerUpdate) recordConfirmed(cur store.ModelConsumer) error {
+	if u.recordsOn(cur) && !u.confirmRecord {
+		return errRecordConfirm
+	}
+	return nil
 }
 
 // scopeAfter is the consumer's tenant_scope once the update has run: the
@@ -898,15 +965,24 @@ func (h *ManageHandler) handleModelConsumerUpdate(w http.ResponseWriter, r *http
 	pol := h.consumerPolicy()
 	access := accessOf(ar)
 	cur, err := store.GetConsumer(r.Context(), h.pool, u.id, access, time.Now())
+	if err == nil {
+		// Always read: the tiers compare it when the patch names it, and the
+		// answer's fallback below names it when the patch does not.
+		err = h.readRecordBodies(r, []*store.ModelConsumer{&cur})
+	}
 	if err != nil {
 		writeConsumerStoreError(w, r, err, "model-consumer-update")
 		return
 	}
 	// First, unlocked: refuse early with the tier text before any scope
 	// lookup can answer differently. The authoritative check repeats under
-	// the consumer lock below.
+	// the consumer lock below, the confirmation of recording with it.
 	if !pol.allowed(ar, u.grant(cur), cur.Kind == "ctx-peer") {
 		writeAdminRequired(w)
+		return
+	}
+	if err := u.recordConfirmed(cur); err != nil {
+		writeConsumerStoreError(w, r, err, "model-consumer-update")
 		return
 	}
 	if u.patch.TenantScope != nil && h.rejectScopeOutsideTenant(w, r, []string{*u.patch.TenantScope}, cur.TenantID) {
@@ -924,12 +1000,22 @@ func (h *ManageHandler) handleModelConsumerUpdate(w http.ResponseWriter, r *http
 		if !pol.allowed(ar, u.grant(locked), locked.Kind == "ctx-peer") {
 			return errFieldTier
 		}
+		if err := u.recordConfirmed(locked); err != nil {
+			return err
+		}
 		return u.checkModels(snap, locked)
 	}
 	c, err := store.UpdateConsumerChecked(r.Context(), h.pool, u.id, access, u.patch, check, auditStamp(r, ar))
 	if err != nil {
 		writeConsumerStoreError(w, r, err, "model-consumer-update")
 		return
+	}
+	if u.patch.RecordBodies == nil {
+		// The update neither read nor wrote the switch (store
+		// ModelConsumer.RecordBodies): the written row carries it as read
+		// above, never an unread false — freshConsumerView falls back to
+		// that row when its re-read fails.
+		c.RecordBodies = cur.RecordBodies
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "consumer": h.freshConsumerView(r, ar, pol, c, nil)})
 }

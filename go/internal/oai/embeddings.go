@@ -175,9 +175,21 @@ func Embeddings(d Deps) http.Handler {
 			refuseInternal(w, r)
 			return
 		}
+		rr, ok := routeRecording(r, ca, llmlog.GatewayOpEmbed)
+		if !ok {
+			refuseRecording(AccessRecordFrom(r.Context()), w)
+			return
+		}
 		c := newEmbedCall(d, w, r, ca, entry)
-		defer c.close()
-		c.serve()
+		c.recording = rr
+		if rr != nil {
+			c.id = rr.req.ID // the answer and the attempts name the recorded row
+		}
+		func() {
+			defer c.close()
+			c.serve()
+		}()
+		rr.endInRoute(w) // a refused request's row inside its in-flight reservation (record.go)
 	})
 }
 
@@ -225,6 +237,9 @@ type embedCall struct {
 	// booked before the acquire (reserveUpstreamTexts); the first attempt
 	// books only the rest of its bodies (frames, slack, wire calls).
 	textsBooked int64
+	// recording is the request's recording (record.go): nil for a consumer
+	// that does not record.
+	recording *requestRecording
 }
 
 func newEmbedCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time) *embedCall {
@@ -327,6 +342,7 @@ func (c *embedCall) serve() {
 		c.refuseParam(perr)
 		return
 	}
+	c.recording.parsed(req.model, false)
 	if !c.resolve(req.model, req.modelOverlong) {
 		return
 	}
@@ -417,7 +433,8 @@ func (c *embedCall) coverScan(required backends.Sensitivity, body []byte, depth 
 // allocated — one buffer of the declared length, where io.ReadAll grew its
 // way there and spent about twice the body.
 func (c *embedCall) readBody() ([]byte, bool) {
-	body, spent, err := readRequestBody(c.r.Body, c.r.ContentLength)
+	body, spent, err := readBodyKeep(c.r.Body, c.r.ContentLength, c.recording != nil)
+	c.recording.setBody(body, err == nil)
 	var tooLarge *http.MaxBytesError
 	switch {
 	case err == nil:
@@ -649,7 +666,7 @@ func (c *embedCall) admitLimiter() bool {
 	// The row the shutdown's forced settle writes should the request still
 	// be open after the HTTP drain (W06-13 (e)).
 	registerForcedRow(res, c.d.Record, func() llmlog.GatewayRow {
-		return llmlog.GatewayRow{Pipeline: embedPipeline, ConsumerID: c.ca.ConsumerID,
+		return llmlog.GatewayRow{Pipeline: embedPipeline, ConsumerID: c.ca.ConsumerID, Recorded: c.recording != nil, RecordingID: c.recording.id(),
 			Gateway: withFederation(c.r.Context(), llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID})}
 	}, string(c.required))
 	return true
@@ -791,6 +808,13 @@ func (c *embedCall) walk(chain []backends.Backend) {
 		c.refuseParam(unsupportedValue("input", fmt.Sprintf("at most %d inputs per request", c.lim.subBatch)))
 		return
 	}
+	// A recording consumer's request is held before its first attempt and
+	// before any queue wait (record.go); one that cannot be is not served.
+	if !c.recording.open(c.ctx) {
+		c.endLimit(func(l LimitReservation) { l.Abort() })
+		refuseRecording(c.rec, c.w)
+		return
+	}
 	stop := c.d.watch(c.ctx, c.cancel, newWatchTarget(c.ca, c.req.model, c.alias.ID, c.gen))
 	defer stop()
 
@@ -798,6 +822,9 @@ func (c *embedCall) walk(chain []backends.Backend) {
 	rules := llm.WalkRules{WindowRule: true, AllowedClasses: c.d.Planner.AllowedClasses(), Timeout: c.attemptTimeout}
 	served, attempts, werr := llm.WalkChain(c.ctx, plan.Chain, c.alias.Role, plan.Acquirer, llm.PoolReporter(c.d.Pool), rules,
 		func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, timeout time.Duration) (dispatch.Usage, bool, error) {
+			if !c.recording.ready() {
+				return dispatch.Usage{}, false, &llm.AdmissionError{Err: errRecordingUnavailable, Backend: b.Name, Host: b.Host}
+			}
 			return c.attempt(&st, plan, runCtx, b, lease, timeout)
 		})
 	stop()
@@ -1222,6 +1249,12 @@ func (c *embedCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, s
 	if err == nil {
 		return c.success(st)
 	}
+	if errors.Is(err, errRecordingUnavailable) {
+		// An attempt found the request's recording not open (ready): it went
+		// to no backend (record.go).
+		refuseRecording(c.rec, c.w)
+		return embedOutcome{finish: llmlog.FinishAborted, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeRecordingUnavailable}}
+	}
 	if isAdmissionFailure(err) {
 		waited := time.Duration(0)
 		if st.lease == nil {
@@ -1361,6 +1394,23 @@ func (c *embedCall) success(st *embedState) embedOutcome {
 	dims := st.dims
 	if c.req.dims > 0 {
 		dims = c.req.dims
+	}
+	// A recording consumer's request is ended as answered before the first
+	// byte of the answer goes out (record.go); the vectors are not kept —
+	// the input is what was sent. One that cannot be is refused instead.
+	if !c.recording.answer(c.ctx, nil) {
+		refuseRecording(c.rec, c.w)
+		return embedOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeRecordingUnavailable}}
+	}
+	if c.recording != nil {
+		// The commit took its time: a request that stopped being served
+		// meanwhile does not get the answer (record.go).
+		if err := c.d.heldStillServes(c.ctx, c.client, t); err != nil {
+			c.recording.withhold()
+			c.cancel(err)
+			code := refuseHeld(err, c.rec, c.w, c.r)
+			return embedOutcome{finish: llmlog.FinishAborted, redacted: &llmlog.RedactedErr{Class: backends.ClassCanceled.String(), Code: code}}
+		}
 	}
 	// The meter's view of the request's op bucket, on the successful answer
 	// only (design/06 §4.4; lead decision M2 (c)).
@@ -1558,7 +1608,7 @@ func (c *embedCall) record(plan Plan, served *backends.Backend, attempts []llm.C
 			request = bodyLogText(c.req.input, n)
 		}
 	}
-	c.d.Record(llmlog.GatewayRow{
+	row := llmlog.GatewayRow{
 		Pipeline:   embedPipeline,
 		ConsumerID: c.ca.ConsumerID,
 		Gateway: withFederation(c.r.Context(), llmlog.Gateway{
@@ -1570,5 +1620,7 @@ func (c *embedCall) record(plan Plan, served *backends.Backend, attempts []llm.C
 		Err:         out.redacted,
 		Request:     request,
 		BodyLogging: c.s.BodyLogging,
-	})
+	}
+	c.recording.mark(&row)
+	c.d.Record(row)
 }

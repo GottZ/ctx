@@ -77,6 +77,7 @@ function consumerView(id: string, tenant: TenantKey, label: string, keys: Return
     admission_lane: 'bulk',
     allowed_cidrs: null,
     allow_plaintext: false,
+    record_bodies: false,
     active: true,
     status: 'rotating',
     last_used_at: '2026-06-29T11:58:00Z',

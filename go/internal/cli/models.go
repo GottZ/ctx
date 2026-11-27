@@ -97,6 +97,7 @@ type modelsConsumerView struct {
 	AdmissionLane     string          `json:"admission_lane"`
 	AllowedCIDRs      []string        `json:"allowed_cidrs"`
 	AllowPlaintext    bool            `json:"allow_plaintext"`
+	RecordBodies      bool            `json:"record_bodies"`
 	Active            bool            `json:"active"`
 	Status            string          `json:"status"`
 	LastUsedAt        *string         `json:"last_used_at"`

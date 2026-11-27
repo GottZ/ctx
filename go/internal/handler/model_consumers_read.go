@@ -41,8 +41,13 @@ type consumerView struct {
 	AdmissionLane     string     `json:"admission_lane"`
 	AllowedCIDRs      []string   `json:"allowed_cidrs"`
 	AllowPlaintext    bool       `json:"allow_plaintext"`
-	Active            bool       `json:"active"`
-	Status            string     `json:"status"`
+	// RecordBodies: every request of the consumer is held in full in
+	// context_llm_recordings with the answer it got, embedding vectors
+	// excepted (migration 197) — shown to every reader of the consumer, its
+	// tenant-admins included.
+	RecordBodies bool       `json:"record_bodies"`
+	Active       bool       `json:"active"`
+	Status       string     `json:"status"`
 	LastUsedAt        *time.Time `json:"last_used_at"`
 	CreatedAt         time.Time  `json:"created_at"`
 	CreatedByLabel    *string    `json:"created_by_label"`
@@ -168,7 +173,7 @@ func newConsumerView(c store.ModelConsumer, keys []store.ModelKeyInfo, ar *auth.
 		ID: c.ID, TenantID: c.TenantID, TenantSlug: c.TenantSlug, Label: c.Label,
 		Description: c.Description, Kind: c.Kind, TenantScope: c.TenantScope, AllModels: c.AllModels, Models: models,
 		PromptSensitivity: c.PromptSensitivity, FairWeight: c.FairWeight, AdmissionLane: c.AdmissionLane,
-		AllowedCIDRs: c.AllowedCIDRs, AllowPlaintext: c.AllowPlaintext, Active: c.Active,
+		AllowedCIDRs: c.AllowedCIDRs, AllowPlaintext: c.AllowPlaintext, RecordBodies: c.RecordBodies, Active: c.Active,
 		Status: consumerStatus(c.Active, c.Keys, now, warn), LastUsedAt: c.LastUsedAt,
 		CreatedAt: c.CreatedAt, CreatedByLabel: c.CreatedByLabel, Keys: kv, KeysTotal: c.KeysTotal,
 	}
@@ -308,6 +313,14 @@ func (h *ManageHandler) handleModelConsumerList(w http.ResponseWriter, r *http.R
 		last := list[len(list)-1]
 		next = encodeKeysetCursor(last.CreatedAt, last.ID)
 	}
+	page := make([]*store.ModelConsumer, len(list))
+	for i := range list {
+		page[i] = &list[i]
+	}
+	if err := h.readRecordBodies(r, page); err != nil {
+		writeConsumerStoreError(w, r, err, "model-consumer-list")
+		return
+	}
 	views := make([]consumerView, 0, len(list))
 	for _, c := range list {
 		views = append(views, newConsumerView(c, c.Keys, ar, now, pol.expiryWarn))
@@ -335,6 +348,9 @@ func (h *ManageHandler) handleModelConsumerGet(w http.ResponseWriter, r *http.Re
 	access := accessOf(ar)
 	now := time.Now()
 	c, err := store.GetConsumer(r.Context(), h.pool, d.ID, access, now)
+	if err == nil {
+		err = h.readRecordBodies(r, []*store.ModelConsumer{&c})
+	}
 	if err != nil {
 		writeConsumerStoreError(w, r, err, "model-consumer-get")
 		return

@@ -95,9 +95,21 @@ func ChatCompletions(d Deps) http.Handler {
 			refuseInternal(w, r)
 			return
 		}
+		rr, ok := routeRecording(r, ca, llmlog.GatewayOpChat)
+		if !ok {
+			refuseRecording(AccessRecordFrom(r.Context()), w)
+			return
+		}
 		c := newChatCall(d, w, r, ca, entry)
-		defer c.close()
-		c.serve()
+		c.adoptRecording(rr)
+		func() {
+			defer c.close()
+			c.serve()
+		}()
+		// A refused request's row while its in-flight reservation still
+		// books its body (record.go endInRoute); not on a panic — the stage
+		// ends that one.
+		rr.endInRoute(w)
 	})
 }
 
@@ -154,6 +166,10 @@ type chatCall struct {
 	// requestReserveFactor × body, grown by cover), spent what the request
 	// has allocated against it (cover).
 	held, spent int64
+
+	// recording is the request's recording (record.go): nil for a consumer
+	// that does not record.
+	recording *requestRecording
 }
 
 func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time) *chatCall {
@@ -222,10 +238,25 @@ func (c *chatCall) close() {
 	}
 }
 
+// adoptRecording binds the request's recording (nil: the consumer does not
+// record): the request's id becomes the recording's, so the answer's id
+// ("chatcmpl-<id>") names the recorded row.
+func (c *chatCall) adoptRecording(rr *requestRecording) {
+	c.recording = rr
+	if rr != nil {
+		c.id = rr.req.ID
+	}
+}
+
 // refuse answers code and names it as the access record's reason.
 func (c *chatCall) refuse(code, message string, shouldRetry bool) {
 	c.rec.Reason = code
 	c.reply(func(w http.ResponseWriter) { WriteCode(w, code, message, shouldRetry) })
+}
+
+// refuseRecording answers a request whose recording failed (record.go).
+func (c *chatCall) refuseRecording() {
+	c.reply(func(w http.ResponseWriter) { refuseRecording(c.rec, w) })
 }
 
 func (c *chatCall) internal(msg string, args ...any) {
@@ -281,6 +312,7 @@ func (c *chatCall) serve() {
 		c.refuseParam(perr)
 		return
 	}
+	c.recording.parsed(req.model, req.stream)
 	c.frame(req.stream)
 	if !c.resolve(req.model, req.modelOverlong) {
 		return
@@ -383,7 +415,8 @@ func reasoningOff(a modelalias.Alias) bool {
 // The ledger starts here: the stage reserved requestReserveFactor × the
 // body, the read spent what readRequestBody allocated.
 func (c *chatCall) readBody() ([]byte, bool) {
-	body, spent, err := readRequestBody(c.r.Body, c.r.ContentLength)
+	body, spent, err := readBodyKeep(c.r.Body, c.r.ContentLength, c.recording != nil)
+	c.recording.setBody(body, err == nil)
 	var tooLarge *http.MaxBytesError
 	switch {
 	case err == nil:
@@ -414,6 +447,14 @@ func (c *chatCall) readBody() ([]byte, bool) {
 // there and spends about twice the body), an undeclared one in chunks that
 // double up to readChunkMax and are joined into one buffer at the end.
 func readRequestBody(r io.Reader, declared int64) ([]byte, int64, error) {
+	return readBodyKeep(r, declared, false)
+}
+
+// readBodyKeep is readRequestBody; keep (a recording consumer's request,
+// record.go) returns what an undeclared body's failed read got as well —
+// its chunks joined — where readRequestBody returns nothing. A declared
+// body's failed read returns its part either way.
+func readBodyKeep(r io.Reader, declared int64, keep bool) ([]byte, int64, error) {
 	if declared > 0 {
 		buf := make([]byte, declared)
 		n, err := io.ReadFull(r, buf)
@@ -449,6 +490,9 @@ func readRequestBody(r io.Reader, declared int64) ([]byte, int64, error) {
 			break
 		}
 		if err != nil {
+			if keep {
+				return slices.Concat(chunks...), spent + int64(total), err
+			}
 			return nil, spent, err
 		}
 		size = min(2*size, readChunkMax)
@@ -757,7 +801,7 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 	// The row the shutdown's forced settle writes should the request still
 	// be open after the HTTP drain (W06-13 (e)).
 	registerForcedRow(res, c.d.Record, func() llmlog.GatewayRow {
-		return llmlog.GatewayRow{Pipeline: chatPipeline, ConsumerID: c.ca.ConsumerID,
+		return llmlog.GatewayRow{Pipeline: chatPipeline, ConsumerID: c.ca.ConsumerID, Recorded: c.recording != nil, RecordingID: c.recording.id(),
 			Gateway: withFederation(c.r.Context(), llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID, Stream: c.sse != nil})}
 	}, string(c.required))
 	return true
@@ -844,6 +888,13 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 		return
 	}
 	c.rec.Class = planClass(plan) // the class of an L2 refusal (W06-12); a lease names it again
+	// A recording consumer's request is held before its first attempt and
+	// before any queue wait (record.go); one that cannot be is not served.
+	if !c.recording.open(c.ctx) {
+		c.endLimit(func(l LimitReservation) { l.Abort() })
+		c.refuseRecording()
+		return
+	}
 	c.target = newWatchTarget(c.ca, c.req.model, c.alias.ID, c.gen)
 	stop := c.d.watch(c.ctx, c.cancel, c.target)
 	defer stop()
@@ -852,6 +903,9 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 	rules := llm.WalkRules{WindowRule: true, AllowedClasses: c.d.Planner.AllowedClasses(), Timeout: c.attemptTimeout}
 	served, attempts, werr := llm.WalkChain(c.ctx, plan.Chain, c.alias.Role, plan.Acquirer, llm.PoolReporter(c.d.Pool), rules,
 		func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, timeout time.Duration) (dispatch.Usage, bool, error) {
+			if !c.recording.ready() {
+				return dispatch.Usage{}, false, &llm.AdmissionError{Err: errRecordingUnavailable, Backend: b.Name, Host: b.Host}
+			}
 			if c.sse != nil {
 				return c.streamAttempt(&st, spec, plan.Lane, runCtx, b, lease, timeout)
 			}
@@ -1128,6 +1182,12 @@ func (c *chatCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, st
 // empty walk, and the route's own attempt mapping — as a status, or as the
 // error frame of a committed stream (reply).
 func (c *chatCall) outcomeError(plan Plan, attempts []llm.ChainAttempt, err error, st *walkState) chatOutcome {
+	if errors.Is(err, errRecordingUnavailable) {
+		// An attempt found the request's recording not open (ready): it went
+		// to no backend (record.go).
+		c.refuseRecording()
+		return chatOutcome{finish: llmlog.FinishAborted, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeRecordingUnavailable}}
+	}
 	if errors.Is(err, ErrBudgetExhausted) {
 		// The budget refused an attempt's upstream body (reserveUpstream):
 		// the stage's 503. Without a wire call no row, and the meter's
@@ -1205,6 +1265,11 @@ func (c *chatCall) verdict() (ended bool, code string) {
 		// it still reads — the stream ends with its error frame.
 		c.refuse(CodeServerOverloaded, relayOverflowMessage, true)
 		return true, CodeServerOverloaded
+	case errors.Is(cause, errRecordingUnavailable):
+		// A recording consumer's stream had no room to keep its next line
+		// (record.go): it ends before that line, with its error frame.
+		c.refuseRecording()
+		return true, CodeRecordingUnavailable
 	case errors.Is(cause, errClientGone):
 		// A write to the client failed (it stopped reading): nothing more
 		// can reach it (D4).
@@ -1252,6 +1317,23 @@ func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
 	c.rec.Usage = st.usageKind
 	// The meter's view of the request's op bucket, on the successful answer
 	// only (design/06 §4.4; lead decision M2 (c)).
+	answer := append(body, '\n')
+	// A recording consumer's answer is held before its first byte goes out
+	// (record.go); one that cannot be is refused instead.
+	if !c.recording.answer(c.ctx, answer) {
+		c.refuseRecording()
+		return chatOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeRecordingUnavailable}}
+	}
+	if c.recording != nil {
+		// The commit took its time: a request that stopped being served
+		// meanwhile does not get the answer it held (record.go).
+		if err := c.d.heldStillServes(c.ctx, c.client, c.target); err != nil {
+			c.recording.withhold()
+			c.cancel(err)
+			code := refuseHeld(err, c.rec, c.w, c.r)
+			return chatOutcome{finish: llmlog.FinishAborted, redacted: &llmlog.RedactedErr{Class: backends.ClassCanceled.String(), Code: code}}
+		}
+	}
 	for k, v := range c.rateHeaders() {
 		c.w.Header()[k] = v
 	}
@@ -1264,7 +1346,7 @@ func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
 	// escape class, TestRewriteChatIsTheBase, FuzzRewriteChatIsTheBase) —,
 	// served as application/json. The buffer has room for the newline: the
 	// append does not copy the answer.
-	if _, err := c.w.Write(append(body, '\n')); err != nil { //nolint:gosec // G705: the body carries json.Marshal's HTML escape, written by the rewrite walk gosec's taint check does not know as a sanitizer (pinned byte-equal, see above)
+	if _, err := c.w.Write(answer); err != nil { //nolint:gosec // G705: the body carries json.Marshal's HTML escape, written by the rewrite walk gosec's taint check does not know as a sanitizer (pinned byte-equal, see above)
 		slog.Warn("gateway: failed to write the answer", "error", err, "request_id", c.w.Header().Get("X-Request-ID"))
 	}
 	return chatOutcome{finish: finishOf(st.result.FinishReason), response: body}
@@ -1331,7 +1413,7 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 			response = string(out.response[:n])
 		}
 	}
-	c.d.Record(llmlog.GatewayRow{
+	row := llmlog.GatewayRow{
 		Pipeline:   chatPipeline,
 		ConsumerID: c.ca.ConsumerID,
 		Gateway: withFederation(c.r.Context(), llmlog.Gateway{
@@ -1344,7 +1426,9 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 		Request:     request,
 		Response:    response,
 		BodyLogging: c.s.BodyLogging,
-	})
+	}
+	c.recording.mark(&row)
+	c.d.Record(row)
 }
 
 // bodyLogTextMax is how much of the message array's text the route hands to

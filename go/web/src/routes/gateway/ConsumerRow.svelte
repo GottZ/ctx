@@ -20,7 +20,7 @@
   // policy.canEditPolicy allows — never on a ctx-peer row below server-admin
   // (data-testid consumer-edit).
   import type { ConsumerView, KeyView } from '../../lib/api/types'
-  import { STATUS_LABEL, consumerTone, fmtDay, fmtMinute } from './format'
+  import { STATUS_LABEL, consumerTone, fmtDay, fmtMinute, recordingText } from './format'
   import KeyChain from './KeyChain.svelte'
 
   let {
@@ -63,7 +63,7 @@
     <a class="label-text" data-testid="consumer-label" href="/gateway/consumers/{c.id}">{c.label}</a>
     {#if c.description}<span class="desc">{c.description}</span>{/if}
   </td>
-  <td><span class="badge" class:peer={c.kind === 'ctx-peer'}>{c.kind}</span></td>
+  <td><span class="badge" class:peer={c.kind === 'ctx-peer'}>{c.kind}</span>{#if c.record_bodies}<span class="badge rec" data-consumer-recording title={recordingText}>recording</span>{/if}</td>
   <td>
     <span class="badge {consumerTone(c.status)}" data-consumer-status>{STATUS_LABEL[c.status] ?? c.status}</span>
   </td>
@@ -162,6 +162,10 @@
   .badge.peer {
     color: var(--accent);
     border-color: var(--accent);
+  }
+  .badge.rec {
+    color: var(--warn);
+    border-color: var(--warn);
   }
   .dim {
     color: var(--text-faint);

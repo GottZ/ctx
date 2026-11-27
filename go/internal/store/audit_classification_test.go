@@ -60,6 +60,7 @@ import (
 
 	"github.com/GottZ/ctx/internal/store"
 	"github.com/GottZ/ctx/internal/testdb"
+	"github.com/GottZ/ctx/migrations"
 )
 
 // auditedTable is the classification of one audited table.
@@ -110,6 +111,7 @@ var auditClassification = []auditedTable{
 			"tenant_id", "label", "description", "kind", "tenant_scope", "all_models",
 			"prompt_sensitivity", "fair_weight", "admission_lane", "allowed_cidrs",
 			"allow_plaintext", "active", "peer_instance_id", "peer_bound_at",
+			"record_bodies",
 		},
 		excluded: map[string]string{
 			"id":                   "identity of the row, written as entity_key and metadata.consumer_id",
@@ -495,6 +497,7 @@ var auditColumnProbes = map[string]auditProbeSet{
 			"active":             "NOT active",
 			"peer_instance_id":   "gen_random_uuid()",
 			"peer_bound_at":      "peer_bound_at - interval '1 minute'",
+			"record_bodies":      "NOT record_bodies",
 		},
 		excluded: map[string]string{
 			"created_at":           "created_at - interval '1 minute'",
@@ -650,6 +653,13 @@ func TestAuditClassificationPerColumn(t *testing.T) {
 	m163Apply(ctx, t, pool)
 	m164Apply(ctx, t, pool)
 	m168ApplyRest(ctx, t, pool)
+	// 197 (issue #571) adds record_bodies to the consumer and its audit; it
+	// needs only 161's objects, so its body goes onto the 168 schema here.
+	m197Body, err := migrations.FS.ReadFile("197_model_consumer_record_bodies.sql")
+	if err != nil {
+		t.Fatalf("read 197: %v", err)
+	}
+	kaExecInTx(ctx, t, pool, string(m197Body))
 
 	otherTenant := freshTenant(t, ctx, pool, "ka-pin-other")
 	var otherPrincipal string

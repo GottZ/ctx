@@ -34,6 +34,12 @@ type modelGroupDeps struct {
 	// failure lock, probe bucket and DB semaphore, so two groups never hold
 	// twice the database share.
 	door *handler.ModelDoor
+	// recorder is the recording stage right behind the door (issue #571,
+	// oai.RecordingStage): a recording consumer's requests are held before
+	// they are served; every other consumer passes it untouched. nil mounts
+	// none — a recording consumer's request is then refused at its route
+	// (fail-closed), never served unrecorded.
+	recorder *oai.RecordingStage
 	// ingress is the federation-ingress registration of the router the group
 	// is mounted on (F-W8, design/04 §4.6): mountModelGroup marks it, the
 	// boot assert and the gateway.enabled settings write read it. The
@@ -104,7 +110,11 @@ func mountModelGroup(r chi.Router, prefix string, deps modelGroupDeps) {
 		Binder:   deps.binder, RequirePeerHop: deps.requirePeerHop, Events: deps.events,
 	})
 	r.Route(prefix, func(g chi.Router) {
-		g.Use(deps.access.Handler, oai.Recover, deps.gate, deps.door.Handler, loopGuard, peerIngress)
+		g.Use(deps.access.Handler, oai.Recover, deps.gate, deps.door.Handler)
+		if deps.recorder != nil {
+			g.Use(deps.recorder.Handler)
+		}
+		g.Use(loopGuard, peerIngress)
 		g.Use(deps.inner...)
 		g.NotFound(oai.NotFound)
 		g.MethodNotAllowed(methodNotAllowed(g, routeMethods(deps.routes)))

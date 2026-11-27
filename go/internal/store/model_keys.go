@@ -161,6 +161,13 @@ type ModelConsumer struct {
 	CreatedByLabel       *string
 	CreatedByTenantID    *string
 	CreatedByServerAdmin bool
+	// RecordBodies is the recording switch (migration 197). NOT part of
+	// sqlConsumerCols: the consumer read path is shared with migration tests
+	// that run the store against a schema before 197 (TestModelGrantStore at
+	// 164), so the column is read on demand — ConsumerRecordBodies, and the
+	// locked read of UpdateConsumerChecked when a patch names it — and is
+	// false wherever nothing read it.
+	RecordBodies bool
 }
 
 // ModelKeyInfo is a key as the store reads it: id, hint and lifecycle. There
@@ -197,6 +204,9 @@ type ModelConsumerSpec struct {
 	AdmissionLane     string
 	AllowedCIDRs      []string
 	AllowPlaintext    bool
+	// RecordBodies switches recording on at create (migration 197); false
+	// leaves the column to its default and the insert does not name it.
+	RecordBodies bool
 	// Limits are the consumer's starting limits (FOLGE-Z Z3): each one is
 	// written as the new consumer's context_gateway_limits row of its tier
 	// and op in the create's transaction — the row exists before the key
@@ -235,6 +245,11 @@ type ModelConsumerPatch struct {
 	ClearAllowedCIDRs bool
 	AllowPlaintext    *bool
 	Active            *bool
+	// RecordBodies switches recording on or off (migration 197). A patch
+	// that names it has the check of UpdateConsumerChecked see the locked
+	// value (current.RecordBodies); a patch without it never reads or writes
+	// the column.
+	RecordBodies *bool
 }
 
 // KeyCursor is the keyset position of KeyHistory: the (created_at, id) of the
@@ -415,6 +430,7 @@ func insertConsumerTx(ctx context.Context, tx pgx.Tx, spec ModelConsumerSpec) (M
 		{"prompt_sensitivity", "", spec.PromptSensitivity != "", spec.PromptSensitivity},
 		{"fair_weight", "::smallint", spec.FairWeight != 0, spec.FairWeight},
 		{"admission_lane", "", spec.AdmissionLane != "", spec.AdmissionLane},
+		{"record_bodies", "", spec.RecordBodies, spec.RecordBodies},
 	} {
 		if o.set {
 			args = append(args, o.val)
@@ -432,6 +448,7 @@ func insertConsumerTx(ctx context.Context, tx pgx.Tx, spec ModelConsumerSpec) (M
 		}
 		return ModelConsumer{}, fmt.Errorf("model_consumers: insert: %w", err)
 	}
+	c.RecordBodies = spec.RecordBodies // what the insert wrote (false = the column default)
 	return c, nil
 }
 
@@ -679,11 +696,8 @@ func UpdateConsumerChecked(ctx context.Context, pool *pgxpool.Pool, consumerID s
 				return err
 			}
 			if check != nil {
-				cur, err := readConsumerTx(ctx, tx, consumerID)
+				cur, err := readLockedConsumerTx(ctx, tx, consumerID, patch)
 				if err != nil {
-					return err
-				}
-				if cur.Models, err = ConsumerGrantIDs(ctx, tx, consumerID); err != nil {
 					return err
 				}
 				if err := check(cur); err != nil {
@@ -703,6 +717,9 @@ func UpdateConsumerChecked(ctx context.Context, pool *pgxpool.Pool, consumerID s
 			}
 			if c, err = writeConsumerTx(ctx, tx, consumerID, set, args); err != nil {
 				return err
+			}
+			if patch.RecordBodies != nil {
+				c.RecordBodies = *patch.RecordBodies // what the UPDATE wrote
 			}
 			if patch.Models != nil {
 				// The transaction is stamped above.
@@ -846,7 +863,68 @@ func (p ModelConsumerPatch) assignments() ([]string, []any, error) {
 	if p.Active != nil {
 		add("active", "", *p.Active)
 	}
+	if p.RecordBodies != nil {
+		add("record_bodies", "", *p.RecordBodies)
+	}
 	return set, args, nil
+}
+
+// readLockedConsumerTx is the consumer UpdateConsumerChecked's check sees:
+// the locked row, its grants, and — only when the patch names it — its
+// recording switch (the column is read on demand, ModelConsumer.RecordBodies).
+func readLockedConsumerTx(ctx context.Context, tx pgx.Tx, consumerID string, patch ModelConsumerPatch) (ModelConsumer, error) {
+	cur, err := readConsumerTx(ctx, tx, consumerID)
+	if err != nil {
+		return ModelConsumer{}, err
+	}
+	if cur.Models, err = ConsumerGrantIDs(ctx, tx, consumerID); err != nil {
+		return ModelConsumer{}, err
+	}
+	if patch.RecordBodies != nil {
+		if cur.RecordBodies, err = consumerRecordBodiesTx(ctx, tx, consumerID); err != nil {
+			return ModelConsumer{}, err
+		}
+	}
+	return cur, nil
+}
+
+// consumerRecordBodiesTx reads the recording switch of a consumer the
+// transaction has locked (UpdateConsumerChecked's check sees it).
+func consumerRecordBodiesTx(ctx context.Context, tx pgx.Tx, consumerID string) (bool, error) {
+	var on bool
+	if err := tx.QueryRow(ctx, `SELECT record_bodies FROM context_model_consumers WHERE id = $1::uuid`,
+		consumerID).Scan(&on); err != nil {
+		return false, fmt.Errorf("model_consumers: read record_bodies: %w", err)
+	}
+	return on, nil
+}
+
+// ConsumerRecordBodies returns the ids among ids whose consumer records its
+// gateway rows in full (record_bodies, migration 197) — the on-demand read of
+// the column beside the shared consumer read (ModelConsumer.RecordBodies).
+// One statement on the primary key for any number of ids; an unknown id or a
+// consumer with the switch off is absent from the map. ids are consumer ids
+// the caller has read in its reach (ListConsumers, GetConsumer).
+func ConsumerRecordBodies(ctx context.Context, q interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, ids []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.Query(ctx, `SELECT id::text FROM context_model_consumers
+	                            WHERE id = ANY($1::text[]::uuid[]) AND record_bodies`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("model_consumers: read record_bodies: %w", err)
+	}
+	on, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("model_consumers: read record_bodies: %w", err)
+	}
+	for _, id := range on {
+		out[id] = true
+	}
+	return out, nil
 }
 
 // KeyHistory pages through a consumer's keys, newest first, by the keyset

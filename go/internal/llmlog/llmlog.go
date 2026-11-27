@@ -199,7 +199,9 @@ func (e Entry) Slimmed(devmode bool) Entry {
 // retentionDays <= 0 disables retention entirely (bodies kept forever — the
 // operator opts in to unlimited). The IS NOT NULL guard makes a re-run
 // idempotent: already-evicted rows are skipped, so the periodic janitor never
-// rewrites long-settled chunks. Returns the number of rows NULLed.
+// rewrites long-settled chunks. The recordings of recording consumers
+// (context_llm_recordings, recordings.go) lose their two bodies after the
+// same retention. Returns the number of rows NULLed, both tables together.
 func EvictBodies(ctx context.Context, pool *pgxpool.Pool, retentionDays int) (int64, error) {
 	if pool == nil || retentionDays <= 0 {
 		return 0, nil
@@ -216,7 +218,20 @@ func EvictBodies(ctx context.Context, pool *pgxpool.Pool, retentionDays int) (in
 	if err != nil {
 		return 0, fmt.Errorf("llmlog: evict bodies: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	// A schema before migration 197 (or after its way back) has no
+	// recordings: nothing to evict there.
+	var present bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('context_llm_recordings') IS NOT NULL`).Scan(&present); err != nil {
+		return tag.RowsAffected(), fmt.Errorf("llmlog: evict recording bodies: %w", err)
+	}
+	if !present {
+		return tag.RowsAffected(), nil
+	}
+	rec, err := pool.Exec(ctx, evictRecordingBodies, retentionDays)
+	if err != nil {
+		return tag.RowsAffected(), fmt.Errorf("llmlog: evict recording bodies: %w", err)
+	}
+	return tag.RowsAffected() + rec.RowsAffected(), nil
 }
 
 // writer is the per-pool insert queue: Record appends, at most

@@ -1,9 +1,9 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 196,
-    "migration_count": 84,
-    "migration_chain_sha256": "df392ea0f70eb16d7cf0c60d46a0ad16b92a152c89321fcd0b592914cdcb4e27",
+    "migration_max": 197,
+    "migration_count": 85,
+    "migration_chain_sha256": "ba7bd47e98be4683d68c4aca1ffbb681202a8d05876067a372a500ca87f20eeb",
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -2132,6 +2132,131 @@
       ],
       "row_security": false
     },
+    "context_llm_recordings": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "process_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "consumer_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "model_key_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "path",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "op",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "client_request_id",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "model",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "stream",
+          "type": "boolean",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "declared_bytes",
+          "type": "bigint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "request_bytes",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "request_complete",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "request_body",
+          "type": "bytea",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "state",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "status",
+          "type": "smallint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "code",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "response_bytes",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "response_body",
+          "type": "bytea",
+          "not_null": false,
+          "storage": "x"
+        }
+      ],
+      "row_security": false
+    },
     "context_llm_rejections_hourly": {
       "columns": [
         {
@@ -2591,6 +2716,12 @@
           "name": "created_by_principal",
           "type": "uuid",
           "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "record_bodies",
+          "type": "boolean",
+          "not_null": true,
           "storage": "p"
         }
       ],
@@ -5300,6 +5431,9 @@
     "context_llm_log_pkey": {
       "def_hash": "71bc1db96f8018863b268c53999b6e62059c08f2db9b05631d8ebf2f184eef7b"
     },
+    "context_llm_recordings_pkey": {
+      "def_hash": "82c959bc21671d3c30d1ed226d473fc4de21a3db327309cc925c5c17105c5b56"
+    },
     "context_model_aliases_pkey": {
       "def_hash": "0c24f3b4e9d05b5be6df0b45b6793e1e196c6f5e63883b60b79520aba078011b"
     },
@@ -5775,6 +5909,12 @@
     "idx_llm_log_pipeline": {
       "def_hash": "1020ca37593bb524a6fd456e8c4a241d30b313aed45a98c4cf83fdbab3d37eea"
     },
+    "idx_llm_recordings_bodies": {
+      "def_hash": "945c90a1ccf00390a20d3871915f5020fe07228ef1dc65d09dd8c01eaace13a2"
+    },
+    "idx_llm_recordings_consumer": {
+      "def_hash": "05189b7ee2df578c3b060ed85efbc2a5fd782bbf948efcb903db065ab209dab0"
+    },
     "idx_llm_rejections_bucket": {
       "def_hash": "2bdc46170c4c02e44f7ae2c94f273ebc01cbea468f25295288a8151a08b443bb"
     },
@@ -6120,7 +6260,7 @@
       "src_hash": "51cec9a296a124f88b899b8c3bdf85605f85761389159b9c481199588b1ebcbc"
     },
     "audit_state_model_consumer(c context_model_consumers)": {
-      "src_hash": "c31dfffa79233dbc075925f1fe69000cc1032ff1d48f4fccbafcb1735fe636d7"
+      "src_hash": "abc2776a43ffa046759bdb1e7e4048bb30fc0109e3f9b61c1cfb78c3f4504dd3"
     },
     "audit_state_model_grant(g context_model_consumer_grants)": {
       "src_hash": "26acfa1913e6f6c346db99053b88d1c1dc730088dddfbb7778cbdabcbdf16bf2"
@@ -6186,7 +6326,7 @@
       "src_hash": "4029c6b45395dcdc3f8fd2886d8feff0a5b51d82b4a78358278a34f397c1add0"
     },
     "ctx_model_auth(p_key_hash text, p_client_ip inet, p_secure boolean)": {
-      "src_hash": "4a53d01644bbb648173d964f2ffb2670e3cde0c9b81a1e98b9391edde7a20b45"
+      "src_hash": "f5015d876eac3fe552c75ce0e59e53b3f780c64de4d2b0d47fa8b5ec845e19ad"
     },
     "ctx_model_auth_live(p_key_ids uuid[])": {
       "src_hash": "77d45df5527e257664bbb72a5ed5fd698b04c4718185b07da76be131964dd737"
@@ -6377,7 +6517,7 @@
       "def_hash": "bda1f75b177103c18e9499e9a1881991628cdd55aaf8ab405d9e88d6a0eadc2c"
     },
     "context_model_consumers.trg_model_consumers_audit_upd": {
-      "def_hash": "eb7cf9da3704b9f60e84094cc4af53e35b50455dbfad04a5dad85205647401bf"
+      "def_hash": "80ac3ec855ea70d6a0e542d9cb93c8a615e57a9786c491300de511a6eb2591c5"
     },
     "context_model_consumers.trg_model_consumers_deactivate": {
       "def_hash": "39098f2eeabd387754c4dd669f02c37f10a9c923f210392de606f17b9a10671f"

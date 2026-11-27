@@ -1524,6 +1524,8 @@ export interface ConsumerView {
   /** null = any source address. */
   allowed_cidrs: string[] | null
   allow_plaintext: boolean
+  /** Recording (migration 197): every request of the consumer is held in full in context_llm_recordings before it is served — set by a server-admin, readable in the database only. */
+  record_bodies: boolean
   active: boolean
   status: ConsumerStatus
   /** max over the keys, 60 s precision. */
@@ -2090,6 +2092,25 @@ export interface GatewayEnvelopeUse {
  * tenant tile reads the coarse depth class from `dispatch_tenant.targets`
  * (never a number, V-03-b).
  */
+/** One recording consumer's requests in this process: admitted = in_flight + recorded + unrecordable. */
+export interface GatewayRecordingConsumer {
+  consumer_id: string
+  admitted: number
+  in_flight: number
+  recorded: number
+  unrecordable: number
+  unfinished: number
+  stream_answers_unrecorded: number
+}
+
+/** gateway.recording of GET /api/status (server-admin). */
+export interface GatewayRecording {
+  process_id: string
+  since: string
+  held_bytes: number
+  consumers: GatewayRecordingConsumer[]
+}
+
 export interface GatewayStatus {
   enabled: boolean
   consumers: number
@@ -2104,6 +2125,10 @@ export interface GatewayStatus {
   top_consumers_1h: GatewayTopConsumer[] | null
   consumers_used_1h: number
   consumers_expiring: number
+  /** Ids of the active consumers with record_bodies on, sorted (the tenant's own on the tenant path); [] when none. */
+  recording_consumers: string[]
+  /** Server-admin only: this process's count of the recording consumers' requests (docs/operations.md "Recording a consumer"). */
+  recording?: GatewayRecording
   /** Server-admin only; not assigned by stampGateway yet (S3) — absent today. */
   instance_envelope?: Record<string, GatewayEnvelopeUse>
   /**
