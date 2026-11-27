@@ -16,7 +16,7 @@
   import { tick } from 'svelte'
   import Markdown from '../../lib/markdown/Markdown.svelte'
   import { RECORDING_LANGUAGES } from '../../lib/api/recordings'
-  import { fmtBytes } from './format'
+  import { fmtBytes } from './recording-data'
   import RecordingBytes from './RecordingBytes.svelte'
   import type { BlockModel } from './recordings.svelte'
 

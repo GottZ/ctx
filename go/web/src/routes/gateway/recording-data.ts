@@ -7,12 +7,14 @@
 //   - pickDefaultLanguage: the translation's default target language;
 //   - localInputToRfc3339: a typed wall-clock filter value to the list's bound;
 //   - recordingError: an ApiError of a recordings call to its named state;
-//   - showRecordingsLink: the condition of the entry links on /gateway and
-//     the consumer page.
+//   - fmtBytes / fmtSecond: sizes and times of the recordings pages.
+//
+// The pages of the gateway area import none of this: the entry links'
+// condition lives in recording-link.ts, so this module and the API client
+// it imports stay in the recordings chunks, out of /gateway's.
 
 import type { ApiError } from '../../lib/api'
 import { recordingErrorCode, RECORDING_LANGUAGES } from '../../lib/api/recordings'
-import type { Capabilities } from '../../lib/auth/capabilities'
 
 /** The named state of a failed recordings call. */
 export interface RecordingErrorState {
@@ -127,12 +129,36 @@ export function recordingError(err: ApiError): RecordingErrorState {
   return { code, text, requestId: err.requestId }
 }
 
+const BYTE_UNITS = ['KiB', 'MiB', 'GiB', 'TiB'] as const
+
 /**
- * The entry links to the recordings (on /gateway and the consumer page): a
- * server-admin, and at least one of the listed consumers records. Nobody else
- * gets a link — the actions are server-admin only and the guard keeps the
- * route from everybody else.
+ * A byte count in binary units (recordings, #575): below 1 KiB exact
+ * ("512 B"), above one decimal ("1.5 KiB"). null or an impossible value is a
+ * dash — never a made-up 0.
  */
-export function showRecordingsLink(caps: Capabilities, consumers: ReadonlyArray<{ record_bodies: boolean }>): boolean {
-  return caps.tier === 'server-admin' && consumers.some((c) => c.record_bodies)
+export function fmtBytes(n: number | null): string {
+  if (n === null || !Number.isFinite(n) || n < 0) return '—'
+  if (n < 1024) return `${Math.trunc(n)} B`
+  let v = n / 1024
+  let unit = 0
+  while (v >= 1024 && unit < BYTE_UNITS.length - 1) {
+    v /= 1024
+    unit++
+  }
+  return `${v.toFixed(1)} ${BYTE_UNITS[unit]}`
+}
+
+/** A server timestamp to the second in the viewer's locale; '—' when unparseable (recordings, #575). */
+export function fmtSecond(ts: string | null): string {
+  const d = ts === null ? null : new Date(ts)
+  return d === null || Number.isNaN(d.getTime())
+    ? '—'
+    : d.toLocaleString(undefined, {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
 }

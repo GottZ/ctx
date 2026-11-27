@@ -14,7 +14,7 @@
   import { session } from '../../lib/auth.svelte'
   import type { RecordingOpFilter, RecordingStateFilter, RecordingStatusFilter } from '../../lib/api/types'
   import Table from '../../lib/ui/Table.svelte'
-  import { fmtBytes, fmtSecond } from './format'
+  import { fmtBytes, fmtSecond } from './recording-data'
   import { EMPTY_RECORDING_FILTER, RecordingConsumersModel, RecordingListModel, type RecordingFilter } from './recordings.svelte'
 
   const consumerId = $derived(route.params.consumer ?? '')

@@ -19,7 +19,7 @@
   import { session } from '../../lib/auth.svelte'
   import type { RecordingSide } from '../../lib/api/types'
   import { RECORDING_LANGUAGES } from '../../lib/api/recordings'
-  import { fmtBytes, fmtSecond } from './format'
+  import { fmtBytes, fmtSecond } from './recording-data'
   import RecordingBlock from './RecordingBlock.svelte'
   import RecordingBytes from './RecordingBytes.svelte'
   import { RecordingDetailModel } from './recordings.svelte'

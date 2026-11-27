@@ -13,7 +13,7 @@
   import { untrack } from 'svelte'
   import { session } from '../../lib/auth.svelte'
   import Table from '../../lib/ui/Table.svelte'
-  import { fmtSecond } from './format'
+  import { fmtSecond } from './recording-data'
   import { RecordingConsumersModel } from './recordings.svelte'
 
   const model = new RecordingConsumersModel()

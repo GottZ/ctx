@@ -661,6 +661,7 @@ describe('nothing of a recording or a translation is stored in the browser', () 
   const FILES = [
     'recordings.svelte.ts',
     'recording-data.ts',
+    'recording-link.ts',
     'RecordingsPage.svelte',
     'RecordingListPage.svelte',
     'RecordingDetailPage.svelte',

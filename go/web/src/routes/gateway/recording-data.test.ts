@@ -15,9 +15,9 @@ import {
   localInputToRfc3339,
   pickDefaultLanguage,
   recordingError,
-  showRecordingsLink,
+  fmtBytes,
 } from './recording-data'
-import { fmtBytes } from './format'
+import { showRecordingsLink } from './recording-link'
 
 function caps(admin: boolean, role = 'owner') {
   const w: WhoamiResponse = {

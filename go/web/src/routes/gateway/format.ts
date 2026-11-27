@@ -56,40 +56,6 @@ export function fmtMinute(ts: string): string {
     : d.toLocaleString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
-const BYTE_UNITS = ['KiB', 'MiB', 'GiB', 'TiB'] as const
-
-/**
- * A byte count in binary units (recordings, #575): below 1 KiB exact
- * ("512 B"), above one decimal ("1.5 KiB"). null or an impossible value is a
- * dash — never a made-up 0.
- */
-export function fmtBytes(n: number | null): string {
-  if (n === null || !Number.isFinite(n) || n < 0) return '—'
-  if (n < 1024) return `${Math.trunc(n)} B`
-  let v = n / 1024
-  let unit = 0
-  while (v >= 1024 && unit < BYTE_UNITS.length - 1) {
-    v /= 1024
-    unit++
-  }
-  return `${v.toFixed(1)} ${BYTE_UNITS[unit]}`
-}
-
-/** A server timestamp to the second in the viewer's locale; '—' when unparseable (recordings, #575). */
-export function fmtSecond(ts: string | null): string {
-  const d = ts === null ? null : parsed(ts)
-  return d === null
-    ? '—'
-    : d.toLocaleString(undefined, {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      })
-}
-
 /**
  * Toast line after a revoke / deactivate, from the server's
  * `cancelled_inflight` (design/05 §4.6, V-01-e, B-25): a number is what the

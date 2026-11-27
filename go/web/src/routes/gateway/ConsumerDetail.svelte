@@ -17,7 +17,7 @@
   import { ConsumerDetailModel } from './consumer.svelte'
   import { auditEntries, keyChain } from './chain'
   import { callRows } from './calls'
-  import { showRecordingsLink } from './recording-data'
+  import { showRecordingsLink } from './recording-link'
   import { STATUS_LABEL, consumerTone, fmtDay, fmtMinute, keyTone, recordingText } from './format'
   import LimitsCard from './LimitsCard.svelte'
   import UsagePanel from './UsagePanel.svelte'

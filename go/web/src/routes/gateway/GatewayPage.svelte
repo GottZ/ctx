@@ -42,7 +42,7 @@
   import { STATUS_LABEL, cancelledText } from './format'
   import { canRotate } from './rotate'
   import { canEditPolicy, canReactivate, deactivateTyped, hintTail } from './rows'
-  import { showRecordingsLink } from './recording-data'
+  import { showRecordingsLink } from './recording-link'
 
   const model = new ConsumersModel()
 

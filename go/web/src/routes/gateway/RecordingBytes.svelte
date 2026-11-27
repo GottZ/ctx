@@ -6,7 +6,7 @@
   // lossless either way, and labelled which one it is. Text interpolation
   // only: nothing here is parsed as Markdown or HTML.
   import { tick } from 'svelte'
-  import { fmtBytes } from './format'
+  import { fmtBytes } from './recording-data'
   import type { WindowReader } from './recordings.svelte'
 
   let {
