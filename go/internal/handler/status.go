@@ -312,12 +312,17 @@ type llmlogWriteStatus struct {
 	// names it in metadata.gw.record_lost) — monotone since start, like the
 	// two above.
 	RecordedBodiesLost int64 `json:"recorded_bodies_lost"`
+	// RecordedHeldBytes is what the texts of recorded rows hold of their
+	// account now (llmlog.RecordedHeld, bounded at 128 MiB): captured by
+	// running requests, queued or being inserted — near the bound, the next
+	// large texts are left out.
+	RecordedHeldBytes int64 `json:"recorded_held_bytes"`
 }
 
 // readLLMLogWriteStatus is the production llmlogStats source.
 func readLLMLogWriteStatus() llmlogWriteStatus {
 	return llmlogWriteStatus{InsertFailures: llmlog.InsertFailures(), InsertDropped: llmlog.InsertDropped(),
-		RecordedBodiesLost: llmlog.RecordedBodiesLost()}
+		RecordedBodiesLost: llmlog.RecordedBodiesLost(), RecordedHeldBytes: llmlog.RecordedHeld()}
 }
 
 // advisoryRow is one named reason on the admin status surface (A02-W4):
