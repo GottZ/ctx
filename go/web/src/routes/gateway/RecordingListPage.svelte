@@ -259,7 +259,13 @@
   code {
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
+  }
+  .sub code {
     overflow-wrap: anywhere;
+  }
+  /* a status code stays on one line; the table scrolls sideways instead */
+  td code {
+    white-space: nowrap;
   }
   .chip,
   .tag {
