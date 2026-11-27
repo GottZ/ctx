@@ -271,6 +271,8 @@ var gatewayCodeClasses = map[string]ErrClass{
 	"proxy_misconfigured": ClassGateway,
 	"auth_overloaded":     ClassGateway,
 	"auth_unavailable":    ClassGateway,
+	// a recording consumer's request whose recording failed (issue #571)
+	"recording_unavailable": ClassGateway,
 	// 500 — the one STOP code: the upstream ran the request
 	"upstream_error": ClassServerFault,
 	// 401, 403

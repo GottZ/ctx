@@ -63,10 +63,7 @@
     <a class="label-text" data-testid="consumer-label" href="/gateway/consumers/{c.id}">{c.label}</a>
     {#if c.description}<span class="desc">{c.description}</span>{/if}
   </td>
-  <td>
-    <span class="badge" class:peer={c.kind === 'ctx-peer'}>{c.kind}</span>
-    {#if c.record_bodies}<span class="badge rec" data-consumer-recording title={recordingText(true)}>recording</span>{/if}
-  </td>
+  <td><span class="badge" class:peer={c.kind === 'ctx-peer'}>{c.kind}</span>{#if c.record_bodies}<span class="badge rec" data-consumer-recording title={recordingText}>recording</span>{/if}</td>
   <td>
     <span class="badge {consumerTone(c.status)}" data-consumer-status>{STATUS_LABEL[c.status] ?? c.status}</span>
   </td>

@@ -694,8 +694,6 @@ export interface LLMLogDetail {
   request_system: string | null
   request_user: string | null
   response_content: string | null
-  /** The row of a recording consumer (metadata.gw.recorded, issue #571): its bodies are whole and can hold credentials in clear text. */
-  recorded: boolean
 }
 
 // Source: go/internal/handler/llmlog.go (HandleLLMLogDetail happy path). An
@@ -1526,7 +1524,7 @@ export interface ConsumerView {
   /** null = any source address. */
   allowed_cidrs: string[] | null
   allow_plaintext: boolean
-  /** Recording (migration 197): every gateway row of the consumer keeps its request and answer in full in the LLM log — set by a server-admin, readable by server-admins only. */
+  /** Recording (migration 197): every request of the consumer is held in full in context_llm_recordings before it is served — set by a server-admin, readable in the database only. */
   record_bodies: boolean
   active: boolean
   status: ConsumerStatus
@@ -2094,6 +2092,25 @@ export interface GatewayEnvelopeUse {
  * tenant tile reads the coarse depth class from `dispatch_tenant.targets`
  * (never a number, V-03-b).
  */
+/** One recording consumer's requests in this process: admitted = in_flight + recorded + unrecordable. */
+export interface GatewayRecordingConsumer {
+  consumer_id: string
+  admitted: number
+  in_flight: number
+  recorded: number
+  unrecordable: number
+  unfinished: number
+  stream_answers_unrecorded: number
+}
+
+/** gateway.recording of GET /api/status (server-admin). */
+export interface GatewayRecording {
+  process_id: string
+  since: string
+  held_bytes: number
+  consumers: GatewayRecordingConsumer[]
+}
+
 export interface GatewayStatus {
   enabled: boolean
   consumers: number
@@ -2110,6 +2127,8 @@ export interface GatewayStatus {
   consumers_expiring: number
   /** Ids of the active consumers with record_bodies on, sorted (the tenant's own on the tenant path); [] when none. */
   recording_consumers: string[]
+  /** Server-admin only: this process's count of the recording consumers' requests (docs/operations.md "Recording a consumer"). */
+  recording?: GatewayRecording
   /** Server-admin only; not assigned by stampGateway yet (S3) — absent today. */
   instance_envelope?: Record<string, GatewayEnvelopeUse>
   /**

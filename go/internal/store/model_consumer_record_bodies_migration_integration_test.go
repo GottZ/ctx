@@ -10,6 +10,7 @@
 //     consumer's value, the sentinel with false;
 //   - the audit: switching writes one 'update' row whose old/new state carry
 //     record_bodies; an UPDATE that leaves it as it is writes none;
+//   - context_llm_recordings: its columns, constraints and indexes;
 //   - the way back of the header, in a rolled-back transaction, leaves the
 //     catalog of 196; a second run of 197 leaves its own catalog unchanged.
 package store_test
@@ -31,7 +32,8 @@ const (
 )
 
 // m197Catalog is what 197 touches: the two functions, the consumer
-// triggers, the consumer columns and the version row.
+// triggers, the consumer columns, the recordings table (columns,
+// constraints, indexes) and the version row.
 func m197Catalog(ctx context.Context, t *testing.T, q func(context.Context, string) ([]string, error)) string {
 	t.Helper()
 	var parts []string
@@ -43,6 +45,13 @@ func m197Catalog(ctx context.Context, t *testing.T, q func(context.Context, stri
 		`SELECT 'column: ' || column_name || ' ' || data_type || ' ' || is_nullable || ' ' || COALESCE(column_default, '')
 		   FROM information_schema.columns
 		  WHERE table_schema = current_schema() AND table_name = 'context_model_consumers' ORDER BY ordinal_position`,
+		`SELECT 'recordings column: ' || column_name || ' ' || data_type || ' ' || is_nullable || ' ' || COALESCE(column_default, '')
+		   FROM information_schema.columns
+		  WHERE table_schema = current_schema() AND table_name = 'context_llm_recordings' ORDER BY ordinal_position`,
+		`SELECT 'recordings constraint: ' || pg_get_constraintdef(oid) FROM pg_constraint
+		  WHERE conrelid = to_regclass('context_llm_recordings') ORDER BY 1`,
+		`SELECT 'recordings index: ' || indexdef FROM pg_indexes
+		  WHERE schemaname = current_schema() AND tablename = 'context_llm_recordings' ORDER BY indexname`,
 		`SELECT 'migration: ' || version FROM _migrations WHERE version = 197`,
 	} {
 		lines, err := q(ctx, sql)
@@ -74,6 +83,7 @@ func m197WayBack(t *testing.T) string {
 	state := pick(`(?s)CREATE OR REPLACE FUNCTION audit_state_model_consumer\(.*?\$\$ LANGUAGE sql STABLE;`)
 	trig := pick(`(?s)CREATE TRIGGER trg_model_consumers_audit_upd\s.*?EXECUTE FUNCTION audit_model_consumers_write\(\);`)
 	return strings.Join([]string{
+		`DROP TABLE context_llm_recordings;`,
 		`DROP FUNCTION ctx_model_auth(TEXT, INET, BOOLEAN);`,
 		auth,
 		state,
@@ -165,6 +175,28 @@ func TestMigration197Idempotent(t *testing.T) {
 		kaExec(ctx, t, pool, `UPDATE context_model_consumers SET record_bodies = false WHERE id = $1::uuid`, before)
 		if rows() != n0+2 {
 			t.Errorf("switching off wrote %d update row(s), want 1", rows()-n0-1)
+		}
+	})
+	t.Run("recordings_table", func(t *testing.T) {
+		cat := m197Catalog(ctx, t, onPool)
+		for _, want := range []string{"recordings column: request_body bytea YES", "recordings column: response_body bytea YES",
+			"recordings column: process_id uuid NO", "recordings column: state text NO",
+			"recordings index: CREATE UNIQUE INDEX context_llm_recordings_pkey", "(consumer_id, created_at DESC)",
+			"(created_at) WHERE (request_body IS NOT NULL)"} {
+			if !strings.Contains(cat, want) {
+				t.Errorf("the recordings table lacks %q:\n%s", want, cat)
+			}
+		}
+		// An open row has no finished_at, a done one has one; a state outside
+		// the two is refused.
+		for _, sql := range []string{
+			`INSERT INTO context_llm_recordings (id, process_id, consumer_id, path, state) VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), '/v1', 'done')`,
+			`INSERT INTO context_llm_recordings (id, process_id, consumer_id, path, state, finished_at) VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), '/v1', 'open', now())`,
+			`INSERT INTO context_llm_recordings (id, process_id, consumer_id, path, state) VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), '/v1', 'lost')`,
+		} {
+			if _, err := pool.Exec(ctx, sql); mcSQLState(err) != "23514" {
+				t.Errorf("%s: %v (SQLSTATE %s), want the check's 23514", sql, err, mcSQLState(err))
+			}
 		}
 	})
 	t.Run("way_back_is_clean", func(t *testing.T) {

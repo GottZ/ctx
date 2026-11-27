@@ -22,12 +22,9 @@ export function consumerTone(status: string): 'ok' | 'warn' | 'off' {
   return 'off'
 }
 
-/** What the consumer view says about recording (record_bodies, issue #571) — the server's flag, shown to every reader. */
-export function recordingText(on: boolean): string {
-  return on
-    ? 'on — every request and answer of this consumer is kept in full in the LLM log, credentials in a prompt included; server-admins read it'
-    : 'off'
-}
+/** What the consumer view says while recording is on (record_bodies, issue #571) — the server's flag, shown to every reader. */
+export const recordingText =
+  'on — every request and answer of this consumer is held in full in context_llm_recordings, credentials in a prompt included; readable in the database only'
 
 /** Badge tone of a key status: active ok, expiring/superseded (grace running) warn, dead off. */
 export function keyTone(status: ModelKeyStatus | string): 'ok' | 'warn' | 'off' {

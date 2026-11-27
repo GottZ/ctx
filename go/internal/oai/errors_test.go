@@ -139,6 +139,7 @@ func TestCodesVocabulary(t *testing.T) {
 		"upstream_unavailable", "upstream_rejected", "context_length_exceeded", "upstream_error", "upstream_timeout",
 		"federation_header_invalid", "federation_loop", "federation_depth", "federation_hop_required", "peer_instance_mismatch",
 		"proxy_misconfigured", "auth_overloaded", "auth_unavailable", // the model-key door's 503s (W01-6, W02-05)
+		"recording_unavailable", // a recording consumer's request that could not be held (issue #571)
 	} {
 		if !seen[want] {
 			t.Errorf("code %q missing from oai.Codes", want)

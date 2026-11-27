@@ -95,7 +95,13 @@ func ChatCompletions(d Deps) http.Handler {
 			refuseInternal(w, r)
 			return
 		}
+		rr, ok := routeRecording(r, ca, llmlog.GatewayOpChat)
+		if !ok {
+			refuseRecording(AccessRecordFrom(r.Context()), w)
+			return
+		}
 		c := newChatCall(d, w, r, ca, entry)
+		c.adoptRecording(rr)
 		defer c.close()
 		c.serve()
 	})
@@ -155,15 +161,14 @@ type chatCall struct {
 	// has allocated against it (cover).
 	held, spent int64
 
-	// recording is the capture of a recording consumer's request (record.go;
-	// off for every other consumer).
-	recording recording
+	// recording is the request's recording (record.go): nil for a consumer
+	// that does not record.
+	recording *requestRecording
 }
 
 func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time) *chatCall {
 	s := d.Settings()
 	c := &chatCall{d: d, w: w, s: s, ca: ca, entry: entry, client: r.Context(), rec: AccessRecordFrom(r.Context())}
-	c.recording.on = ca != nil && ca.RecordBodies
 	if c.rec == nil {
 		c.rec = &AccessRecord{} // outside a model group: filled, never read
 	}
@@ -225,13 +230,27 @@ func (c *chatCall) close() {
 	for _, stop := range c.stops {
 		stop()
 	}
-	c.recording.release() // what no row of this request took
+}
+
+// adoptRecording binds the request's recording (nil: the consumer does not
+// record): the request's id becomes the recording's, so the answer's id
+// ("chatcmpl-<id>") names the recorded row.
+func (c *chatCall) adoptRecording(rr *requestRecording) {
+	c.recording = rr
+	if rr != nil {
+		c.id = rr.req.ID
+	}
 }
 
 // refuse answers code and names it as the access record's reason.
 func (c *chatCall) refuse(code, message string, shouldRetry bool) {
 	c.rec.Reason = code
 	c.reply(func(w http.ResponseWriter) { WriteCode(w, code, message, shouldRetry) })
+}
+
+// refuseRecording answers a request whose recording failed (record.go).
+func (c *chatCall) refuseRecording() {
+	c.reply(func(w http.ResponseWriter) { refuseRecording(c.rec, w) })
 }
 
 func (c *chatCall) internal(msg string, args ...any) {
@@ -287,6 +306,7 @@ func (c *chatCall) serve() {
 		c.refuseParam(perr)
 		return
 	}
+	c.recording.parsed(req.model, req.stream)
 	c.frame(req.stream)
 	if !c.resolve(req.model, req.modelOverlong) {
 		return
@@ -389,7 +409,8 @@ func reasoningOff(a modelalias.Alias) bool {
 // The ledger starts here: the stage reserved requestReserveFactor × the
 // body, the read spent what readRequestBody allocated.
 func (c *chatCall) readBody() ([]byte, bool) {
-	body, spent, err := readRequestBody(c.r.Body, c.r.ContentLength)
+	body, spent, err := readBodyKeep(c.r.Body, c.r.ContentLength, c.recording != nil)
+	c.recording.setBody(body, err == nil)
 	var tooLarge *http.MaxBytesError
 	switch {
 	case err == nil:
@@ -420,6 +441,14 @@ func (c *chatCall) readBody() ([]byte, bool) {
 // there and spends about twice the body), an undeclared one in chunks that
 // double up to readChunkMax and are joined into one buffer at the end.
 func readRequestBody(r io.Reader, declared int64) ([]byte, int64, error) {
+	return readBodyKeep(r, declared, false)
+}
+
+// readBodyKeep is readRequestBody; keep (a recording consumer's request,
+// record.go) returns what an undeclared body's failed read got as well —
+// its chunks joined — where readRequestBody returns nothing. A declared
+// body's failed read returns its part either way.
+func readBodyKeep(r io.Reader, declared int64, keep bool) ([]byte, int64, error) {
 	if declared > 0 {
 		buf := make([]byte, declared)
 		n, err := io.ReadFull(r, buf)
@@ -455,6 +484,9 @@ func readRequestBody(r io.Reader, declared int64) ([]byte, int64, error) {
 			break
 		}
 		if err != nil {
+			if keep {
+				return slices.Concat(chunks...), spent + int64(total), err
+			}
 			return nil, spent, err
 		}
 		size = min(2*size, readChunkMax)
@@ -763,7 +795,7 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 	// The row the shutdown's forced settle writes should the request still
 	// be open after the HTTP drain (W06-13 (e)).
 	registerForcedRow(res, c.d.Record, func() llmlog.GatewayRow {
-		return llmlog.GatewayRow{Pipeline: chatPipeline, ConsumerID: c.ca.ConsumerID, Recorded: c.recording.on,
+		return llmlog.GatewayRow{Pipeline: chatPipeline, ConsumerID: c.ca.ConsumerID, Recorded: c.recording != nil, RecordingID: c.recording.id(),
 			Gateway: withFederation(c.r.Context(), llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID, Stream: c.sse != nil})}
 	}, string(c.required))
 	return true
@@ -850,6 +882,13 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 		return
 	}
 	c.rec.Class = planClass(plan) // the class of an L2 refusal (W06-12); a lease names it again
+	// A recording consumer's request is held before its first attempt and
+	// before any queue wait (record.go); one that cannot be is not served.
+	if !c.recording.open(c.ctx) {
+		c.endLimit(func(l LimitReservation) { l.Abort() })
+		c.refuseRecording()
+		return
+	}
 	c.target = newWatchTarget(c.ca, c.req.model, c.alias.ID, c.gen)
 	stop := c.d.watch(c.ctx, c.cancel, c.target)
 	defer stop()
@@ -858,6 +897,9 @@ func (c *chatCall) walk(chain []backends.Backend, spec llm.UpstreamSpec) {
 	rules := llm.WalkRules{WindowRule: true, AllowedClasses: c.d.Planner.AllowedClasses(), Timeout: c.attemptTimeout}
 	served, attempts, werr := llm.WalkChain(c.ctx, plan.Chain, c.alias.Role, plan.Acquirer, llm.PoolReporter(c.d.Pool), rules,
 		func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, timeout time.Duration) (dispatch.Usage, bool, error) {
+			if !c.recording.ready() {
+				return dispatch.Usage{}, false, &llm.AdmissionError{Err: errRecordingUnavailable, Backend: b.Name, Host: b.Host}
+			}
 			if c.sse != nil {
 				return c.streamAttempt(&st, spec, plan.Lane, runCtx, b, lease, timeout)
 			}
@@ -1134,6 +1176,12 @@ func (c *chatCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, st
 // empty walk, and the route's own attempt mapping — as a status, or as the
 // error frame of a committed stream (reply).
 func (c *chatCall) outcomeError(plan Plan, attempts []llm.ChainAttempt, err error, st *walkState) chatOutcome {
+	if errors.Is(err, errRecordingUnavailable) {
+		// An attempt found the request's recording not open (ready): it went
+		// to no backend (record.go).
+		c.refuseRecording()
+		return chatOutcome{finish: llmlog.FinishAborted, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeRecordingUnavailable}}
+	}
 	if errors.Is(err, ErrBudgetExhausted) {
 		// The budget refused an attempt's upstream body (reserveUpstream):
 		// the stage's 503. Without a wire call no row, and the meter's
@@ -1211,6 +1259,11 @@ func (c *chatCall) verdict() (ended bool, code string) {
 		// it still reads — the stream ends with its error frame.
 		c.refuse(CodeServerOverloaded, relayOverflowMessage, true)
 		return true, CodeServerOverloaded
+	case errors.Is(cause, errRecordingUnavailable):
+		// A recording consumer's stream had no room to keep its next line
+		// (record.go): it ends before that line, with its error frame.
+		c.refuseRecording()
+		return true, CodeRecordingUnavailable
 	case errors.Is(cause, errClientGone):
 		// A write to the client failed (it stopped reading): nothing more
 		// can reach it (D4).
@@ -1258,6 +1311,13 @@ func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
 	c.rec.Usage = st.usageKind
 	// The meter's view of the request's op bucket, on the successful answer
 	// only (design/06 §4.4; lead decision M2 (c)).
+	answer := append(body, '\n')
+	// A recording consumer's answer is held before its first byte goes out
+	// (record.go); one that cannot be is refused instead.
+	if !c.recording.answer(c.ctx, answer) {
+		c.refuseRecording()
+		return chatOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeRecordingUnavailable}}
+	}
 	for k, v := range c.rateHeaders() {
 		c.w.Header()[k] = v
 	}
@@ -1270,7 +1330,7 @@ func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
 	// escape class, TestRewriteChatIsTheBase, FuzzRewriteChatIsTheBase) —,
 	// served as application/json. The buffer has room for the newline: the
 	// append does not copy the answer.
-	if _, err := c.w.Write(append(body, '\n')); err != nil { //nolint:gosec // G705: the body carries json.Marshal's HTML escape, written by the rewrite walk gosec's taint check does not know as a sanitizer (pinned byte-equal, see above)
+	if _, err := c.w.Write(answer); err != nil { //nolint:gosec // G705: the body carries json.Marshal's HTML escape, written by the rewrite walk gosec's taint check does not know as a sanitizer (pinned byte-equal, see above)
 		slog.Warn("gateway: failed to write the answer", "error", err, "request_id", c.w.Header().Get("X-Request-ID"))
 	}
 	return chatOutcome{finish: finishOf(st.result.FinishReason), response: body}
@@ -1325,18 +1385,7 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 		}
 	}
 	request, response := "", ""
-	switch {
-	case c.recording.on:
-		// A recording consumer's row (issue #571): the whole text of the
-		// array and the whole answer — a stream's relayed lines — reserved
-		// against the recording account, not booked in the ledger (record.go).
-		request = c.recording.text(c.req.messages, llmlog.RecordLostRequest)
-		if c.sse != nil {
-			response = c.recording.streamText()
-		} else if len(out.response) > 0 {
-			response = c.recording.bytes(out.response, llmlog.RecordLostResponse)
-		}
-	case c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil):
+	if c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil) {
 		// The row's text of the array is sized, then booked, then written
 		// (hardening 6): under an exhausted budget the row goes without it.
 		if n := bodyLogSize(c.req.messages); c.cover(int64(n)) {
@@ -1372,18 +1421,17 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 // stores the same. Pinned by TestBodyLogTextStoresWhatTheArrayStored.
 const bodyLogTextMax = 64<<10 + utf8.UTFMax
 
-// bodyLogWalkN yields the text of the message array raw for the log row as
+// bodyLogWalk yields the text of the message array raw for the log row as
 // the row stores it before its cut — valid UTF-8 with each run of invalid
 // bytes one U+FFFD and no NUL (llmlog's storable) — piece by piece to put,
-// up to limit bytes: bodyLogTextMax for the body policy (hardening 6, the
-// class gate: string(raw) copied the whole array outside the reservation,
-// and the row's cleaning grew a text of invalid bytes between ASCII ones to
-// 8 × its size before cutting it), noLogLimit for a recorded row's whole
-// text (record.go).
-func bodyLogWalkN(raw []byte, limit int, put func(p []byte)) {
+// up to bodyLogTextMax bytes (hardening 6, the class gate: string(raw)
+// copied the whole array outside the reservation, and the row's cleaning
+// grew a text of invalid bytes between ASCII ones to 8 × its size before
+// cutting it).
+func bodyLogWalk(raw []byte, put func(p []byte)) {
 	n := 0
 	invalid := false // the byte before was part of an invalid sequence
-	for i := 0; i < len(raw) && n < limit; {
+	for i := 0; i < len(raw) && n < bodyLogTextMax; {
 		c := raw[i]
 		size := 1
 		switch {
@@ -1414,24 +1462,18 @@ func bodyLogWalkN(raw []byte, limit int, put func(p []byte)) {
 var replacementChar = []byte(string(utf8.RuneError))
 
 // bodyLogSize is the length of bodyLogText(raw).
-func bodyLogSize(raw []byte) int { return bodyLogSizeN(raw, bodyLogTextMax) }
-
-// bodyLogSizeN is the length of bodyLogTextN(raw, …, limit).
-func bodyLogSizeN(raw []byte, limit int) int {
+func bodyLogSize(raw []byte) int {
 	n := 0
-	bodyLogWalkN(raw, limit, func(p []byte) { n += len(p) })
+	bodyLogWalk(raw, func(p []byte) { n += len(p) })
 	return n
 }
 
 // bodyLogText is the log row's text of raw, written once into size bytes
 // (bodyLogSize).
-func bodyLogText(raw []byte, size int) string { return bodyLogTextN(raw, size, bodyLogTextMax) }
-
-// bodyLogTextN is bodyLogText up to limit bytes (bodyLogSizeN).
-func bodyLogTextN(raw []byte, size, limit int) string {
+func bodyLogText(raw []byte, size int) string {
 	var b strings.Builder
 	b.Grow(size)
-	bodyLogWalkN(raw, limit, func(p []byte) { b.Write(p) })
+	bodyLogWalk(raw, func(p []byte) { b.Write(p) })
 	return b.String()
 }
 

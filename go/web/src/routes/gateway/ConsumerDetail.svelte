@@ -90,10 +90,10 @@
         <dd>{c.admission_lane}</dd>
         <dt>network</dt>
         <dd>{c.allowed_cidrs === null ? 'any source' : c.allowed_cidrs.join(', ')}</dd>
-        <dt>recording</dt>
-        <dd data-consumer-recording={c.record_bodies ? 'on' : 'off'} class:recording={c.record_bodies}>
-          {recordingText(c.record_bodies)}
-        </dd>
+        {#if c.record_bodies}
+          <dt>recording</dt>
+          <dd data-consumer-recording>{recordingText}</dd>
+        {/if}
         <dt>last used</dt>
         <dd>{c.last_used_at === null ? 'never' : fmtMinute(c.last_used_at)}</dd>
       </dl>

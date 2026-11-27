@@ -129,7 +129,7 @@ func TestLLMLogDetailGoldenKeys(t *testing.T) {
 	assertKeys(t, "detail", top["detail"], []string{
 		"id", "created_at", "pipeline", "model", "backend",
 		"required_sensitivity", "body_state",
-		"request_system", "request_user", "response_content", "recorded",
+		"request_system", "request_user", "response_content",
 	})
 }
 

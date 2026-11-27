@@ -47,8 +47,8 @@ func TestModelConsumerRecordSwitch(t *testing.T) {
 	const adminRequired = "admin key required"
 	// The wire text of the refusal (recordConfirmRefusal), spelled out so the
 	// file compiles against the base.
-	const confirm = "record_bodies:true stores every request and answer of this consumer in full in the LLM log — " +
-		"credentials in a prompt included, in clear text, readable by server-admins — requires confirm_record_bodies:true"
+	const confirm = "record_bodies:true holds every request and answer of this consumer in full in context_llm_recordings — " +
+		"credentials in a prompt included, in clear text, readable in the database — requires confirm_record_bodies:true"
 	recordOf := func(resp map[string]any) any {
 		c, _ := resp["consumer"].(map[string]any)
 		return c["record_bodies"]

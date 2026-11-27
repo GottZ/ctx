@@ -1,20 +1,25 @@
 -- =============================================================================
 -- 197_model_consumer_record_bodies.sql — the recording switch of a model
 -- consumer: record_bodies, off by default, set by a server-admin only; its
--- audit, and ctx_model_auth carrying it to the /v1 door (issue #571)
+-- audit; ctx_model_auth carrying it to the /v1 door; and
+-- context_llm_recordings, where a recording consumer's requests are held
+-- before they are served (issue #571)
 -- Part of ctx by GottZ (https://github.com/GottZ/ctx)
 -- =============================================================================
--- What. A consumer with record_bodies = true has every gateway row of its own
--- (chat, a stream included, embeddings, rerank, rows with an error) written to
--- context_llm_log with the request and the answer in full — whatever
--- gateway.body_logging, the alias, the consumer's prompt_sensitivity, the
--- body scan or Ctx-Sensitivity say, without the 64 KiB cut of the body
--- policy, and marked metadata.gw.recorded = true. Such a row can carry
--- credentials in clear text: its bodies are read by a server-admin only, every
--- other reader gets it as a sealed row (internal/llmlog/recorded.go). The
--- switch changes nothing on the request path (required sensitivity, chain,
--- scan, limits, answer) and nothing for any other consumer. Who may set it is
--- the handler's rule (model-consumer-create/-update: switching on is
+-- What. Every request a consumer with record_bodies = true sends through the
+-- gateway — chat (a stream included), embeddings, rerank, and every request
+-- the gateway refuses after the door accepted the key — gets one row in
+-- context_llm_recordings (4): the request body as the gateway read it, byte
+-- for byte, committed BEFORE the first backend attempt; a request that
+-- cannot be held is not served (503 recording_unavailable). A non-streamed
+-- answer is committed before it is written to the client; a stream's relayed
+-- lines when it ends. Whatever gateway.body_logging, the alias, the
+-- consumer's prompt_sensitivity, the body scan or Ctx-Sensitivity say: no
+-- cut, no seal — a row can carry credentials in clear text, and no ctx
+-- surface reads its bodies (internal/llmlog/recordings.go). The gateway's
+-- context_llm_log row of such a request is the row every consumer gets, with
+-- metadata.gw.recorded and recording_id. Who may set the switch is the
+-- handler's rule (model-consumer-create/-update: switching on is
 -- server-admin only, also with self-service, and needs
 -- confirm_record_bodies; switching off is open to a tenant-admin); the column
 -- is the state.
@@ -40,6 +45,25 @@
 --     positive answer (165: design/01 E-01-9), so a switch applies from the
 --     next request on; a request already running keeps the value it was
 --     admitted with — a narrowed policy fires nothing (165).
+-- (4) context_llm_recordings: one row per request of a recording consumer,
+--     keyed by the request's own id (the uuid v7 the answer's id carries,
+--     "chatcmpl-<id>"). state 'open' from the insert before the first
+--     backend attempt until the request ended; 'done' with the status the
+--     client got, the gateway's code and the answer. A row that stays 'open'
+--     is unfinished: the process ended (or the database failed) between
+--     holding the request and recording its outcome — its request is there,
+--     its outcome is not known; a stream row that stays 'open' may have
+--     sent the client lines that are not recorded. process_id names the
+--     ctxd process that admitted the request: GET /api/status counts the
+--     same process's admissions, rows and the requests it could not hold
+--     (docs/operations.md "Recording a consumer"). A plain table, not a
+--     hypertable: the outcome is an UPDATE of the row by its primary key
+--     seconds after its insert, no insert trigger counts it (the usage
+--     rollup is context_llm_log's), and nothing compresses it. No foreign
+--     key to the consumer: a deleted consumer's recordings stay. The
+--     retention janitor (llmlog.EvictBodies) NULLs the two bodies after
+--     the LLM log's retention, as it does context_llm_log's; request_bytes
+--     and response_bytes keep their sizes.
 --
 -- Cost and locks. ADD COLUMN with a constant default is a catalog change:
 -- ACCESS EXCLUSIVE on context_model_consumers until the commit — milliseconds;
@@ -48,14 +72,24 @@
 -- TRIGGER takes SHARE ROW EXCLUSIVE on the same table, inside the same
 -- window. DROP/CREATE FUNCTION locks no table; a session that calls
 -- ctx_model_auth meanwhile uses the old definition until the commit.
--- lock_timeout 3s fails the boot instead of queueing behind a long
--- transaction; the next start retries. The table holds at most
--- max_model_consumers (64 by default) rows per tenant.
+-- CREATE TABLE and its indexes lock nothing that exists. lock_timeout 3s
+-- fails the boot instead of queueing behind a long transaction; the next
+-- start retries. The consumer table holds at most max_model_consumers (64 by
+-- default) rows per tenant. A recording consumer at 30 requests a second
+-- adds 2.6 M recording rows a day: three index entries per insert (the
+-- primary key, the consumer's time line, the janitor's partial index), one
+-- update of the same row by its primary key that changes no indexed column
+-- and no index predicate (it can stay on its page, HOT), and the janitor's
+-- UPDATE over the rows that left the retention since its last run — its
+-- partial index holds only rows that still carry a body.
 --
 -- Idempotent: ADD COLUMN IF NOT EXISTS, CREATE OR REPLACE FUNCTION, DROP
--- TRIGGER IF EXISTS + CREATE, DROP FUNCTION IF EXISTS + CREATE.
+-- TRIGGER IF EXISTS + CREATE, DROP FUNCTION IF EXISTS + CREATE, CREATE TABLE
+-- / INDEX IF NOT EXISTS.
 --
--- Way back, in this order, one statement each: DROP FUNCTION ctx_model_auth(
+-- Way back, in this order, one statement each: DROP TABLE
+-- context_llm_recordings (its rows go with it — export them first); DROP
+-- FUNCTION ctx_model_auth(
 -- TEXT, INET, BOOLEAN); the CREATE FUNCTION ctx_model_auth of 161 section 8;
 -- the CREATE OR REPLACE FUNCTION audit_state_model_consumer of 161 section 7;
 -- DROP TRIGGER trg_model_consumers_audit_upd ON context_model_consumers and
@@ -192,3 +226,34 @@ BEGIN
                         'bulk'::text, NULL::uuid, false;
 END;
 $$;
+
+-- 4. The recordings (header (4)).
+CREATE TABLE IF NOT EXISTS context_llm_recordings (
+    id                UUID PRIMARY KEY,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at       TIMESTAMPTZ,
+    process_id        UUID NOT NULL,
+    consumer_id       UUID NOT NULL,
+    model_key_id      UUID,
+    path              TEXT NOT NULL,
+    op                TEXT,
+    client_request_id TEXT,
+    model             TEXT,
+    stream            BOOLEAN,
+    declared_bytes    BIGINT,
+    request_bytes     BIGINT NOT NULL DEFAULT 0,
+    request_complete  BOOLEAN NOT NULL DEFAULT false,
+    request_body      BYTEA,
+    state             TEXT NOT NULL CHECK (state IN ('open', 'done')),
+    status            SMALLINT,
+    code              TEXT,
+    response_bytes    BIGINT NOT NULL DEFAULT 0,
+    response_body     BYTEA,
+    CHECK ((state = 'open') = (finished_at IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_recordings_consumer
+    ON context_llm_recordings (consumer_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_llm_recordings_bodies
+    ON context_llm_recordings (created_at)
+    WHERE request_body IS NOT NULL;

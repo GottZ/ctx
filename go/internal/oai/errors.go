@@ -74,6 +74,9 @@ const (
 	CodeProxyMisconfigured = "proxy_misconfigured"
 	CodeAuthOverloaded     = "auth_overloaded"
 	CodeAuthUnavailable    = "auth_unavailable"
+	// The 503 of a recording consumer's request whose recording could not
+	// be committed (record.go, issue #571).
+	CodeRecordingUnavailable = "recording_unavailable"
 )
 
 // CodeSpec binds a code to the one status and type it is sent with.
@@ -130,6 +133,7 @@ var codes = []CodeSpec{
 	{CodeProxyMisconfigured, http.StatusServiceUnavailable, TypeServiceUnavailable},
 	{CodeAuthOverloaded, http.StatusServiceUnavailable, TypeServiceUnavailable},
 	{CodeAuthUnavailable, http.StatusServiceUnavailable, TypeServiceUnavailable},
+	{CodeRecordingUnavailable, http.StatusServiceUnavailable, TypeServiceUnavailable},
 }
 
 // Codes returns the vocabulary as a copy (Fremd-Review 2, FR2-7): the table

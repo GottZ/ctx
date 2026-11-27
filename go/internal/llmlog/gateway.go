@@ -172,12 +172,11 @@ type Gateway struct {
 	// forensics ("which requests ran over the leaked key?") through the
 	// consumer index plus this field (§8 d01 (3)); never a column.
 	ModelKeyID string
-	// Recorded, RecordLost and RecordLostCause are metadata.gw.recorded,
-	// record_lost and record_lost_cause (recorded.go). GatewayEntry sets
-	// them from the GatewayRow; a writer never sets them itself.
-	Recorded        bool
-	RecordLost      []string
-	RecordLostCause string
+	// Recorded and RecordingID are metadata.gw.recorded and recording_id
+	// (recordings.go): GatewayEntry sets them from the GatewayRow; a writer
+	// never sets them itself.
+	Recorded    bool
+	RecordingID string
 }
 
 // gatewayWire is metadata.gw as stored: the keys the rollup trigger reads
@@ -198,9 +197,8 @@ type gatewayWire struct {
 	PeerInstance string   `json:"peer_instance,omitempty"`
 	// The recording marker (issue #571): absent on every row of a consumer
 	// without the switch, so those rows stay byte-identical.
-	Recorded        bool     `json:"recorded,omitempty"`
-	RecordLost      []string `json:"record_lost,omitempty"`
-	RecordLostCause string   `json:"record_lost_cause,omitempty"`
+	Recorded    bool   `json:"recorded,omitempty"`
+	RecordingID string `json:"recording_id,omitempty"`
 }
 
 // StampGateway records WHO made a /v1 request and how it ran: the
@@ -270,8 +268,8 @@ func (g Gateway) wire() gatewayWire {
 	}
 	if g.Recorded {
 		w.Recorded = true
-		if w.RecordLost = cleanRecordLost(g.RecordLost); w.RecordLost != nil && recordLostCauses[g.RecordLostCause] {
-			w.RecordLostCause = g.RecordLostCause
+		if u, err := uuid.Parse(g.RecordingID); err == nil {
+			w.RecordingID = u.String()
 		}
 	}
 	return w
@@ -366,8 +364,7 @@ type GatewayRow struct {
 	Err *RedactedErr
 	// Request and Response are the serialized client input (messages or
 	// input) and the answer the client received. Stored only as the body
-	// policy says, capped at 64 KiB each — on a Recorded row always and
-	// whole.
+	// policy says, capped at 64 KiB each.
 	Request, Response string
 	// BodyLogging is gateway.body_logging of the request's settings
 	// snapshot; anything but errors or full stores no body, and neither
@@ -375,18 +372,13 @@ type GatewayRow struct {
 	// or unknown.
 	BodyLogging string
 	// Recorded is the consumer's recording switch as the door read it
-	// (auth.ConsumerAuth.RecordBodies, migration 197): the row stores
-	// Request and Response in full — no cap, no body policy, no seal — and
-	// carries metadata.gw.recorded (recorded.go). RecordLost and
-	// RecordLostCause name a body the route could not keep and why; they
-	// count only on a recorded row.
-	Recorded        bool
-	RecordLost      []string
-	RecordLostCause string
-	// RecordedHeld is what the route reserved for Request and Response
-	// (ReserveRecorded); the writer gives it back once the row is inserted
-	// or lost. 0 on every row that is not recorded.
-	RecordedHeld int64
+	// (auth.ConsumerAuth.RecordBodies, migration 197), RecordingID the
+	// request's row in context_llm_recordings (recordings.go), which holds
+	// its request and answer whole. The row here is the row of every other
+	// consumer — the body policy, the cap and the seal apply as always —
+	// plus metadata.gw.recorded and recording_id.
+	Recorded    bool
+	RecordingID string
 }
 
 // GatewayEntry builds the ONE row of a /v1 request: pipeline, StampGateway,
@@ -394,53 +386,10 @@ type GatewayRow struct {
 // Slimmed(false) — always false, never the tenant's devmode: tenant.devmode
 // is tenant-overridable, and a tenant must not open the seal of a
 // credentials-class /v1 row for itself (design/06 §4.6, design/04 R-06-1).
-// It builds the row of an unrecorded call: Recorded, RecordLost and
-// RecordedHeld of r are not its business (a recorded row is
-// RecordedGatewayEntry's).
 // A row without a consumer or with a pipeline outside the vocabulary is a
 // wiring defect: logged at ERROR (throttled per defect) and still built, so
 // the defect is visible in the log and the row is not lost.
 func GatewayEntry(r GatewayRow) Entry {
-	e := gatewayRowBase(r, false)
-	store := false
-	switch strings.ToLower(strings.TrimSpace(r.BodyLogging)) {
-	case BodyLoggingFull:
-		store = true
-	case BodyLoggingErrors:
-		store = r.Err != nil
-	}
-	if store && bodiesAllowed(e.RequiredSensitivity, e.Pipeline) {
-		e.RequestUser, e.ResponseContent = capBody(r.Request), capBody(r.Response)
-	}
-	return e.Slimmed(false)
-}
-
-// RecordedGatewayEntry builds the ONE row of a recorded request (issue #571,
-// recorded.go): GatewayEntry's row with metadata.gw.recorded (and
-// record_lost, record_lost_cause) and both bodies as the route captured them
-// — no body policy, no cap, and no seal: Slimmed would drop them at
-// credentials, and the switch is the server-admin's, not a tenant setting.
-// Their readers are server-admins only (SQLBodiesServerAdminOnly). The row
-// carries what the texts hold of the recording account (RecordedHeld); the
-// writer gives it back. RecordGateway takes this builder for a Recorded row
-// and GatewayEntry for every other.
-func RecordedGatewayEntry(r GatewayRow) Entry {
-	e := gatewayRowBase(r, true)
-	if !backends.ValidSensitivity(backends.Sensitivity(e.RequiredSensitivity)) {
-		// The bodies are kept whatever the class; the defect is still logged
-		// as bodiesAllowed logs it for every other row.
-		wiringError(&lastSensWarn, "llmlog: a gateway row without a defined required_sensitivity — recorded whole (recording consumer)",
-			"pipeline", e.Pipeline, "required_sensitivity", cleanText(e.RequiredSensitivity, gatewayTokenMax))
-	}
-	e.RequestUser, e.ResponseContent = storable(r.Request), storable(r.Response)
-	e.recordedHeld = r.RecordedHeld
-	return e
-}
-
-// gatewayRowBase is what both builders share: pipeline, StampGateway (with
-// the recording marker only for a recorded row), the redacted error, the
-// folded attempts, and no body yet.
-func gatewayRowBase(r GatewayRow, recorded bool) Entry {
 	e := r.Telemetry
 	e.Pipeline = r.Pipeline
 	g := r.Gateway
@@ -452,9 +401,9 @@ func gatewayRowBase(r GatewayRow, recorded bool) Entry {
 	if r.ConsumerID == "" {
 		wiringError(&lastConsumerWarn, "llmlog: a gateway row without a consumer — the request is unattributed", "pipeline", r.Pipeline)
 	}
-	g.Recorded, g.RecordLost, g.RecordLostCause = recorded, nil, ""
-	if recorded {
-		g.RecordLost, g.RecordLostCause = r.RecordLost, r.RecordLostCause
+	g.Recorded, g.RecordingID = r.Recorded, ""
+	if r.Recorded {
+		g.RecordingID = r.RecordingID
 	}
 	e.StampGateway(r.ConsumerID, g)
 
@@ -471,7 +420,17 @@ func gatewayRowBase(r GatewayRow, recorded bool) Entry {
 	}
 
 	e.RequestSystem, e.RequestUser, e.ResponseContent = "", "", ""
-	return e
+	store := false
+	switch strings.ToLower(strings.TrimSpace(r.BodyLogging)) {
+	case BodyLoggingFull:
+		store = true
+	case BodyLoggingErrors:
+		store = r.Err != nil
+	}
+	if store && bodiesAllowed(e.RequiredSensitivity, e.Pipeline) {
+		e.RequestUser, e.ResponseContent = capBody(r.Request), capBody(r.Response)
+	}
+	return e.Slimmed(false)
 }
 
 // The wiring-defect ERRORs of the gateway row, one throttle per defect: a
@@ -520,13 +479,6 @@ func bodiesAllowed(sensitivity, pipeline string) bool {
 // the gateway (census TestGatewayOAICensus: no llmlog.Record under
 // internal/oai). Asynchronous like Record.
 func RecordGateway(pool *pgxpool.Pool, r GatewayRow) {
-	if r.Recorded {
-		if len(cleanRecordLost(r.RecordLost)) > 0 {
-			recordedLost.Add(1)
-		}
-		Record(pool, RecordedGatewayEntry(r))
-		return
-	}
 	Record(pool, GatewayEntry(r))
 }
 

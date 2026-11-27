@@ -11,8 +11,7 @@ import (
 
 // TestStatusLLMLogSection is the status half of W06-1 gate (a): the server-
 // admin frame carries the llmlog write-path loss counters as a section that is
-// PRESENT even when they are 0 (the two recording keys of issue #571 beside
-// them) — a zero must read as "nothing lost", never as
+// PRESENT even when both are 0 — a zero must read as "nothing lost", never as
 // "not measured" — and shows exactly what the counters hold.
 func TestStatusLLMLogSection(t *testing.T) {
 	for _, tc := range []struct {
@@ -20,9 +19,9 @@ func TestStatusLLMLogSection(t *testing.T) {
 		failures, dropped int64
 		wire              string
 	}{
-		{"zero_is_present", 0, 0, `"llmlog":{"insert_failures":0,"insert_dropped":0,"recorded_bodies_lost":0,"recorded_held_bytes":0}`},
-		{"one_failure", 1, 0, `"llmlog":{"insert_failures":1,"insert_dropped":0,"recorded_bodies_lost":0,"recorded_held_bytes":0}`},
-		{"drops", 3, 9, `"llmlog":{"insert_failures":3,"insert_dropped":9,"recorded_bodies_lost":0,"recorded_held_bytes":0}`},
+		{"zero_is_present", 0, 0, `"llmlog":{"insert_failures":0,"insert_dropped":0}`},
+		{"one_failure", 1, 0, `"llmlog":{"insert_failures":1,"insert_dropped":0}`},
+		{"drops", 3, 9, `"llmlog":{"insert_failures":3,"insert_dropped":9}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &StatusCollector{llmlogStats: func() llmlogWriteStatus {
@@ -51,9 +50,7 @@ func TestStatusCollectorWiresLLMLogCounters(t *testing.T) {
 		t.Fatal("NewStatusCollector left the llmlog counter source unwired — the section would vanish in production")
 	}
 	got := c.llmlogStats()
-	if got.InsertFailures != llmlog.InsertFailures() || got.InsertDropped != llmlog.InsertDropped() ||
-		got.RecordedBodiesLost != llmlog.RecordedBodiesLost() || got.RecordedHeldBytes != llmlog.RecordedHeld() {
-		t.Errorf("collector reads %+v, llmlog holds failures=%d dropped=%d recorded lost=%d held=%d", got,
-			llmlog.InsertFailures(), llmlog.InsertDropped(), llmlog.RecordedBodiesLost(), llmlog.RecordedHeld())
+	if got.InsertFailures != llmlog.InsertFailures() || got.InsertDropped != llmlog.InsertDropped() {
+		t.Errorf("collector reads %+v, llmlog holds failures=%d dropped=%d", got, llmlog.InsertFailures(), llmlog.InsertDropped())
 	}
 }

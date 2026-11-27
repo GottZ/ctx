@@ -126,7 +126,16 @@ func Rerank(d Deps, dialect RerankDialect) http.Handler {
 			refuseInternal(w, r)
 			return
 		}
+		rr, ok := routeRecording(r, ca, llmlog.GatewayOpRerank)
+		if !ok {
+			refuseRecording(AccessRecordFrom(r.Context()), w)
+			return
+		}
 		c := newRerankCall(d, w, r, ca, entry, dialect)
+		c.recording = rr
+		if rr != nil {
+			c.id = rr.req.ID // the answer ("rerank-<id>") names the recorded row
+		}
 		defer c.close()
 		c.serve()
 	})
@@ -176,16 +185,14 @@ type rerankCall struct {
 	// scores (sigmoid, in place) — one slice of the answer reserve, made
 	// once per request.
 	logits []float64
-	// recording is the capture of a recording consumer's request (record.go;
-	// off for every other consumer): the query and documents, and the answer
-	// as written to the client.
-	recording recording
+	// recording is the request's recording (record.go): nil for a consumer
+	// that does not record.
+	recording *requestRecording
 }
 
 func newRerankCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time, dialect RerankDialect) *rerankCall {
 	s := d.Settings()
 	c := &rerankCall{d: d, w: w, s: s, ca: ca, entry: entry, client: r.Context(), rec: AccessRecordFrom(r.Context()), dialect: dialect}
-	c.recording.on = ca != nil && ca.RecordBodies
 	if c.rec == nil {
 		c.rec = &AccessRecord{} // outside a model group: filled, never read
 	}
@@ -227,7 +234,6 @@ func (c *rerankCall) close() {
 	for _, stop := range c.stops {
 		stop()
 	}
-	c.recording.release() // what no row of this request took
 }
 
 func (c *rerankCall) refuse(code, message string, shouldRetry bool) {
@@ -280,6 +286,7 @@ func (c *rerankCall) serve() {
 		c.refuseParam(perr)
 		return
 	}
+	c.recording.parsed(req.model, false)
 	if !c.resolve(req.model, req.modelOverlong) {
 		return
 	}
@@ -317,7 +324,8 @@ func (c *rerankCall) serve() {
 // readBody reads the body under the strict cap and the in-flight budget
 // (embedCall.readBody): the ledger starts here.
 func (c *rerankCall) readBody() ([]byte, bool) {
-	body, spent, err := readRequestBody(c.r.Body, c.r.ContentLength)
+	body, spent, err := readBodyKeep(c.r.Body, c.r.ContentLength, c.recording != nil)
+	c.recording.setBody(body, err == nil)
 	var tooLarge *http.MaxBytesError
 	switch {
 	case err == nil:
@@ -495,7 +503,7 @@ func (c *rerankCall) admitLimiter() bool {
 	// The row the shutdown's forced settle writes should the request still
 	// be open after the HTTP drain (W06-13 (e)).
 	registerForcedRow(res, c.d.Record, func() llmlog.GatewayRow {
-		return llmlog.GatewayRow{Pipeline: rerankPipeline, ConsumerID: c.ca.ConsumerID, Recorded: c.ca.RecordBodies,
+		return llmlog.GatewayRow{Pipeline: rerankPipeline, ConsumerID: c.ca.ConsumerID, Recorded: c.recording != nil, RecordingID: c.recording.id(),
 			Gateway: withFederation(c.r.Context(), llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID})}
 	}, string(c.required))
 	return true
@@ -592,6 +600,13 @@ func (c *rerankCall) walk(chain []backends.Backend) {
 		c.refuseParam(unsupportedValue("documents", fmt.Sprintf("at most %d documents per request", c.lim.subBatch)))
 		return
 	}
+	// A recording consumer's request is held before its first attempt and
+	// before any queue wait (record.go); one that cannot be is not served.
+	if !c.recording.open(c.ctx) {
+		c.endLimit(func(l LimitReservation) { l.Abort() })
+		refuseRecording(c.rec, c.w)
+		return
+	}
 	stop := c.d.watch(c.ctx, c.cancel, newWatchTarget(c.ca, c.req.model, c.alias.ID, c.gen))
 	defer stop()
 
@@ -600,6 +615,9 @@ func (c *rerankCall) walk(chain []backends.Backend) {
 	rules := llm.WalkRules{WindowRule: true, AllowedClasses: c.d.Planner.AllowedClasses(), Timeout: c.attemptTimeout}
 	served, attempts, werr := llm.WalkChain(c.ctx, plan.Chain, c.alias.Role, plan.Acquirer, llm.PoolReporter(c.d.Pool), rules,
 		func(runCtx context.Context, b *backends.Backend, lease *dispatch.Lease, timeout time.Duration) (dispatch.Usage, bool, error) {
+			if !c.recording.ready() {
+				return dispatch.Usage{}, false, &llm.AdmissionError{Err: errRecordingUnavailable, Backend: b.Name, Host: b.Host}
+			}
 			return c.attempt(&st, plan, runCtx, b, lease, timeout)
 		})
 	stop()
@@ -820,6 +838,12 @@ func (c *rerankCall) outcome(plan Plan, attempts []llm.ChainAttempt, err error, 
 	if err == nil {
 		return c.success(st)
 	}
+	if errors.Is(err, errRecordingUnavailable) {
+		// An attempt found the request's recording not open (ready): it went
+		// to no backend (record.go).
+		refuseRecording(c.rec, c.w)
+		return embedOutcome{finish: llmlog.FinishAborted, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeRecordingUnavailable}}
+	}
 	if isAdmissionFailure(err) {
 		waited := time.Duration(0)
 		if st.lease == nil {
@@ -937,6 +961,22 @@ func (c *rerankCall) success(st *rerankState) embedOutcome {
 		returnDocs = c.req.returnDocs
 	}
 	order := rankDocuments(c.logits, c.req.topN)
+	a := rerankAnswer{id: "rerank-" + c.id, model: c.alias.Name, scores: c.logits, order: order, promptTokens: st.usage.PromptTokens}
+	if returnDocs {
+		a.docs = c.req.docs
+	}
+	var held []byte
+	if c.recording != nil {
+		// A recording consumer's answer is written into its recording first
+		// and held before its first byte goes out (record.go): the client
+		// gets the same bytes in one write. One that cannot be kept or held
+		// is refused instead.
+		if err := writeRerank(captureWriter{c.recording}, a); err != nil || !c.recording.answer(c.ctx, c.recording.capture) {
+			refuseRecording(c.rec, c.w)
+			return embedOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeRecordingUnavailable}}
+		}
+		held = c.recording.capture
+	}
 	if c.limit != nil {
 		for k, v := range c.limit.Headers() {
 			c.w.Header()[k] = v
@@ -944,15 +984,13 @@ func (c *rerankCall) success(st *rerankState) embedOutcome {
 	}
 	c.w.Header().Set("Content-Type", "application/json")
 	c.w.WriteHeader(http.StatusOK)
-	a := rerankAnswer{id: "rerank-" + c.id, model: c.alias.Name, scores: c.logits, order: order, promptTokens: st.usage.PromptTokens}
-	if returnDocs {
-		a.docs = c.req.docs
+	var err error
+	if held != nil {
+		_, err = c.w.Write(held) //nolint:gosec // G705: held is writeRerank's own output — every text through writeJSONText's escape —, the bytes the unrecorded path writes (TestRecordingHoldsTheRequestBeforeAnyBackend/rerank)
+	} else {
+		err = writeRerank(c.w, a)
 	}
-	var out io.Writer = c.w
-	if c.recording.on {
-		out = recordWriter{w: c.w, r: &c.recording} // the bytes the client was written, for its row
-	}
-	if err := writeRerank(out, a); err != nil {
+	if err != nil {
 		slog.Warn("gateway: failed to write the answer", "error", err, "request_id", c.w.Header().Get("X-Request-ID"))
 		return embedOutcome{finish: llmlog.FinishAborted}
 	}
@@ -1124,23 +1162,12 @@ func (c *rerankCall) record(plan Plan, served *backends.Backend, attempts []llm.
 	if st.usage.PromptTokens > 0 {
 		usage = llmlog.UsageBackend
 	}
-	request, response := "", ""
-	switch {
-	case c.recording.on:
-		// A recording consumer's row (issue #571): the whole text of the
-		// query and the documents and the answer as the client was written
-		// it (success), reserved against the recording account (record.go).
-		if n := rerankLogSize(c.req, noLogLimit); c.recording.reserve(int64(n)) {
-			request = rerankLogText(c.req, n, noLogLimit)
-		} else {
-			c.recording.loseBody(llmlog.RecordLostRequest)
-		}
-		response = c.recording.streamText()
-	case c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil):
+	request := ""
+	if c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil) {
 		// The row's text of the query and the documents is sized, then
 		// booked, then written (the embeddings route's rule).
-		if n := rerankLogSize(c.req, bodyLogTextMax); c.ledger.cover(int64(n)) {
-			request = rerankLogText(c.req, n, bodyLogTextMax)
+		if n := rerankLogSize(c.req); c.ledger.cover(int64(n)) {
+			request = rerankLogText(c.req, n)
 		}
 	}
 	row := llmlog.GatewayRow{
@@ -1154,7 +1181,6 @@ func (c *rerankCall) record(plan Plan, served *backends.Backend, attempts []llm.
 		Attempts:    attempts,
 		Err:         out.redacted,
 		Request:     request,
-		Response:    response,
 		BodyLogging: c.s.BodyLogging,
 	}
 	c.recording.mark(&row)
@@ -1162,19 +1188,18 @@ func (c *rerankCall) record(plan Plan, served *backends.Backend, attempts []llm.
 }
 
 // rerankLogSize is the length of rerankLogText: the query's text, a line
-// break and the documents' text (bodyLogSizeN of each raw value, each up to
-// limit — bodyLogTextMax, or noLogLimit for a recorded row).
-func rerankLogSize(req *rerankRequest, limit int) int {
-	return bodyLogSizeN(req.queryRaw, limit) + 1 + bodyLogSizeN(req.docsRaw, limit)
+// break and the documents' text (bodyLogSize of each raw value).
+func rerankLogSize(req *rerankRequest) int {
+	return bodyLogSize(req.queryRaw) + 1 + bodyLogSize(req.docsRaw)
 }
 
 // rerankLogText is the log row's text of the request, written once into
 // size bytes (bodyLogText's form over two values).
-func rerankLogText(req *rerankRequest, size, limit int) string {
+func rerankLogText(req *rerankRequest, size int) string {
 	var b strings.Builder
 	b.Grow(size)
-	bodyLogWalkN(req.queryRaw, limit, func(p []byte) { b.Write(p) })
+	bodyLogWalk(req.queryRaw, func(p []byte) { b.Write(p) })
 	b.WriteByte('\n')
-	bodyLogWalkN(req.docsRaw, limit, func(p []byte) { b.Write(p) })
+	bodyLogWalk(req.docsRaw, func(p []byte) { b.Write(p) })
 	return b.String()
 }

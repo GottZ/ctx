@@ -147,6 +147,9 @@ type modelGateway struct {
 	// counts top_consumers_1h for the status (W06-16).
 	events *usageevents.Recorder
 	ring   *handler.ConsumerRing
+	// recorder is the recording stage of /v1 and /v2 (issue #571): one per
+	// process, over the process pool (llmlog.Recordings).
+	recorder *oai.RecordingStage
 }
 
 // usageEventsFlushTimeout bounds the final flush of the usage events at
@@ -263,6 +266,9 @@ func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store, meterClock ...f
 		usage:          usage,
 		binder:         auth.PeerBindings{Pool: pool},
 		requirePeerHop: federationRequirePeerHopGetter(cfgStore),
+		recorder: oai.NewRecordingStage(llmlog.Recordings{Pool: pool}, handler.ConsumerAuthFromContext, get, func() time.Duration {
+			return cfgStore.Snapshot().Dispatch.ExternalMaxWait //nolint:forbidigo // MT 06 BLIND: dispatch.external_max_wait is global-only (one dispatcher per process); the recording's wait for room is the wait budget of every consumer alike.
+		}),
 	}
 }
 
@@ -272,7 +278,7 @@ func newModelGateway(pool *pgxpool.Pool, cfgStore *config.Store, meterClock ...f
 // the in-flight budget (stage 5). routes are the group's endpoints.
 func (g *modelGateway) group(ingress *fedhop.Ingress, maxDepth func() int, routes []modelRoute) modelGroupDeps {
 	return modelGroupDeps{
-		access: g.access, gate: oai.EnabledGate(g.settings), door: g.door, ingress: ingress, maxDepth: maxDepth,
+		access: g.access, gate: oai.EnabledGate(g.settings), door: g.door, recorder: g.recorder, ingress: ingress, maxDepth: maxDepth,
 		binder: g.binder, requirePeerHop: g.requirePeerHop, events: g.peerNoter(),
 		inner: []func(http.Handler) http.Handler{
 			handler.MaxBodySizeStrictWith(func() int64 { return g.settings().MaxRequestBytes }, oai.RefuseRequestTooLarge),

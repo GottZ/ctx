@@ -126,10 +126,18 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 		if chunk.skip {
 			return nil
 		}
+		// A recording consumer's stream keeps every line before the relay
+		// takes it (record.go): a line it has no room to keep is not sent —
+		// the run ends with recording_unavailable (verdict).
+		if !c.recording.addCapture(chunk.out) {
+			c.cancel(errRecordingUnavailable)
+			return &llm.AdmissionError{Err: errRecordingUnavailable, Backend: b.Name, Host: b.Host}
+		}
 		// Into the relay buffer, not to the client (A03-W10, I-03-7): the
 		// client writer drains it on its own goroutine, so this attempt —
 		// and its lease — ends with the upstream, not with the client.
 		if werr := c.relay.put(chunk.out); werr != nil {
+			c.recording.dropCaptureTail(len(chunk.out)) // the line the relay did not take
 			if errors.Is(werr, ErrBudgetExhausted) {
 				// The ledger refused the copy of an oversize chunk (FOLGE-S):
 				// an admission outcome, as a refused upstream body — the
@@ -146,9 +154,7 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 			}
 			return werr
 		}
-		// A recording consumer's row keeps every relayed line (record.go):
-		// after the relay took it, so the stream's own path is unchanged.
-		c.recording.addStream(chunk.out)
+		c.recording.noteStreamed()
 		st.relayed++
 		return nil
 	})

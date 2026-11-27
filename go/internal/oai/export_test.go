@@ -49,3 +49,18 @@ var (
 
 // ScanDepthStateBytes is the scan's booking per nesting level (hardening 7).
 const ScanDepthStateBytes = scanDepthStateBytes
+
+// FillRecordingAccount takes n bytes of the recording account (issue #571)
+// for a test and returns their release.
+func FillRecordingAccount(n int64) (release func()) {
+	recAccount.mu.Lock()
+	recAccount.held += n
+	recAccount.mu.Unlock()
+	return func() { recAccount.release(n) }
+}
+
+// RecordingAccountLimit is recordAccountLimit.
+var RecordingAccountLimit = recordAccountLimit
+
+// RecordCopyFactor is recordCopyFactor.
+const RecordCopyFactor = recordCopyFactor

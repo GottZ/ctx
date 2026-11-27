@@ -133,11 +133,6 @@ type Entry struct {
 	// persists as NULL instead of a fake 0 — Duration measures the wire
 	// call, and there was none.
 	NoWireCall bool
-
-	// recordedHeld is what a recorded gateway row's texts hold of the
-	// recording account (recorded.go); the writer releases it when the row
-	// is inserted, fails or is dropped. Set by GatewayEntry only.
-	recordedHeld int64
 }
 
 // StampPrompt records WHICH prompt body produced this row: metadata.prompt_id
@@ -204,7 +199,9 @@ func (e Entry) Slimmed(devmode bool) Entry {
 // retentionDays <= 0 disables retention entirely (bodies kept forever — the
 // operator opts in to unlimited). The IS NOT NULL guard makes a re-run
 // idempotent: already-evicted rows are skipped, so the periodic janitor never
-// rewrites long-settled chunks. Returns the number of rows NULLed.
+// rewrites long-settled chunks. The recordings of recording consumers
+// (context_llm_recordings, recordings.go) lose their two bodies after the
+// same retention. Returns the number of rows NULLed, both tables together.
 func EvictBodies(ctx context.Context, pool *pgxpool.Pool, retentionDays int) (int64, error) {
 	if pool == nil || retentionDays <= 0 {
 		return 0, nil
@@ -221,7 +218,11 @@ func EvictBodies(ctx context.Context, pool *pgxpool.Pool, retentionDays int) (in
 	if err != nil {
 		return 0, fmt.Errorf("llmlog: evict bodies: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	rec, err := pool.Exec(ctx, evictRecordingBodies, retentionDays)
+	if err != nil {
+		return tag.RowsAffected(), fmt.Errorf("llmlog: evict recording bodies: %w", err)
+	}
+	return tag.RowsAffected() + rec.RowsAffected(), nil
 }
 
 // writer is the per-pool insert queue: Record appends, at most
@@ -290,7 +291,6 @@ func InsertDropped() int64 { return insertDropped.Load() }
 // closed pool — is allowed: the row is then a counted failure.
 func Record(pool *pgxpool.Pool, e Entry) {
 	if pool == nil || e.Pipeline == "" {
-		ReleaseRecorded(e.recordedHeld)
 		return
 	}
 	writerFor(pool).enqueue(e)
@@ -300,7 +300,6 @@ func (w *writer) enqueue(e Entry) {
 	w.mu.Lock()
 	if len(w.queue) >= maxQueuedInserts {
 		w.mu.Unlock()
-		ReleaseRecorded(e.recordedHeld)
 		insertDropped.Add(1)
 		warnLoss("llmlog: insert queue full, row dropped", e.Pipeline, nil)
 		return
@@ -339,7 +338,6 @@ func (w *writer) drain() {
 			slog.Debug("llmlog: insert failed", "pipeline", e.Pipeline, "error", err)
 			warnLoss("llmlog: insert failed, row lost", e.Pipeline, err)
 		}
-		ReleaseRecorded(e.recordedHeld) // the texts are no longer the writer's
 		w.pending.Add(-1)
 	}
 }

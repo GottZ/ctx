@@ -11,6 +11,7 @@ import (
 	"github.com/GottZ/ctx/internal/federation"
 	"github.com/GottZ/ctx/internal/fedhop"
 	"github.com/GottZ/ctx/internal/llmusage"
+	"github.com/GottZ/ctx/internal/oai"
 	"github.com/GottZ/ctx/internal/usageevents"
 )
 
@@ -28,7 +29,7 @@ import (
 //     consumers, consumers_used_1h, consumers_expiring, recording_consumers,
 //     top_consumers_1h,
 //     reservations_open and rejections_5m of its consumers — and never
-//     instance_envelope, auth or events (pointers left nil).
+//     instance_envelope, auth, events or recording (pointers left nil).
 //   - usage_split_24h, federation: server-admin only (foreign-load
 //     aggregates; dispatcher.go exposure rule), never on the tenant path.
 //   - Hub load (V-06-d, K-05-19): top_consumers_1h comes from an in-memory
@@ -55,19 +56,25 @@ type gatewayStatus struct {
 	Consumers int64 `json:"consumers"`
 	// ReservationsOpen and Rejections5m are null until the meter and the
 	// in-memory ledger feed them (null ≠ 0).
-	ReservationsOpen  *int64                  `json:"reservations_open"`
-	Rejections5m      map[string]int64        `json:"rejections_5m"`
-	TopConsumers1h    []TopConsumer           `json:"top_consumers_1h"`
-	ConsumersUsed1h   int64                   `json:"consumers_used_1h"`
-	ConsumersExpiring int64                   `json:"consumers_expiring"`
-	// RecordingConsumers are the ids of the active consumers whose gateway
-	// rows keep their request and answer in full (record_bodies, migration
-	// 197), sorted — every one for a server-admin, the tenant's own for a
+	ReservationsOpen  *int64           `json:"reservations_open"`
+	Rejections5m      map[string]int64 `json:"rejections_5m"`
+	TopConsumers1h    []TopConsumer    `json:"top_consumers_1h"`
+	ConsumersUsed1h   int64            `json:"consumers_used_1h"`
+	ConsumersExpiring int64            `json:"consumers_expiring"`
+	// RecordingConsumers are the ids of the active consumers whose requests
+	// are recorded whole (record_bodies, migration 197; context_llm_recordings),
+	// sorted — every one for a server-admin, the tenant's own for a
 	// tenant-admin; [] when none records.
-	RecordingConsumers []string                `json:"recording_consumers"`
-	InstanceEnvelope   *map[string]envelopeUse `json:"instance_envelope,omitempty"`
-	Auth              *ModelAuthStats         `json:"auth,omitempty"`
-	Events            *usageevents.Stats      `json:"events,omitempty"`
+	RecordingConsumers []string `json:"recording_consumers"`
+	// Recording is this process's count of the requests of recording
+	// consumers (oai.RecordingStats; docs/operations.md "Recording a
+	// consumer"): per consumer admitted = in_flight + recorded +
+	// unrecordable, the rows' process_id, the account's fill. Server-admin
+	// only.
+	Recording        *oai.RecordingSnapshot  `json:"recording,omitempty"`
+	InstanceEnvelope *map[string]envelopeUse `json:"instance_envelope,omitempty"`
+	Auth             *ModelAuthStats         `json:"auth,omitempty"`
+	Events           *usageevents.Stats      `json:"events,omitempty"`
 	// GeneratedAt is when the 30-second generation behind the counts was
 	// built (the counts are that old at most).
 	GeneratedAt *time.Time `json:"generated_at,omitempty"`
@@ -293,6 +300,8 @@ func (c *StatusCollector) stampGateway(ctx context.Context, resp *statusResponse
 			ev := f.Events()
 			gw.Events = &ev
 		}
+		rec := oai.RecordingStats()
+		gw.Recording = &rec
 		split := g.split
 		if split == nil {
 			split = []llmusage.SplitRow{}

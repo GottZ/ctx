@@ -308,6 +308,9 @@ type chatRig struct {
 	// peerIngress edits the PeerIngress configuration before the mount
 	// (F-W12: Binder, RequirePeerHop, Events); nil keeps the default.
 	peerIngress func(*federation.PeerIngressConfig)
+	// recStage is the recording stage behind the rig's door (issue #571,
+	// withRecordings); nil mounts none.
+	recStage *oai.RecordingStage
 }
 
 // acceptPeerBinder is the PeerIngress binder of the harnesses whose subject
@@ -456,6 +459,9 @@ func (r *chatRig) mount(h http.Handler) chi.Router {
 			})
 		})
 		g.Use(oai.Recover)
+		if r.recStage != nil {
+			g.Use(r.recStage.Handler) // the recording stage behind the door (record.go)
+		}
 		pcfg := federation.PeerIngressConfig{Consumer: r.deps.Consumer, Binder: acceptPeerBinder{}, Logger: slog.New(slog.DiscardHandler)}
 		if r.peerIngress != nil {
 			r.peerIngress(&pcfg)

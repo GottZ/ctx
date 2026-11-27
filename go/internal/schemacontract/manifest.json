@@ -3,7 +3,7 @@
   "generated_against": {
     "migration_max": 197,
     "migration_count": 85,
-    "migration_chain_sha256": "0af84720c017d6df9610f248d304edcb869f9ff57ef76a59da7ef17f22b71eb5",
+    "migration_chain_sha256": "3c827789b6c673076fba296c300cda4dcd4b260e42205646e1e5d3e80e15465c",
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -2128,6 +2128,131 @@
           "type": "uuid",
           "not_null": false,
           "storage": "p"
+        }
+      ],
+      "row_security": false
+    },
+    "context_llm_recordings": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "process_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "consumer_id",
+          "type": "uuid",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "model_key_id",
+          "type": "uuid",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "path",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "op",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "client_request_id",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "model",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "stream",
+          "type": "boolean",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "declared_bytes",
+          "type": "bigint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "request_bytes",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "request_complete",
+          "type": "boolean",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "request_body",
+          "type": "bytea",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "state",
+          "type": "text",
+          "not_null": true,
+          "storage": "x"
+        },
+        {
+          "name": "status",
+          "type": "smallint",
+          "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "code",
+          "type": "text",
+          "not_null": false,
+          "storage": "x"
+        },
+        {
+          "name": "response_bytes",
+          "type": "bigint",
+          "not_null": true,
+          "storage": "p"
+        },
+        {
+          "name": "response_body",
+          "type": "bytea",
+          "not_null": false,
+          "storage": "x"
         }
       ],
       "row_security": false
@@ -5306,6 +5431,9 @@
     "context_llm_log_pkey": {
       "def_hash": "71bc1db96f8018863b268c53999b6e62059c08f2db9b05631d8ebf2f184eef7b"
     },
+    "context_llm_recordings_pkey": {
+      "def_hash": "82c959bc21671d3c30d1ed226d473fc4de21a3db327309cc925c5c17105c5b56"
+    },
     "context_model_aliases_pkey": {
       "def_hash": "0c24f3b4e9d05b5be6df0b45b6793e1e196c6f5e63883b60b79520aba078011b"
     },
@@ -5780,6 +5908,12 @@
     },
     "idx_llm_log_pipeline": {
       "def_hash": "1020ca37593bb524a6fd456e8c4a241d30b313aed45a98c4cf83fdbab3d37eea"
+    },
+    "idx_llm_recordings_bodies": {
+      "def_hash": "945c90a1ccf00390a20d3871915f5020fe07228ef1dc65d09dd8c01eaace13a2"
+    },
+    "idx_llm_recordings_consumer": {
+      "def_hash": "05189b7ee2df578c3b060ed85efbc2a5fd782bbf948efcb903db065ab209dab0"
     },
     "idx_llm_rejections_bucket": {
       "def_hash": "2bdc46170c4c02e44f7ae2c94f273ebc01cbea468f25295288a8151a08b443bb"
