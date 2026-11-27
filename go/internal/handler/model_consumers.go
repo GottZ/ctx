@@ -964,7 +964,9 @@ func (h *ManageHandler) handleModelConsumerUpdate(w http.ResponseWriter, r *http
 	pol := h.consumerPolicy()
 	access := accessOf(ar)
 	cur, err := store.GetConsumer(r.Context(), h.pool, u.id, access, time.Now())
-	if err == nil && u.patch.RecordBodies != nil {
+	if err == nil {
+		// Always read: the tiers compare it when the patch names it, and the
+		// answer's fallback below names it when the patch does not.
 		err = h.readRecordBodies(r, []*store.ModelConsumer{&cur})
 	}
 	if err != nil {
@@ -1006,6 +1008,13 @@ func (h *ManageHandler) handleModelConsumerUpdate(w http.ResponseWriter, r *http
 	if err != nil {
 		writeConsumerStoreError(w, r, err, "model-consumer-update")
 		return
+	}
+	if u.patch.RecordBodies == nil {
+		// The update neither read nor wrote the switch (store
+		// ModelConsumer.RecordBodies): the written row carries it as read
+		// above, never an unread false — freshConsumerView falls back to
+		// that row when its re-read fails.
+		c.RecordBodies = cur.RecordBodies
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "consumer": h.freshConsumerView(r, ar, pol, c, nil)})
 }
