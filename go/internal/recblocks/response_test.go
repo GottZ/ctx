@@ -162,7 +162,8 @@ func streamErrBlock(addr, payload string) wb {
 }
 
 // TestStreamErrorEvents: an error event inside a 2xx stream — a data line
-// whose object carries an "error" that is not null — is a block of its own,
+// whose object carries an "error" object or a non-empty "error" string — is
+// a block of its own,
 // response/error/<n> in line order, holding the event's payload as the client
 // got it, after the choices assembled around it; a stream of an error event
 // alone is that block, not an answer without blocks.
@@ -181,6 +182,9 @@ func TestStreamErrorEvents(t *testing.T) {
 			[]wb{streamErrBlock("response/error/0", `{"error":"first"}`), streamErrBlock("response/error/1", `{"error":{"message":"second"}}`)}},
 		{"a null error is no event", sse(`data: {"error":null,"choices":[{"index":0,"delta":{"content":"x"}}]}`),
 			[]wb{txt("response/choices/0/content", "assistant", "x")}},
+		{"false, an empty string or a number is no event", sse(`data: {"error":false,"choices":[{"index":0,"delta":{"content":"a"}}]}`,
+			`data: {"error":"","choices":[{"index":0,"delta":{"content":"b"}}]}`, `data: {"error":0,"choices":[{"index":0,"delta":{"content":"c"}}]}`),
+			[]wb{txt("response/choices/0/content", "assistant", "abc")}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

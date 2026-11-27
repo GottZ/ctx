@@ -137,8 +137,8 @@ type streamChoice struct {
 }
 
 // stream assembles a 2xx chat stream — the relayed "data:" lines, one JSON
-// chunk each — per choice, then appends its error events (a chunk carrying
-// an "error" that is not null) as blocks response/error/<n> in line order;
+// chunk each — per choice, then appends its error events (isErrorEvent) as
+// blocks response/error/<n> in line order;
 // without a single parsed line it is one raw block. The error events are
 // found again in a second walk rather than kept from the first, so a body of
 // many of them costs a walk, never a list of its size.
@@ -201,11 +201,12 @@ func walkStream(body []byte, fn func(payload []byte, chunk object, ok bool)) {
 }
 
 // isErrorEvent reports whether a stream chunk is an error event: it carries
-// an "error" that is not null. Its choices, if any, are not assembled — the
+// an "error" object or a non-empty "error" string (null, false, "" or a
+// number say there is none). Its choices, if any, are not assembled — the
 // event's block holds the whole chunk.
 func isErrorEvent(chunk object) bool {
 	e, ok := chunk.get("error")
-	return ok && !isNull(e)
+	return ok && len(e) > 0 && (e[0] == '{' || (e[0] == '"' && len(e) > 2))
 }
 
 // assembleChunk adds one chunk's deltas to their choices.
