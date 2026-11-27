@@ -22,6 +22,7 @@ function detail(over: Partial<LLMLogDetail> = {}): LLMLogDetail {
     request_system: 'you are ctx',
     request_user: 'hello',
     response_content: 'hi',
+    recorded: false,
     ...over,
   }
 }
