@@ -24,6 +24,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GottZ/ctx/internal/auth"
@@ -170,6 +171,56 @@ func TestModelConsumerRecordSwitch(t *testing.T) {
 	}
 	if strings.Join(flips, ",") != "update:true,update:false,create:true" {
 		t.Errorf("audit trail of the switch %v (body %s), want update:true, update:false, create:true (newest first)", flips, body)
+	}
+}
+
+// TestModelConsumerRecordSwitchUnderLock: a server-admin transaction switches
+// recording off and holds the consumer row while a tenant-admin re-submits
+// record_bodies:true. The unlocked pre-check reads "on" (no change, no tier);
+// the check under the lock reads "off" — switching on, server-admin only —
+// and refuses: the switch stays off. Red against a handler whose locked
+// check judges the value read before the lock (the TestModelConsumerUpdate
+// TierUnderLock pattern of review F5).
+func TestModelConsumerRecordSwitchUnderLock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	ctx := context.Background()
+	pool := testdb.SetupTestDB(t)
+	hOff := mcHandler(t, pool, false, false)
+	hOn := mcHandler(t, pool, true, true)
+	admin, _ := kaServerAdmin(ctx, t, pool)
+	a := auMakeTenant(ctx, t, pool, hOff, admin, "recl-a")
+	c := mcCreate(t, hOff, admin, map[string]any{"label": "recl", "tenant_id": a.id, "record_bodies": true, "confirm_record_bodies": true})
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `UPDATE context_model_consumers SET record_bodies = false WHERE id = $1::uuid`, c.id); err != nil {
+		t.Fatal(err)
+	}
+	var (
+		wg     sync.WaitGroup
+		status int
+		body   []byte
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		status, body, _ = mcCall(t, hOn, a.ar, "model-consumer-update", map[string]any{"id": c.id, "record_bodies": true})
+	}()
+	mcAwaitLockWaiter(ctx, t, pool)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	var on bool
+	if err := pool.QueryRow(ctx, `SELECT record_bodies FROM context_model_consumers WHERE id = $1::uuid`, c.id).Scan(&on); err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusForbidden || on {
+		t.Fatalf("tenant-admin re-submitted record_bodies true over a concurrent switch-off: status %d body %s, stored %v — want 403 and false", status, body, on)
 	}
 }
 

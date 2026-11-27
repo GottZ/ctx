@@ -19,7 +19,8 @@
 //   - ctx-llmlog-export (llmlogexport.Export): the row leaves sealed;
 //   - the retention janitor (llmlog.EvictBodies): the row's bodies go after
 //     the retention like every row's;
-//   - switching off (the tenant-admin may) applies from the next request.
+//   - switching off (the tenant-admin may) applies from the next request, and
+//     model-alias-preview answers the same with and without the switch.
 //
 //	go test -tags=integration -p 1 -count=1 -run 'TestV1RecordedConsumer' -v ./cmd/ctxd/
 package main
@@ -216,11 +217,24 @@ func TestV1RecordedConsumerRowAndItsReaders(t *testing.T) {
 			t.Errorf("the export left the recorded row out — it keeps the row, without its bodies")
 		}
 	})
+	preview := func() string {
+		t.Helper()
+		st, b, _ := v1RecAPI(t, f, http.MethodPost, "/api/manage", v1RecAdminKey, map[string]any{
+			"action": "model-alias-preview", "data": map[string]any{"consumer_id": recID, "alias": v1ChatAlias}})
+		if st != http.StatusOK {
+			t.Fatalf("model-alias-preview: %d %s", st, b)
+		}
+		return string(b)
+	}
+	previewOn := preview()
 	t.Run("switch_off_applies_from_the_next_request", func(t *testing.T) {
 		st, b, _ := v1RecAPI(t, f, http.MethodPost, "/api/manage", tenantAdmin, map[string]any{
 			"action": "model-consumer-update", "data": map[string]any{"id": recID, "record_bodies": false}})
 		if st != http.StatusOK {
 			t.Fatalf("tenant-admin switches off: %d %s", st, b)
+		}
+		if previewOff := preview(); previewOff != previewOn {
+			t.Errorf("model-alias-preview differs with the switch:\n on  %s\n off %s", previewOn, previewOff)
 		}
 		if a := f.post(t, recKey, chat); a.status != http.StatusOK {
 			t.Fatalf("request after the switch: %d", a.status)
