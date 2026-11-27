@@ -369,6 +369,30 @@ describe('RecordingDetailModel', () => {
     expect(get, 'nothing is read past the last block').toHaveBeenCalledTimes(3)
   })
 
+  it('a later page refreshes the recording: one that finished in between reads done, and the raw reader of a side that changed follows it', async () => {
+    const first: RecordingGetResponse = {
+      ...pageOf(0, 500, 600, 0),
+      recording: meta(RID, { state: 'open', status: null, finished_at: null, response_bytes: 0, response_null: true }),
+      response: { address: 'response', state: 'pending', bytes: 0 },
+    }
+    const second: RecordingGetResponse = { ...pageOf(500, 500, 600, 0), recording: meta(RID) }
+    const get = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second)
+    const m = new RecordingDetailModel({ get })
+    await m.load(RID)
+    expect(m.recording?.state).toBe('open')
+    expect(m.response?.state).toBe('pending')
+    const pending = m.sideReader('response')
+    const request = m.sideReader('request')
+    await m.loadMoreBlocks()
+    expect(m.views).toHaveLength(600)
+    expect(m.recording?.state, 'the page’s metadata, not the first one’s').toBe('done')
+    expect(m.recording?.status).toBe(200)
+    expect(m.response?.state).toBe('present')
+    expect(m.sideReader('response'), 'a side whose state changed gets a fresh reader').not.toBe(pending)
+    expect(m.sideReader('response').hexView, 'the fresh reader reads the answer as it now is (not UTF-8)').toBe(true)
+    expect(m.sideReader('request'), 'an unchanged side keeps its reader and what it loaded').toBe(request)
+  })
+
   it('a failing next page keeps the loaded blocks and names the error', async () => {
     const get = vi.fn().mockResolvedValueOnce(pageOf(0, 500, 600, 0)).mockRejectedValueOnce(envelope(503, 'audit_unavailable'))
     const m = new RecordingDetailModel({ get })

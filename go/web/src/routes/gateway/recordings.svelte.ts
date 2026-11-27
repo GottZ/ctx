@@ -549,6 +549,7 @@ export class RecordingDetailModel {
       this.views = [...this.views, ...res.blocks.map((b) => new BlockModel(this.#api, id, b, this.language))]
       // an empty page below the total would offer the button for ever: the end is where the blocks end
       this.blocksTotal = res.blocks.length === 0 ? this.views.length : res.blocks_total
+      this.#refresh(res)
     } catch (e) {
       if (gen !== this.#gen || ctrl.signal.aborted) return
       this.moreBlocksError = recordingError(toApiError(e))
@@ -556,6 +557,26 @@ export class RecordingDetailModel {
       if (gen === this.#gen) this.loadingMoreBlocks = false
       if (this.#ctrl === ctrl) this.#ctrl = null
     }
+  }
+
+  /**
+   * A later page's metadata replaces the first page's: the recording is read
+   * anew for every page, and an open one may have finished in between. A
+   * side whose state, format or size changed gets a fresh raw reader (what
+   * the old one loaded was the body as it was); an unchanged side keeps its
+   * reader and the bytes it loaded.
+   */
+  #refresh(res: RecordingGetResponse): void {
+    this.recording = res.recording
+    for (const address of ['request', 'response'] as const) {
+      const was = address === 'request' ? this.request : this.response
+      const now = res[address]
+      if (was !== null && was.state === now.state && was.format === now.format && was.bytes === now.bytes) continue
+      this.#sides[address].dispose()
+      this.#sides = { ...this.#sides, [address]: sideReader(this.#api, res.recording.id, now, address) }
+    }
+    this.request = res.request
+    this.response = res.response
   }
 
   #disposeParts(): void {
