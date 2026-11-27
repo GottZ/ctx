@@ -184,6 +184,8 @@ func corpus() []recblocks.Input {
 		answer("chat", "/v1/chat/completions", false, 400, `{}`, `{"error":{"message":"bad"}}`),
 		answer("rerank", "/v1/rerank", false, 200, rerankBody, `{"results":[{"index":0,"relevance_score":0.5}]}`),
 		answer("chat", "/v1/chat/completions", true, 200, `{}`, sse("data: nope", ": ping")),
+		answer("chat", "/v1/chat/completions", true, 200, `{}`, sse(`data: {"choices":[{"index":0,"delta":{"refusal":"no","function_call":{"name":"f","arguments":"1"}}}]}`,
+			`data: {"error":{"message":"boom"}}`, `data: {"error":"again"}`)),
 		{Op: "chat", State: "open", Request: []byte(`{"messages":[]}`), ResponseNull: true},
 		{Op: "chat", State: "done", RequestNull: true, ResponseNull: true, ResponseBytes: 99},
 	}

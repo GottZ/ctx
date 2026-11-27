@@ -152,6 +152,73 @@ func TestStreamAssembly(t *testing.T) {
 		toolCallBlock("response/choices/0/tool_calls/0", "assistant", "lookup", "call_9", `{"q":"x"}`),
 		toolCallBlock("response/choices/0/tool_calls/1", "assistant", "second", "call_10", ""),
 		txt("response/choices/1/content", "assistant", "B1B2"),
+		streamErrBlock("response/error/0", `{"error":{"message":"boom"},"choices":[{"index":0,"delta":{"content":"IGNORED"}}]}`),
+	})
+}
+
+// streamErrBlock is the block of an error event inside a 2xx stream.
+func streamErrBlock(addr, payload string) wb {
+	return wb{Address: addr, Side: "response", Kind: "error", Content: payload, UTF8: true, Translatable: true, Inline: true}
+}
+
+// TestStreamErrorEvents: an error event inside a 2xx stream — a data line
+// whose object carries an "error" that is not null — is a block of its own,
+// response/error/<n> in line order, holding the event's payload as the client
+// got it, after the choices assembled around it; a stream of an error event
+// alone is that block, not an answer without blocks.
+func TestStreamErrorEvents(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       []wb
+	}{
+		{"error alone", sse(`data: {"error":{"message":"boom"}}`),
+			[]wb{streamErrBlock("response/error/0", `{"error":{"message":"boom"}}`)}},
+		{"after content", sse(`data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"}}]}`,
+			`data: {"error":{"message":"boom","code":"upstream_error"}}`),
+			[]wb{txt("response/choices/0/content", "assistant", "Hel"),
+				streamErrBlock("response/error/0", `{"error":{"message":"boom","code":"upstream_error"}}`)}},
+		{"a string error and a second event", sse(`data: {"error":"first"}`, `data: {"error":{"message":"second"}}`),
+			[]wb{streamErrBlock("response/error/0", `{"error":"first"}`), streamErrBlock("response/error/1", `{"error":{"message":"second"}}`)}},
+		{"a null error is no event", sse(`data: {"error":null,"choices":[{"index":0,"delta":{"content":"x"}}]}`),
+			[]wb{txt("response/choices/0/content", "assistant", "x")}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := recblocks.Decompose(answer("chat", "/v1/chat/completions", true, 200, `{}`, c.body))
+			if r.Response.Format != "json" {
+				t.Errorf("response side %+v", r.Response)
+			}
+			equalBlocks(t, sideBlocks(t, r, "response"), c.want)
+		})
+	}
+}
+
+// TestStreamRefusalAndFunctionCall: a streamed refusal and a streamed legacy
+// function_call are put together like content and tool calls, and are the
+// blocks a non-stream answer has for them — in a message's order: reasoning,
+// content, refusal, tool calls, function_call.
+func TestStreamRefusalAndFunctionCall(t *testing.T) {
+	body := sse(
+		`data: {"choices":[{"index":0,"delta":{"role":"assistant","refusal":"I can"}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"refusal":"'t help."}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"refusal":null}}]}`,
+		`data: {"choices":[{"index":1,"delta":{"role":"assistant","function_call":{"name":"lookup","arguments":"{\"q\":"}}}]}`,
+		`data: {"choices":[{"index":1,"delta":{"function_call":{"arguments":"1}"}}}]}`,
+		`data: {"choices":[{"index":2,"delta":{"role":"assistant","function_call":{"name":"f","arguments":"{}"},"refusal":"no","content":"c","tool_calls":[{"index":0,"id":"t","function":{"name":"g","arguments":"1"}}]}}]}`,
+	)
+	r := recblocks.Decompose(answer("chat", "/v1/chat/completions", true, 200, `{}`, body))
+	refusal := func(addr, content string) wb {
+		w := txt(addr, "assistant", content)
+		w.Name = "refusal"
+		return w
+	}
+	equalBlocks(t, sideBlocks(t, r, "response"), []wb{
+		refusal("response/choices/0/refusal", "I can't help."),
+		toolCallBlock("response/choices/1/function_call", "assistant", "lookup", "", `{"q":1}`),
+		txt("response/choices/2/content", "assistant", "c"),
+		refusal("response/choices/2/refusal", "no"),
+		toolCallBlock("response/choices/2/tool_calls/0", "assistant", "g", "t", "1"),
+		toolCallBlock("response/choices/2/function_call", "assistant", "f", "", "{}"),
 	})
 }
 

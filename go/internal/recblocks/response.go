@@ -128,38 +128,36 @@ type streamCall struct {
 
 // streamChoice is one choice assembled from a stream's deltas.
 type streamChoice struct {
-	role                       string
-	content, reasoning         []byte
-	contentSeen, reasoningSeen bool
-	calls                      map[int]*streamCall
+	role                                    string
+	content, reasoning, refusal             []byte
+	contentSeen, reasoningSeen, refusalSeen bool
+	calls                                   map[int]*streamCall
+	// function is the legacy function_call, nil when no delta carried one.
+	function *streamCall
 }
 
 // stream assembles a 2xx chat stream — the relayed "data:" lines, one JSON
-// chunk each — per choice; without a single parsed line it is one raw block.
+// chunk each — per choice, then appends its error events (a chunk carrying
+// an "error" that is not null) as blocks response/error/<n> in line order;
+// without a single parsed line it is one raw block. The error events are
+// found again in a second walk rather than kept from the first, so a body of
+// many of them costs a walk, never a list of its size.
 func (b *builder) stream(body []byte, side *Side) {
 	choices := map[int]*streamChoice{}
-	parsed := 0
-	for rest := body; len(rest) > 0; {
-		var line []byte
-		line, rest, _ = bytes.Cut(rest, []byte{'\n'})
-		payload, ok := bytes.CutPrefix(line, []byte("data:"))
-		if !ok {
-			continue
-		}
+	parsed, events := 0, 0
+	walkStream(body, func(_ []byte, chunk object, ok bool) {
 		side.StreamLines++
-		payload = trimWS(payload)
-		if !json.Valid(payload) {
-			side.StreamLinesUnparsed++
-			continue
-		}
-		chunk, ok := parseObject(payload)
 		if !ok {
 			side.StreamLinesUnparsed++
-			continue
+			return
 		}
 		parsed++
+		if isErrorEvent(chunk) {
+			events++
+			return
+		}
 		assembleChunk(choices, chunk)
-	}
+	})
 	if parsed == 0 {
 		side.Format = formatNotJSON
 		b.raw(body)
@@ -169,14 +167,49 @@ func (b *builder) stream(body []byte, side *Side) {
 	for _, idx := range sortedKeys(choices) {
 		b.streamChoice("response/choices/"+strconv.Itoa(idx), choices[idx])
 	}
-}
-
-// assembleChunk adds one chunk's deltas to their choices; a chunk that
-// carries an error object adds nothing (the raw body keeps it).
-func assembleChunk(choices map[int]*streamChoice, chunk object) {
-	if e, ok := chunk.get("error"); ok && len(e) > 0 && e[0] == '{' {
+	if events == 0 {
 		return
 	}
+	n := 0
+	walkStream(body, func(payload []byte, chunk object, ok bool) {
+		if ok && isErrorEvent(chunk) {
+			b.text(Block{Address: "response/error/" + strconv.Itoa(n), Kind: kindError}, payload)
+			n++
+		}
+	})
+}
+
+// walkStream calls fn for every "data:" line of a stream body with its
+// trimmed payload and, when the payload is one JSON object, that object
+// (ok=false otherwise).
+func walkStream(body []byte, fn func(payload []byte, chunk object, ok bool)) {
+	for rest := body; len(rest) > 0; {
+		var line []byte
+		line, rest, _ = bytes.Cut(rest, []byte{'\n'})
+		payload, ok := bytes.CutPrefix(line, []byte("data:"))
+		if !ok {
+			continue
+		}
+		payload = trimWS(payload)
+		if !json.Valid(payload) {
+			fn(payload, nil, false)
+			continue
+		}
+		chunk, ok := parseObject(payload)
+		fn(payload, chunk, ok)
+	}
+}
+
+// isErrorEvent reports whether a stream chunk is an error event: it carries
+// an "error" that is not null. Its choices, if any, are not assembled — the
+// event's block holds the whole chunk.
+func isErrorEvent(chunk object) bool {
+	e, ok := chunk.get("error")
+	return ok && !isNull(e)
+}
+
+// assembleChunk adds one chunk's deltas to their choices.
+func assembleChunk(choices map[int]*streamChoice, chunk object) {
 	v, ok := chunk.get("choices")
 	if !ok {
 		return
@@ -217,6 +250,15 @@ func (sc *streamChoice) addDelta(d object) {
 	if s, ok := reasoningOf(d); ok {
 		sc.reasoning, sc.reasoningSeen = append(sc.reasoning, s...), true
 	}
+	if s, ok := d.str("refusal"); ok {
+		sc.refusal, sc.refusalSeen = append(sc.refusal, s...), true
+	}
+	if fc, ok := d.obj("function_call"); ok {
+		if sc.function == nil {
+			sc.function = &streamCall{}
+		}
+		sc.function.addFunction(fc)
+	}
 	v, ok := d.get("tool_calls")
 	if !ok {
 		return
@@ -248,10 +290,15 @@ func (sc *streamChoice) addCallDelta(p int, tc object) {
 	if call.id == "" {
 		call.id = tc.text("id")
 	}
-	fn, ok := tc.obj("function")
-	if !ok {
-		return
+	if fn, ok := tc.obj("function"); ok {
+		call.addFunction(fn)
 	}
+}
+
+// addFunction adds one function delta ({name, arguments}) — of a tool call,
+// or a legacy function_call: the name from the first delta that carries one,
+// the arguments concatenated (a non-string value as written).
+func (call *streamCall) addFunction(fn object) {
 	if call.name == "" {
 		call.name = fn.text("name")
 	}
@@ -266,8 +313,9 @@ func (sc *streamChoice) addCallDelta(p int, tc object) {
 	call.args = append(call.args, args...)
 }
 
-// streamChoice appends one assembled choice: reasoning, content, then the
-// tool calls by index ascending.
+// streamChoice appends one assembled choice in a message's order:
+// reasoning, content, refusal, the tool calls by index ascending, the legacy
+// function_call.
 func (b *builder) streamChoice(base string, sc *streamChoice) {
 	role := sc.role
 	if role == "" {
@@ -279,10 +327,16 @@ func (b *builder) streamChoice(base string, sc *streamChoice) {
 	if sc.contentSeen {
 		b.text(Block{Address: base + "/content", Kind: kindText, Role: role}, nonNil(sc.content))
 	}
+	if sc.refusalSeen {
+		b.text(Block{Address: base + "/refusal", Kind: kindText, Role: role, Name: "refusal"}, nonNil(sc.refusal))
+	}
 	for _, k := range sortedKeys(sc.calls) {
 		call := sc.calls[k]
 		b.text(Block{Address: base + "/tool_calls/" + strconv.Itoa(k), Kind: kindToolCall, Role: role,
 			Name: call.name, ToolCallID: call.id}, nonNil(call.args))
+	}
+	if sc.function != nil {
+		b.text(Block{Address: base + "/function_call", Kind: kindToolCall, Role: role, Name: sc.function.name}, nonNil(sc.function.args))
 	}
 }
 
