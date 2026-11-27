@@ -121,10 +121,22 @@ func nullStatus(n int) *int16 {
 	return &v
 }
 
-// bodyBytes is b, NULL when empty: an empty body is no body.
+// bodyBytes is b, NULL when empty: an empty answer is no answer.
 func bodyBytes(b []byte) []byte {
 	if len(b) == 0 {
 		return nil
+	}
+	return b
+}
+
+// requestBody is b, the empty bytea when nothing was read — never NULL: a
+// row's request_body is NULL only once the retention cleared it, so
+// idx_llm_recordings_bodies (request_body IS NOT NULL) holds every row that
+// still carries a body, a request refused before its body was read with its
+// refusal's bytes included (evictRecordingBodies).
+func requestBody(b []byte) []byte {
+	if b == nil {
+		return []byte{}
 	}
 	return b
 }
@@ -147,7 +159,7 @@ func (r Recordings) Open(ctx context.Context, q RecordedRequest) error {
 		 declared_bytes, request_bytes, request_complete, request_body, state)
 		VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'open')`,
 		q.ID, ProcessID, q.ConsumerID, nullUUIDText(q.ModelKeyID), q.Path, nullText(q.Op), nullText(q.ClientRequestID),
-		nullText(q.Model), q.Stream, declared(q.Declared), int64(len(q.Body)), q.Complete, bodyBytes(q.Body))
+		nullText(q.Model), q.Stream, declared(q.Declared), int64(len(q.Body)), q.Complete, requestBody(q.Body))
 	if err != nil {
 		return fmt.Errorf("llmlog: open recording: %w", err)
 	}
@@ -194,7 +206,7 @@ func (r Recordings) Insert(ctx context.Context, q RecordedRequest, o RecordedOut
 		       response_bytes = EXCLUDED.response_bytes, response_body = EXCLUDED.response_body
 		 WHERE t.state = 'open'`,
 		q.ID, ProcessID, q.ConsumerID, nullUUIDText(q.ModelKeyID), q.Path, nullText(q.Op), nullText(q.ClientRequestID),
-		nullText(q.Model), q.Stream, declared(q.Declared), int64(len(q.Body)), q.Complete, bodyBytes(q.Body),
+		nullText(q.Model), q.Stream, declared(q.Declared), int64(len(q.Body)), q.Complete, requestBody(q.Body),
 		nullStatus(o.Status), nullText(o.Code), int64(len(o.Response)), bodyBytes(o.Response))
 	if err != nil {
 		return fmt.Errorf("llmlog: insert recording: %w", err)
@@ -203,8 +215,12 @@ func (r Recordings) Insert(ctx context.Context, q RecordedRequest, o RecordedOut
 }
 
 // evictRecordingBodies is EvictBodies' statement over the recordings: the two
-// bodies of every row past the retention that still carries its request
-// (idx_llm_recordings_bodies holds exactly those); the sizes stay.
+// bodies of every row past the retention that the retention has not cleared
+// yet — request_body is NULL only after it (requestBody), so a row with an
+// answer and no request read is among them; idx_llm_recordings_bodies holds
+// exactly those rows. The predicate names request_body alone on purpose: the
+// outcome's update (Finish) changes response_body, and an index predicate
+// over it would make every such update a non-HOT one. The sizes stay.
 const evictRecordingBodies = `UPDATE context_llm_recordings
 	SET request_body = NULL, response_body = NULL
 	WHERE created_at < now() - make_interval(days => $1)

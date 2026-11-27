@@ -138,8 +138,9 @@ func TestRecordingsRoundTrip(t *testing.T) {
 	if err := st.Insert(ctx, stage, llmlog.RecordedOutcome{Status: 404, Code: "not_found"}); err != nil {
 		t.Fatalf("insert stage refusal: %v", err)
 	}
-	if r = readRecording(t, ctx, q, stage.ID); r.body != nil || r.reqBytes != 0 || r.declared != nil || r.op != nil {
-		t.Errorf("stage refusal row: body %v bytes %d declared %v op %v, want none of them", r.body, r.reqBytes, r.declared, r.op)
+	if r = readRecording(t, ctx, q, stage.ID); r.body == nil || len(r.body) != 0 || r.reqBytes != 0 || r.declared != nil || r.op != nil {
+		t.Errorf("stage refusal row: body %v bytes %d declared %v op %v — want the empty body (NULL only past the retention), no size, no op",
+			r.body, r.reqBytes, r.declared, r.op)
 	}
 
 	// An Open the caller saw fail although it committed: Insert ends it and
@@ -179,13 +180,25 @@ func TestRecordingsJanitor(t *testing.T) {
 			t.Fatalf("finish: %v", err)
 		}
 	}
-	// The time shift is the fixture's only hand edit: rows are written by Open.
-	if _, err := pool.Exec(ctx, `UPDATE context_llm_recordings SET created_at = now() - interval '91 days' WHERE id = $1::uuid`, old); err != nil {
+	// A request refused before its body was read (an unknown path, a body
+	// over the cap): no request body, the refusal's bytes as its answer.
+	refusal := recID(t)
+	if err := st.Insert(ctx, llmlog.RecordedRequest{ID: refusal, ConsumerID: gwiConsumer, Path: "/v1/nowhere", Declared: -1},
+		llmlog.RecordedOutcome{Status: 404, Code: "not_found", Response: []byte(`{"error":{"code":"not_found"}}`)}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	// The time shift is the fixture's only hand edit: rows are written by Open
+	// and Insert.
+	if _, err := pool.Exec(ctx, `UPDATE context_llm_recordings SET created_at = now() - interval '91 days' WHERE id = ANY($1::uuid[])`,
+		[]string{old, refusal}); err != nil {
 		t.Fatal(err)
 	}
 	n, err := llmlog.EvictBodies(ctx, pool, 90)
-	if err != nil || n != 1 {
-		t.Fatalf("evict: %d rows, %v — want the one recording past the retention", n, err)
+	if err != nil || n != 2 {
+		t.Fatalf("evict: %d rows, %v — want the two recordings past the retention (one with a request, one with an answer only)", n, err)
+	}
+	if r := readRecording(t, ctx, q, refusal); r.body != nil || r.response != nil || r.respBytes != int64(len(`{"error":{"code":"not_found"}}`)) {
+		t.Errorf("refusal past the retention: body %v answer %q (%d bytes) — want both NULL, the answer's size kept", r.body, r.response, r.respBytes)
 	}
 	if r := readRecording(t, ctx, q, old); r.body != nil || r.response != nil || r.reqBytes != 5 || r.respBytes != 6 || r.state != llmlog.RecordingDone {
 		t.Errorf("past the retention: body %v answer %v sizes %d/%d state %q — want both NULL, sizes and outcome kept", r.body, r.response, r.reqBytes, r.respBytes, r.state)

@@ -65,7 +65,12 @@
 --     key to the consumer: a deleted consumer's recordings stay. The
 --     retention janitor (llmlog.EvictBodies) NULLs the two bodies after
 --     the LLM log's retention, as it does context_llm_log's; request_bytes
---     and response_bytes keep their sizes.
+--     and response_bytes keep their sizes. request_body is the empty bytea
+--     when nothing was read and NULL only once the retention cleared it, so
+--     idx_llm_recordings_bodies (request_body IS NOT NULL) holds every row
+--     that still carries a body — a refusal's answer without a request
+--     included — without naming response_body, which the outcome's update
+--     changes (an index over it would make that update non-HOT).
 --
 -- Cost and locks. ADD COLUMN with a constant default is a catalog change:
 -- ACCESS EXCLUSIVE on context_model_consumers until the commit — milliseconds;
