@@ -148,7 +148,7 @@ test.describe('recordings detail (#575)', () => {
   })
 
   test('recordings: Stop aborts a running translation and asks for no further part', async ({ page }) => {
-    const session = await seedSession(page, { role: 'server-admin', theme: 'dark', capabilities: CAPS })
+    await seedSession(page, { role: 'server-admin', theme: 'dark', capabilities: CAPS })
     // hold the translation: the answer never comes until the test is done
     let held = 0
     await page.route('**/api/manage', async (route: Route) => {
@@ -170,8 +170,10 @@ test.describe('recordings detail (#575)', () => {
     await user.getByRole('button', { name: 'Stop' }).click()
     await expect(user.getByRole('status')).toHaveText('stopped after 0 of ? parts')
     await expect(user.getByRole('button', { name: 'Translate' })).toBeEnabled()
+    // the held route answers translate before the session mock would record
+    // it, so the count of the route is the count of the calls: one part asked
+    // for, none after Stop
     expect(held).toBe(1)
-    expect(session.calls.filter((c) => c.action === 'model-recording-translate')).toHaveLength(1)
     await page.unrouteAll({ behavior: 'ignoreErrors' })
   })
 
