@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,6 +13,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/recblocks"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -74,35 +76,16 @@ func (h *ManageHandler) handleModelRecordingTranslate(w http.ResponseWriter, r *
 	}
 	defer h.recBrake.release(who)
 
-	row, in, res, err := h.loadRecordingBlocks(r.Context(), d.ID, recordingBlockAt(d.Address))
+	var tin llm.RecordingTranslateInput
+	meta, found, err := h.withRecording(r.Context(), d.ID, func(in recblocks.Input) bool {
+		return recordingTranslateCut(w, in, d, &tin)
+	})
 	if err != nil {
 		writeRecordingStoreError(w, r, err, "model-recording-translate")
 		return
 	}
-	b, ok := lookupRecordingBlock(w, res, in, d.Address)
-	if !ok {
+	if !found {
 		return
-	}
-	if !b.Translatable {
-		writeRecordingError(w, http.StatusUnprocessableEntity, "not_translatable", "this block holds no text to translate")
-		return
-	}
-	if len(b.Content()) == 0 {
-		writeRecordingError(w, http.StatusUnprocessableEntity, "not_translatable", "this block is empty")
-		return
-	}
-	chunks := llm.RecordingChunks(string(b.Content()))
-	if len(chunks) > llm.RecordingTranslateMaxChunks {
-		writeRecordingError(w, http.StatusRequestEntityTooLarge, "block_too_large", "the block is larger than one translation takes; read it in the raw view",
-			"limit_runes", llm.RecordingTranslateChunkRunes*llm.RecordingTranslateMaxChunks)
-		return
-	}
-	if d.Chunk >= len(chunks) {
-		writeRecordingError(w, http.StatusBadRequest, "invalid_body", "chunk is out of range", "chunks", len(chunks))
-		return
-	}
-	tin := llm.RecordingTranslateInput{
-		Address: d.Address, Kind: b.Kind, Role: b.Role, Text: chunks[d.Chunk], Chunk: d.Chunk, Chunks: len(chunks), Language: d.Language,
 	}
 	cfg := h.cfg.SnapshotForRequest(r.Context())
 	call := llm.RecordingTranslateCall{
@@ -122,8 +105,8 @@ func (h *ManageHandler) handleModelRecordingTranslate(w http.ResponseWriter, r *
 		writeRecordingTranslateError(w, r, err)
 		return
 	}
-	if !h.auditRecordingRead(w, r, ar, &row.RecordingMeta, store.RecordingAuditTranslate,
-		map[string]any{"block": d.Address, "chunk": d.Chunk, "chunks": len(chunks), "language": d.Language}) {
+	if !h.auditRecordingRead(w, r, ar, meta, store.RecordingAuditTranslate,
+		map[string]any{"block": d.Address, "chunk": d.Chunk, "chunks": tin.Chunks, "language": d.Language}) {
 		return
 	}
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(llm.RecordingTranslateDeadline(chain) + recordingWriteMargin))
@@ -133,9 +116,44 @@ func (h *ManageHandler) handleModelRecordingTranslate(w http.ResponseWriter, r *
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"success": true, "id": row.ID, "address": d.Address, "chunk": d.Chunk, "chunks": len(chunks),
+		"success": true, "id": meta.ID, "address": d.Address, "chunk": d.Chunk, "chunks": tin.Chunks,
 		"language": d.Language, "text": out.Text, "model": out.Model, "generated": true,
 	})
+}
+
+// recordingTranslateCut takes, under the content slot, what a translation
+// sends: the block at d.Address — refused when it holds no text, is empty or
+// is larger than one translation takes — and its chunk d.Chunk, copied, so
+// the body is not held while the model answers. False when it wrote the
+// refusal.
+func recordingTranslateCut(w http.ResponseWriter, in recblocks.Input, d recordingTranslateRequest, tin *llm.RecordingTranslateInput) bool {
+	res, _, _ := recblocks.Find(in, d.Address)
+	b, ok := lookupRecordingBlock(w, res, in, d.Address)
+	if !ok {
+		return false
+	}
+	if !b.Translatable {
+		writeRecordingError(w, http.StatusUnprocessableEntity, "not_translatable", "this block holds no text to translate")
+		return false
+	}
+	if len(b.Content()) == 0 {
+		writeRecordingError(w, http.StatusUnprocessableEntity, "not_translatable", "this block is empty")
+		return false
+	}
+	chunks := llm.RecordingChunks(string(b.Content()))
+	if len(chunks) > llm.RecordingTranslateMaxChunks {
+		writeRecordingError(w, http.StatusRequestEntityTooLarge, "block_too_large", "the block is larger than one translation takes; read it in the raw view",
+			"limit_runes", llm.RecordingTranslateChunkRunes*llm.RecordingTranslateMaxChunks)
+		return false
+	}
+	if d.Chunk >= len(chunks) {
+		writeRecordingError(w, http.StatusBadRequest, "invalid_body", "chunk is out of range", "chunks", len(chunks))
+		return false
+	}
+	*tin = llm.RecordingTranslateInput{
+		Address: d.Address, Kind: b.Kind, Role: b.Role, Text: strings.Clone(chunks[d.Chunk]), Chunk: d.Chunk, Chunks: len(chunks), Language: d.Language,
+	}
+	return true
 }
 
 // writeRecordingTranslateError maps the call's error to the view's own codes

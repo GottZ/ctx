@@ -69,7 +69,9 @@ const (
 // read holds a recording's bodies (up to gateway.max_request_bytes plus the
 // answer) and their decomposition in memory, outside the gateway's in-flight
 // budget, so their number is bounded here. A second reader waits for the
-// slot within its request.
+// slot within its request. The bound holds until every answer is written:
+// a read cuts what its answer needs under the slot (withRecording), and
+// nothing of the row outlives it.
 var recordingContentSlot = make(chan struct{}, 1)
 
 func acquireRecordingContent(ctx context.Context) (func(), error) {
@@ -285,32 +287,37 @@ func recordingInput(row *llmlog.RecordingRow) recblocks.Input {
 	return in
 }
 
-// loadRecordingBlocks reads a recording whole under the content slot and
-// decomposes it with split — a window of its blocks (the detail) or the one
-// block of an address (a read, a translation): the walk meets every block,
-// only those are kept, so the number of blocks of a body (millions, for a
-// body of tiny elements) never becomes a list in memory or an answer.
-func (h *ManageHandler) loadRecordingBlocks(ctx context.Context, id string, split func(recblocks.Input) recblocks.Result) (*llmlog.RecordingRow, recblocks.Input, recblocks.Result, error) {
+// withRecording reads a recording whole under the content slot and hands its
+// decomposition input to cut, which decomposes it — a window of its blocks
+// (the detail) or the one block of an address (a read, a translation): the
+// walk meets every block, only those are kept, so the number of blocks of a
+// body (millions, for a body of tiny elements) never becomes a list — and
+// takes what its answer needs, bounded and copied out of the bodies (a page
+// of previews, a window, a chunk), or writes a refusal and reports false.
+// Nothing of the row or its blocks may outlive cut: the slot is released
+// when withRecording returns, and a reference kept past it would let the
+// next read load a whole recording beside this one while this answer is
+// audited, sent to a model or written. The metadata (no body) comes back.
+func (h *ManageHandler) withRecording(ctx context.Context, id string, cut func(recblocks.Input) bool) (*llmlog.RecordingMeta, bool, error) {
 	release, err := acquireRecordingContent(ctx)
 	if err != nil {
-		return nil, recblocks.Input{}, recblocks.Result{}, err
+		return nil, false, err
 	}
 	defer release()
 	row, err := llmlog.Recordings{Pool: h.pool}.GetRecording(ctx, id)
 	if err != nil {
-		return nil, recblocks.Input{}, recblocks.Result{}, err
+		return nil, false, err
 	}
-	in := recordingInput(row)
-	return row, in, split(in), nil
+	meta := row.RecordingMeta
+	return &meta, cut(recordingInput(row)), nil
 }
 
-// recordingBlockAt is the split of a read or a translation: the block at
-// address alone.
-func recordingBlockAt(address string) func(recblocks.Input) recblocks.Result {
-	return func(in recblocks.Input) recblocks.Result {
-		r, _, _ := recblocks.Find(in, address)
-		return r
-	}
+// recordingDetail is what a detail answer keeps of its page of blocks: the
+// sides and the block views, previews copied, no byte of a body.
+type recordingDetail struct {
+	request, response recblocks.Side
+	blocks            []recordingBlockView
+	total             int
 }
 
 // recordingBlockView is one block of the detail.
@@ -323,12 +330,13 @@ type recordingBlockView struct {
 	PreviewOmitted bool `json:"preview_omitted"`
 }
 
-// recordingBlockViews renders the blocks with their previews.
+// recordingBlockViews renders the blocks with their previews — copies, the
+// views carry no byte of the body.
 func recordingBlockViews(blocks []recblocks.Block) []recordingBlockView {
 	out := make([]recordingBlockView, 0, len(blocks))
 	budget := recordingPreviewBudget
 	for _, b := range blocks {
-		v := recordingBlockView{Block: b}
+		v := recordingBlockView{Block: b.WithoutContent()}
 		c := b.Content()
 		switch {
 		case !b.Inline || !b.UTF8 || budget <= 0:
@@ -371,21 +379,24 @@ func (h *ManageHandler) handleModelRecordingGet(w http.ResponseWriter, r *http.R
 		writeRecordingError(w, http.StatusBadRequest, "invalid_body", "block_offset must be >= 0 and block_limit between 1 and 500")
 		return
 	}
-	row, _, res, err := h.loadRecordingBlocks(r.Context(), d.ID, func(in recblocks.Input) recblocks.Result {
-		return recblocks.DecomposeWindow(in, d.BlockOffset, d.BlockLimit)
+	var page recordingDetail
+	meta, _, err := h.withRecording(r.Context(), d.ID, func(in recblocks.Input) bool {
+		res := recblocks.DecomposeWindow(in, d.BlockOffset, d.BlockLimit)
+		page = recordingDetail{request: res.Request, response: res.Response, blocks: recordingBlockViews(res.Blocks), total: res.Total}
+		return true
 	})
 	if err != nil {
 		writeRecordingStoreError(w, r, err, "model-recording-get")
 		return
 	}
-	if !h.auditRecordingRead(w, r, ar, &row.RecordingMeta, store.RecordingAuditRead,
-		map[string]any{"block_offset": d.BlockOffset, "blocks": len(res.Blocks), "blocks_total": res.Total}) {
+	if !h.auditRecordingRead(w, r, ar, meta, store.RecordingAuditRead,
+		map[string]any{"block_offset": d.BlockOffset, "blocks": len(page.blocks), "blocks_total": page.total}) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"success": true, "recording": row.RecordingMeta,
-		"request": res.Request, "response": res.Response, "blocks": recordingBlockViews(res.Blocks),
-		"block_offset": d.BlockOffset, "blocks_total": res.Total,
+		"success": true, "recording": meta,
+		"request": page.request, "response": page.response, "blocks": page.blocks,
+		"block_offset": d.BlockOffset, "blocks_total": page.total,
 	})
 }
 
@@ -433,25 +444,30 @@ func (h *ManageHandler) handleModelRecordingRead(w http.ResponseWriter, r *http.
 		h.readRecordingSide(w, r, ar, d, offset, limit, detail)
 		return
 	}
-	row, in, res, err := h.loadRecordingBlocks(r.Context(), d.ID, recordingBlockAt(d.Address))
+	var answer map[string]any
+	meta, found, err := h.withRecording(r.Context(), d.ID, func(in recblocks.Input) bool {
+		res, _, _ := recblocks.Find(in, d.Address)
+		b, ok := lookupRecordingBlock(w, res, in, d.Address)
+		if !ok {
+			return false
+		}
+		c := b.Content()
+		total := int64(len(c))
+		lo, hi := clampWindow(offset, limit, total)
+		answer = map[string]any{
+			"success": true, "address": d.Address, "offset": lo, "limit": hi - lo, "total": total, "eof": hi >= total,
+			"utf8": b.UTF8, "data": base64.StdEncoding.EncodeToString(c[lo:hi]),
+		}
+		return true
+	})
 	if err != nil {
 		writeRecordingStoreError(w, r, err, "model-recording-read")
 		return
 	}
-	b, ok := lookupRecordingBlock(w, res, in, d.Address)
-	if !ok {
+	if !found || !h.auditRecordingRead(w, r, ar, meta, store.RecordingAuditReadRaw, detail) {
 		return
 	}
-	if !h.auditRecordingRead(w, r, ar, &row.RecordingMeta, store.RecordingAuditReadRaw, detail) {
-		return
-	}
-	c := b.Content()
-	total := int64(len(c))
-	lo, hi := clampWindow(offset, limit, total)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"success": true, "address": d.Address, "offset": lo, "limit": hi - lo, "total": total, "eof": hi >= total,
-		"utf8": b.UTF8, "data": base64.StdEncoding.EncodeToString(c[lo:hi]),
-	})
+	writeJSON(w, http.StatusOK, answer)
 }
 
 // lookupRecordingBlock finds the block at address; when there is none it

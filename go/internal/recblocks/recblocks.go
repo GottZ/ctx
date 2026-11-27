@@ -128,6 +128,14 @@ type Block struct {
 // it, or a decoded string — but the blocks of one Result may share them.
 func (b Block) Content() []byte { return b.content }
 
+// WithoutContent is the block without its bytes: what a caller keeps of it
+// once it has cut what it needs, so the copy of the body the bytes point
+// into is not held with it.
+func (b Block) WithoutContent() Block {
+	b.content = nil
+	return b
+}
+
 // Result is a row's decomposition.
 type Result struct {
 	Request  Side
