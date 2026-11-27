@@ -1,0 +1,164 @@
+package handler
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/GottZ/ctx/internal/auth"
+	"github.com/GottZ/ctx/internal/backends"
+	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/recblocks"
+	"github.com/GottZ/ctx/internal/store"
+)
+
+// model-recording-translate (issue #575): one chunk of one block of a
+// recording, rendered by a model of this instance — a translation into the
+// target language and a readable form (Markdown) — as an additional display
+// next to the recorded bytes. The request names the recording and the block
+// address, never text: the server takes the block from the recording, so the
+// action is no general translation proxy. The answer goes to the caller and
+// nowhere else (llm.TranslateRecordingBlock: the chat role at credentials,
+// local rows only, the slim llmlog row). One call per chunk: a long block is
+// asked for chunk by chunk (chunks in the answer), each call bounded by the
+// chain's timeouts, each audited.
+//
+// The dispatcher sees the call as interactive — a human waits for it — and
+// the brake holds it to one call per person at a time (recordingBrake, the
+// coupling the daily synthesis' interactive class carries): a recording
+// consumer's /v1 requests share the backend with at most one such call per
+// server-admin, and the external partition the dispatcher keeps for them is
+// not touched by it.
+
+// recordingTranslateRequest is the action's data.
+type recordingTranslateRequest struct {
+	ID       string `json:"id"`
+	Address  string `json:"address"`
+	Language string `json:"language"`
+	Chunk    int    `json:"chunk"`
+}
+
+// recordingWriteMargin is added to the chain's longest walk for the answer's
+// write deadline (the server's WriteTimeout is shorter than a slow model).
+const recordingWriteMargin = 15 * time.Second
+
+func (h *ManageHandler) handleModelRecordingTranslate(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
+	var d recordingTranslateRequest
+	if err := decodeConsumerPayload(req.Data, &d); err != nil || d.ID == "" || d.Address == "" {
+		writeRecordingError(w, http.StatusBadRequest, "invalid_body", "id and address are required")
+		return
+	}
+	d.Language = trimLang(d.Language)
+	if _, ok := llm.RecordingLanguages[d.Language]; !ok {
+		writeRecordingError(w, http.StatusBadRequest, "invalid_language", "language must be one of the supported language codes")
+		return
+	}
+	if d.Chunk < 0 || d.Chunk >= llm.RecordingTranslateMaxChunks {
+		writeRecordingError(w, http.StatusBadRequest, "invalid_body", "chunk is out of range")
+		return
+	}
+	if h.backendPool == nil {
+		writeRecordingError(w, http.StatusServiceUnavailable, "no_eligible_backend", "no backend of this instance may receive a recording")
+		return
+	}
+	who := recordingBrakeKey(ar)
+	if !h.recBrake.acquire(who) {
+		w.Header().Set("Retry-After", "1")
+		writeRecordingError(w, http.StatusTooManyRequests, "translate_busy", "a translation of yours is running; wait for it")
+		return
+	}
+	defer h.recBrake.release(who)
+
+	row, in, res, err := h.loadRecordingBlocks(r.Context(), d.ID)
+	if err != nil {
+		writeRecordingStoreError(w, r, err, "model-recording-translate")
+		return
+	}
+	b, ok := recblocks.Lookup(res, in, d.Address)
+	if !ok {
+		writeRecordingError(w, http.StatusNotFound, "not_found", "no block at this address")
+		return
+	}
+	if !b.Translatable {
+		writeRecordingError(w, http.StatusUnprocessableEntity, "not_translatable", "this block holds no text to translate")
+		return
+	}
+	chunks := llm.RecordingChunks(string(b.Content()))
+	if len(chunks) > llm.RecordingTranslateMaxChunks {
+		writeRecordingError(w, http.StatusRequestEntityTooLarge, "block_too_large", "the block is larger than one translation takes; read it in the raw view",
+			"limit_runes", llm.RecordingTranslateChunkRunes*llm.RecordingTranslateMaxChunks)
+		return
+	}
+	if d.Chunk >= len(chunks) {
+		writeRecordingError(w, http.StatusBadRequest, "invalid_body", "chunk is out of range", "chunks", len(chunks))
+		return
+	}
+	chain, err := llm.RecordingTranslateChain(h.backendPool)
+	if err != nil {
+		writeRecordingError(w, http.StatusServiceUnavailable, "no_eligible_backend", "no backend of this instance may receive a recording (chat role, full trust, not external)")
+		return
+	}
+	if !h.auditRecordingRead(w, r, ar, &row.RecordingMeta, store.RecordingAuditTranslate,
+		map[string]any{"block": d.Address, "chunk": d.Chunk, "chunks": len(chunks), "language": d.Language}) {
+		return
+	}
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(llm.RecordingTranslateDeadline(chain) + recordingWriteMargin))
+	cfg := h.cfg.SnapshotForRequest(r.Context())
+	out, err := llm.TranslateRecordingBlock(r.Context(), llm.RecordingTranslateCall{
+		DB: h.pool, Pool: h.backendPool, Quota: h.quota, QuotaScope: ar.HomeScope, APIKeyID: ar.ApiKeyID,
+		WindowFallback: cfg.Pool.ExternalNumCtxFallback,
+		Admission:      llm.Admission{Admitter: h.admitter, Class: dispatch.ClassInteractive},
+	}, llm.RecordingTranslateInput{
+		Address: d.Address, Kind: b.Kind, Role: b.Role, Text: chunks[d.Chunk], Chunk: d.Chunk, Chunks: len(chunks), Language: d.Language,
+	})
+	if err != nil {
+		writeRecordingTranslateError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true, "id": row.ID, "address": d.Address, "chunk": d.Chunk, "chunks": len(chunks),
+		"language": d.Language, "text": out.Text, "model": out.Model, "generated": true,
+	})
+}
+
+// writeRecordingTranslateError maps the call's error. The error's text goes
+// to the log only — a backend's error text may echo what it was sent.
+func writeRecordingTranslateError(w http.ResponseWriter, r *http.Request, err error) {
+	var noBackend *backends.ErrNoEligibleBackend
+	var quota *backends.ErrQuotaExceeded
+	switch {
+	case errors.As(err, &noBackend):
+		writeRecordingError(w, http.StatusServiceUnavailable, "no_eligible_backend", "no backend of this instance may receive a recording (chat role, full trust, not external)")
+	case errors.Is(err, llm.ErrRecordingWindow):
+		writeRecordingError(w, http.StatusServiceUnavailable, "window_too_small", "the context window of the chat backends does not hold one chunk")
+	case errors.As(err, &quota):
+		writeRecordingError(w, http.StatusTooManyRequests, "quota_exceeded", "the tenant quota does not admit the call")
+	case errors.Is(err, context.Canceled), r.Context().Err() != nil:
+		writeRecordingError(w, http.StatusServiceUnavailable, "canceled", "the translation was canceled")
+	default:
+		logRequestError(r.Context(), "manage: model-recording-translate failed", "error_class", errorClassOf(err),
+			"request_id", RequestIDFromContext(r.Context()))
+		writeRecordingError(w, http.StatusBadGateway, "translate_failed", "the model did not answer")
+	}
+}
+
+// errorClassOf names an error without its text.
+func errorClassOf(err error) string {
+	switch {
+	case llm.IsAdmissionError(err):
+		return "admission"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	}
+	return "backend"
+}
+
+// isUUID reports whether s parses as a UUID.
+func isUUID(s string) bool {
+	_, err := uuid.Parse(s)
+	return err == nil
+}

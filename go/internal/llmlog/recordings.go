@@ -24,9 +24,11 @@ import (
 // request with 503 recording_unavailable or counts the request as one it
 // could not hold.
 //
-// A row can carry credentials in clear text. No ctx surface reads its
-// bodies — no REST, MCP, CLI or web route, no export, no pipeline
-// (TestRecordingsReadersCensus); a server operator reads them in the
+// A row can carry credentials in clear text. One ctx surface reads its
+// bodies: the server-admin's recordings view (#575, recordings_read.go, the
+// manage actions model-recording-*, every content read audited) — no MCP
+// tool, no CLI command of its own, no export, no pipeline
+// (TestRecordingsReadersCensus); a server operator also reads them in the
 // database (docs/operations.md "Recording a consumer"). The retention
 // janitor NULLs them after the LLM log's retention (EvictBodies).
 

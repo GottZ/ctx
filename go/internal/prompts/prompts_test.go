@@ -22,7 +22,8 @@ import (
 	_ "github.com/GottZ/ctx/internal/topiclabel"
 )
 
-// wantIdentities is the register as this tree carries it: fourteen bodies over
+// wantIdentities is the register as this tree carries it (with #575 the
+// recordings view's reading aid, llm.recordingTranslateSystemPrompt): bodies over
 // five packages. It is written out rather than counted so the failure of a
 // removed registration names WHICH one went missing — a count would only say
 // that something did.
@@ -42,6 +43,7 @@ var wantIdentities = []prompts.Identity{
 	{ID: "dream.temporalValidationPrompt", Version: "2026-04-24", Owner: "github.com/GottZ/ctx/internal/dream"},
 	{ID: "events.distillSystemPrompt", Version: "2026-08-30", Owner: "github.com/GottZ/ctx/internal/events"},
 	{ID: "llm.classifySystemPrompt", Version: "2026-06-13", Owner: "github.com/GottZ/ctx/internal/llm"},
+	{ID: "llm.recordingTranslateSystemPrompt", Version: "2026-11-27", Owner: "github.com/GottZ/ctx/internal/llm"},
 	{ID: "llm.systemPromptV52", Version: "v5.2", Owner: "github.com/GottZ/ctx/internal/llm"},
 	{ID: "llm.systemPromptV6", Version: "v6", Owner: "github.com/GottZ/ctx/internal/llm"},
 	{ID: "llm.temporalPromptTemplate", Version: "2026-11-21", Owner: "github.com/GottZ/ctx/internal/llm"},

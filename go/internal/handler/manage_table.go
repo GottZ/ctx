@@ -148,7 +148,7 @@ func gamingModeTier(req manageRequest) adminTier {
 	return tierOpen
 }
 
-// manageActions is the dispatch table: 111 actions (89 pre-table + the four model alias actions of W02-04 + the eight model consumer actions of W01-5 + the three gateway limits actions of W06-15 + model-alias-preview of W05-04 + purge of #202 + stats-reconcile of #266 + the three forge conflict actions of #509 + embed-backfill-release of #236), alphabetical, one row each.
+// manageActions is the dispatch table: 116 actions (89 pre-table + the four model alias actions of W02-04 + the eight model consumer actions of W01-5 + the three gateway limits actions of W06-15 + model-alias-preview of W05-04 + purge of #202 + stats-reconcile of #266 + the three forge conflict actions of #509 + embed-backfill-release of #236 + the five model-recording actions of #575), alphabetical, one row each.
 //
 // The tiers are the pre-table behaviour, action for action — this wave routes
 // differently, it does not re-cut permissions.
@@ -274,6 +274,14 @@ var manageActions = map[string]manageAction{
 	"model-key-history":        {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelKeyHistory},
 	"model-key-revoke":         {tier: tierTenantAdmin, handle: (*ManageHandler).handleModelKeyRevoke},
 	"model-key-rotate":         {tier: tierSelfService, handle: (*ManageHandler).handleModelKeyRotate},
+	// model-recording-* (#575): the recordings of the recording consumers
+	// (#571) — a recording can carry credentials in clear text, so the view
+	// is server-admin only, its content reads audited in the handler.
+	"model-recording-consumers": {tier: tierServerAdmin, handle: (*ManageHandler).handleModelRecordingConsumers},
+	"model-recording-get":       {tier: tierServerAdmin, handle: (*ManageHandler).handleModelRecordingGet},
+	"model-recording-list":      {tier: tierServerAdmin, handle: (*ManageHandler).handleModelRecordingList},
+	"model-recording-read":      {tier: tierServerAdmin, handle: (*ManageHandler).handleModelRecordingRead},
+	"model-recording-translate": {tier: tierServerAdmin, handle: (*ManageHandler).handleModelRecordingTranslate},
 	"oauth-identity-link":      {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleOAuthIdentityLink)},
 	"oauth-identity-list":      {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleOAuthIdentityList)},
 	"oauth-identity-unlink":    {tier: tierServerAdmin, handle: dropAuth((*ManageHandler).handleOAuthIdentityUnlink)},

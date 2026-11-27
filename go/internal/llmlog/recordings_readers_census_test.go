@@ -26,7 +26,8 @@ import (
 // Not covered, stated rather than assumed: SQL assembled from fragments that
 // never spell the table's name, the shell scripts of the repository
 // (backup.sh and coverage.sh dump the whole database — a backup, not a
-// reader), and the web frontend, which has no route to the table at all.
+// reader), and the web frontend, which reads the table only through the
+// server-admin's manage actions model-recording-* (#575).
 // recordingsReader is one classified file: the number of its literals that
 // name the table or a body column, and what they do.
 type recordingsReader struct {
@@ -44,6 +45,13 @@ var recordingsReaders = map[string]recordingsReader{
 	// Text only: the refusal of record_bodies without its confirmation names
 	// the table (recordConfirmRefusal) — no statement.
 	"internal/handler/model_consumers.go": {1, "text: the confirmation refusal names the table"},
+	// The server-admin's recordings view (#575): plain SELECTs — the
+	// consumers, a list page (metadata only), one row whole (GetRecording,
+	// for the blocks), one row's metadata, one window of a body (two sides).
+	// Their one caller is handler/model_recordings*.go behind the
+	// tierServerAdmin rows of manage_table.go; every content read is audited
+	// there (TestRecordingViewCallers, TestRecordingViewContent in cmd/ctxd).
+	"internal/llmlog/recordings_read.go": {7, "reads: the server-admin recordings view (#575), no write"},
 }
 
 // tableRE matches a literal that reads or writes the table; bodyColumnRE one

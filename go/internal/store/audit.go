@@ -36,6 +36,8 @@ type auditEntity struct {
 // forge_sync by the forge resolve surface (#509, WriteForgeSyncAudit: one
 // row per conflict resolution or stamp reset that wrote, metadata.tenant_id =
 // the project's tenant, so a tenant-admin reads its own projects' rows);
+// model_recording by the recordings view (#575, WriteRecordingAudit: one
+// row per read of a recording's content, server-admin only);
 // gateway_limits (M-06-5) and consumer_usage (the gateway's Go writer) read
 // as empty lists until their writers land. setting, secret and
 // backend stay on their own surfaces (GET /api/settings/{key} and the
@@ -53,6 +55,9 @@ var auditEntities = map[string]auditEntity{
 	"scope_purge":    {},
 	"forge_sync":     {},
 	"instance":       {serverAdminOnly: true},
+	// model_recording (#575, WriteRecordingAudit): one row per read of a
+	// recording's content — a server-admin's reads, server-admin only.
+	"model_recording": {serverAdminOnly: true},
 }
 
 // AuditEntities lists the served entity types, sorted.
