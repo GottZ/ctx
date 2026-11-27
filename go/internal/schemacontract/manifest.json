@@ -1,9 +1,9 @@
 {
   "manifest_version": 1,
   "generated_against": {
-    "migration_max": 196,
-    "migration_count": 84,
-    "migration_chain_sha256": "df392ea0f70eb16d7cf0c60d46a0ad16b92a152c89321fcd0b592914cdcb4e27",
+    "migration_max": 197,
+    "migration_count": 85,
+    "migration_chain_sha256": "0af84720c017d6df9610f248d304edcb869f9ff57ef76a59da7ef17f22b71eb5",
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
@@ -2591,6 +2591,12 @@
           "name": "created_by_principal",
           "type": "uuid",
           "not_null": false,
+          "storage": "p"
+        },
+        {
+          "name": "record_bodies",
+          "type": "boolean",
+          "not_null": true,
           "storage": "p"
         }
       ],
@@ -6120,7 +6126,7 @@
       "src_hash": "51cec9a296a124f88b899b8c3bdf85605f85761389159b9c481199588b1ebcbc"
     },
     "audit_state_model_consumer(c context_model_consumers)": {
-      "src_hash": "c31dfffa79233dbc075925f1fe69000cc1032ff1d48f4fccbafcb1735fe636d7"
+      "src_hash": "abc2776a43ffa046759bdb1e7e4048bb30fc0109e3f9b61c1cfb78c3f4504dd3"
     },
     "audit_state_model_grant(g context_model_consumer_grants)": {
       "src_hash": "26acfa1913e6f6c346db99053b88d1c1dc730088dddfbb7778cbdabcbdf16bf2"
@@ -6186,7 +6192,7 @@
       "src_hash": "4029c6b45395dcdc3f8fd2886d8feff0a5b51d82b4a78358278a34f397c1add0"
     },
     "ctx_model_auth(p_key_hash text, p_client_ip inet, p_secure boolean)": {
-      "src_hash": "4a53d01644bbb648173d964f2ffb2670e3cde0c9b81a1e98b9391edde7a20b45"
+      "src_hash": "f5015d876eac3fe552c75ce0e59e53b3f780c64de4d2b0d47fa8b5ec845e19ad"
     },
     "ctx_model_auth_live(p_key_ids uuid[])": {
       "src_hash": "77d45df5527e257664bbb72a5ed5fd698b04c4718185b07da76be131964dd737"
@@ -6377,7 +6383,7 @@
       "def_hash": "bda1f75b177103c18e9499e9a1881991628cdd55aaf8ab405d9e88d6a0eadc2c"
     },
     "context_model_consumers.trg_model_consumers_audit_upd": {
-      "def_hash": "eb7cf9da3704b9f60e84094cc4af53e35b50455dbfad04a5dad85205647401bf"
+      "def_hash": "80ac3ec855ea70d6a0e542d9cb93c8a615e57a9786c491300de511a6eb2591c5"
     },
     "context_model_consumers.trg_model_consumers_deactivate": {
       "def_hash": "39098f2eeabd387754c4dd669f02c37f10a9c923f210392de606f17b9a10671f"

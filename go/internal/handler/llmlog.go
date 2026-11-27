@@ -229,6 +229,11 @@ type llmlogDetail struct {
 	RequestSystem       *string   `json:"request_system"`
 	RequestUser         *string   `json:"request_user"`
 	ResponseContent     *string   `json:"response_content"`
+	// Recorded marks the row of a recording consumer (metadata.gw.recorded,
+	// issue #571): its bodies are whole and can carry credentials in clear
+	// text. Only a server-admin reaches such a row here — a gateway row has
+	// no api_key_id, so the tenant gate below never matches it.
+	Recorded bool `json:"recorded"`
 }
 
 // HandleLLMLogDetail serves GET /api/llmlog/{id} — the gated prompt/reply body
@@ -282,13 +287,14 @@ func (h *LLMLogHandler) HandleLLMLogDetail(w http.ResponseWriter, r *http.Reques
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id::text, created_at, pipeline, model,
 		       COALESCE(backend_name, host) AS backend,
-		       required_sensitivity, request_system, request_user, response_content
+		       required_sensitivity, request_system, request_user, response_content,
+		       COALESCE(metadata->'gw'->'recorded' = 'true'::jsonb, false)
 		FROM context_llm_log
 		WHERE id = $1::uuid
 		  AND ($2::uuid[] IS NULL OR api_key_id = ANY($2))`,
 		id, keyFilter,
 	).Scan(&d.ID, &d.CreatedAt, &d.Pipeline, &d.Model, &d.Backend,
-		&sensitivity, &reqSystem, &reqUser, &respContent)
+		&sensitivity, &reqSystem, &reqUser, &respContent, &d.Recorded)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Unknown id OR a row the caller may not see — one uniform answer.

@@ -154,11 +154,16 @@ type chatCall struct {
 	// requestReserveFactor × body, grown by cover), spent what the request
 	// has allocated against it (cover).
 	held, spent int64
+
+	// recording is the capture of a recording consumer's request (record.go;
+	// off for every other consumer).
+	recording recording
 }
 
 func newChatCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time) *chatCall {
 	s := d.Settings()
 	c := &chatCall{d: d, w: w, s: s, ca: ca, entry: entry, client: r.Context(), rec: AccessRecordFrom(r.Context())}
+	c.recording.on = ca != nil && ca.RecordBodies
 	if c.rec == nil {
 		c.rec = &AccessRecord{} // outside a model group: filled, never read
 	}
@@ -220,6 +225,7 @@ func (c *chatCall) close() {
 	for _, stop := range c.stops {
 		stop()
 	}
+	c.recording.release() // what no row of this request took
 }
 
 // refuse answers code and names it as the access record's reason.
@@ -757,7 +763,7 @@ func (c *chatCall) admitLimiter(maxTokens int) bool {
 	// The row the shutdown's forced settle writes should the request still
 	// be open after the HTTP drain (W06-13 (e)).
 	registerForcedRow(res, c.d.Record, func() llmlog.GatewayRow {
-		return llmlog.GatewayRow{Pipeline: chatPipeline, ConsumerID: c.ca.ConsumerID,
+		return llmlog.GatewayRow{Pipeline: chatPipeline, ConsumerID: c.ca.ConsumerID, Recorded: c.recording.on,
 			Gateway: withFederation(c.r.Context(), llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID, Stream: c.sse != nil})}
 	}, string(c.required))
 	return true
@@ -1319,7 +1325,18 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 		}
 	}
 	request, response := "", ""
-	if c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil) {
+	switch {
+	case c.recording.on:
+		// A recording consumer's row (issue #571): the whole text of the
+		// array and the whole answer — a stream's relayed lines — reserved
+		// against the recording account, not booked in the ledger (record.go).
+		request = c.recording.text(c.req.messages, llmlog.RecordLostRequest)
+		if c.sse != nil {
+			response = c.recording.streamText()
+		} else if len(out.response) > 0 {
+			response = c.recording.bytes(out.response, llmlog.RecordLostResponse)
+		}
+	case c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil):
 		// The row's text of the array is sized, then booked, then written
 		// (hardening 6): under an exhausted budget the row goes without it.
 		if n := bodyLogSize(c.req.messages); c.cover(int64(n)) {
@@ -1331,7 +1348,7 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 			response = string(out.response[:n])
 		}
 	}
-	c.d.Record(llmlog.GatewayRow{
+	row := llmlog.GatewayRow{
 		Pipeline:   chatPipeline,
 		ConsumerID: c.ca.ConsumerID,
 		Gateway: withFederation(c.r.Context(), llmlog.Gateway{
@@ -1344,7 +1361,9 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 		Request:     request,
 		Response:    response,
 		BodyLogging: c.s.BodyLogging,
-	})
+	}
+	c.recording.mark(&row)
+	c.d.Record(row)
 }
 
 // bodyLogTextMax is how much of the message array's text the route hands to
@@ -1353,17 +1372,18 @@ func (c *chatCall) record(plan Plan, served *backends.Backend, attempts []llm.Ch
 // stores the same. Pinned by TestBodyLogTextStoresWhatTheArrayStored.
 const bodyLogTextMax = 64<<10 + utf8.UTFMax
 
-// bodyLogWalk yields the text of the message array raw for the log row as
+// bodyLogWalkN yields the text of the message array raw for the log row as
 // the row stores it before its cut — valid UTF-8 with each run of invalid
 // bytes one U+FFFD and no NUL (llmlog's storable) — piece by piece to put,
-// up to bodyLogTextMax bytes (hardening 6, the class gate: string(raw)
-// copied the whole array outside the reservation, and the row's cleaning
-// grew a text of invalid bytes between ASCII ones to 8 × its size before
-// cutting it).
-func bodyLogWalk(raw []byte, put func(p []byte)) {
+// up to limit bytes: bodyLogTextMax for the body policy (hardening 6, the
+// class gate: string(raw) copied the whole array outside the reservation,
+// and the row's cleaning grew a text of invalid bytes between ASCII ones to
+// 8 × its size before cutting it), noLogLimit for a recorded row's whole
+// text (record.go).
+func bodyLogWalkN(raw []byte, limit int, put func(p []byte)) {
 	n := 0
 	invalid := false // the byte before was part of an invalid sequence
-	for i := 0; i < len(raw) && n < bodyLogTextMax; {
+	for i := 0; i < len(raw) && n < limit; {
 		c := raw[i]
 		size := 1
 		switch {
@@ -1394,18 +1414,24 @@ func bodyLogWalk(raw []byte, put func(p []byte)) {
 var replacementChar = []byte(string(utf8.RuneError))
 
 // bodyLogSize is the length of bodyLogText(raw).
-func bodyLogSize(raw []byte) int {
+func bodyLogSize(raw []byte) int { return bodyLogSizeN(raw, bodyLogTextMax) }
+
+// bodyLogSizeN is the length of bodyLogTextN(raw, …, limit).
+func bodyLogSizeN(raw []byte, limit int) int {
 	n := 0
-	bodyLogWalk(raw, func(p []byte) { n += len(p) })
+	bodyLogWalkN(raw, limit, func(p []byte) { n += len(p) })
 	return n
 }
 
 // bodyLogText is the log row's text of raw, written once into size bytes
 // (bodyLogSize).
-func bodyLogText(raw []byte, size int) string {
+func bodyLogText(raw []byte, size int) string { return bodyLogTextN(raw, size, bodyLogTextMax) }
+
+// bodyLogTextN is bodyLogText up to limit bytes (bodyLogSizeN).
+func bodyLogTextN(raw []byte, size, limit int) string {
 	var b strings.Builder
 	b.Grow(size)
-	bodyLogWalk(raw, func(p []byte) { b.Write(p) })
+	bodyLogWalkN(raw, limit, func(p []byte) { b.Write(p) })
 	return b.String()
 }
 

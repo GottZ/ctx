@@ -25,7 +25,8 @@ import (
 //     from the same generation keyed by AuthResult.TenantID (SnapshotForTenant
 //     knows only the home scope; pattern GuardReviewByScope) and carries
 //     only the tenant's own consumers' figures —
-//     consumers, consumers_used_1h, consumers_expiring, top_consumers_1h,
+//     consumers, consumers_used_1h, consumers_expiring, recording_consumers,
+//     top_consumers_1h,
 //     reservations_open and rejections_5m of its consumers — and never
 //     instance_envelope, auth or events (pointers left nil).
 //   - usage_split_24h, federation: server-admin only (foreign-load
@@ -59,7 +60,12 @@ type gatewayStatus struct {
 	TopConsumers1h    []TopConsumer           `json:"top_consumers_1h"`
 	ConsumersUsed1h   int64                   `json:"consumers_used_1h"`
 	ConsumersExpiring int64                   `json:"consumers_expiring"`
-	InstanceEnvelope  *map[string]envelopeUse `json:"instance_envelope,omitempty"`
+	// RecordingConsumers are the ids of the active consumers whose gateway
+	// rows keep their request and answer in full (record_bodies, migration
+	// 197), sorted — every one for a server-admin, the tenant's own for a
+	// tenant-admin; [] when none records.
+	RecordingConsumers []string                `json:"recording_consumers"`
+	InstanceEnvelope   *map[string]envelopeUse `json:"instance_envelope,omitempty"`
 	Auth              *ModelAuthStats         `json:"auth,omitempty"`
 	Events            *usageevents.Stats      `json:"events,omitempty"`
 	// GeneratedAt is when the 30-second generation behind the counts was
@@ -177,8 +183,11 @@ func (g *gatewayGeneration) refusalCount(reason, detail string) *int64 {
 
 // gatewayCounts are the consumers of one tenant: active ones, those whose
 // keys were used in the last hour, those with a live key expiring within
-// gateway.key_expiry_warn.
-type gatewayCounts struct{ consumers, used1h, expiring int64 }
+// gateway.key_expiry_warn, and the ids of those that record (sorted).
+type gatewayCounts struct {
+	consumers, used1h, expiring int64
+	recording                   []string
+}
 
 // gatewayCountsSQL is the generation's one statement on the consumers and
 // their keys (idx_model_consumers_tenant_active; the key probes are per
@@ -189,7 +198,8 @@ SELECT c.tenant_id::text, count(*)::bigint,
                                        WHERE k.consumer_id = c.id AND k.last_used_at > $1))::bigint,
        count(*) FILTER (WHERE EXISTS (SELECT 1 FROM context_model_keys k
                                        WHERE k.consumer_id = c.id AND k.revoked_at IS NULL
-                                         AND k.expires_at > $2 AND k.expires_at <= $3))::bigint
+                                         AND k.expires_at > $2 AND k.expires_at <= $3))::bigint,
+       COALESCE(array_agg(c.id::text ORDER BY c.id::text) FILTER (WHERE c.record_bodies), '{}')
 FROM context_model_consumers c
 WHERE c.active
 GROUP BY 1`
@@ -213,7 +223,7 @@ func (c *StatusCollector) gatewayGenNow(ctx context.Context, f *GatewayFeed) *ga
 		for rows.Next() {
 			var tenant string
 			var n gatewayCounts
-			if err = rows.Scan(&tenant, &n.consumers, &n.used1h, &n.expiring); err != nil {
+			if err = rows.Scan(&tenant, &n.consumers, &n.used1h, &n.expiring, &n.recording); err != nil {
 				break
 			}
 			g.byTenant[tenant] = n
@@ -256,16 +266,19 @@ func (c *StatusCollector) stampGateway(ctx context.Context, resp *statusResponse
 	if g == nil {
 		return
 	}
-	gw := &gatewayStatus{Enabled: true, GeneratedAt: &g.at}
+	gw := &gatewayStatus{Enabled: true, GeneratedAt: &g.at, RecordingConsumers: []string{}}
 	if admin {
 		for _, n := range g.byTenant {
 			gw.Consumers += n.consumers
 			gw.ConsumersUsed1h += n.used1h
 			gw.ConsumersExpiring += n.expiring
+			gw.RecordingConsumers = append(gw.RecordingConsumers, n.recording...)
 		}
+		sort.Strings(gw.RecordingConsumers)
 	} else {
 		n := g.byTenant[tenant]
 		gw.Consumers, gw.ConsumersUsed1h, gw.ConsumersExpiring = n.consumers, n.used1h, n.expiring
+		gw.RecordingConsumers = append(gw.RecordingConsumers, n.recording...)
 	}
 	gw.TopConsumers1h = []TopConsumer{}
 	if f.Ring != nil {

@@ -649,7 +649,7 @@ func (c *embedCall) admitLimiter() bool {
 	// The row the shutdown's forced settle writes should the request still
 	// be open after the HTTP drain (W06-13 (e)).
 	registerForcedRow(res, c.d.Record, func() llmlog.GatewayRow {
-		return llmlog.GatewayRow{Pipeline: embedPipeline, ConsumerID: c.ca.ConsumerID,
+		return llmlog.GatewayRow{Pipeline: embedPipeline, ConsumerID: c.ca.ConsumerID, Recorded: c.ca.RecordBodies,
 			Gateway: withFederation(c.r.Context(), llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID})}
 	}, string(c.required))
 	return true
@@ -1548,7 +1548,14 @@ func (c *embedCall) record(plan Plan, served *backends.Backend, attempts []llm.C
 		usage = llmlog.UsageBackend
 	}
 	request := ""
-	if c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil) {
+	rc := recording{on: c.ca.RecordBodies}
+	switch {
+	case rc.on:
+		// A recording consumer's row (issue #571): the whole text of the
+		// input, reserved against the recording account (record.go). The
+		// answer — the vectors — is not kept: the input is what was sent.
+		request = rc.text(c.req.input, llmlog.RecordLostRequest)
+	case c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil):
 		// The row's text of the input is sized, then booked, then written
 		// (FOLGE-E, as the chat route since FOLGE-P hardening 6):
 		// string(input) copied the whole value outside the reservation, and
@@ -1558,7 +1565,7 @@ func (c *embedCall) record(plan Plan, served *backends.Backend, attempts []llm.C
 			request = bodyLogText(c.req.input, n)
 		}
 	}
-	c.d.Record(llmlog.GatewayRow{
+	row := llmlog.GatewayRow{
 		Pipeline:   embedPipeline,
 		ConsumerID: c.ca.ConsumerID,
 		Gateway: withFederation(c.r.Context(), llmlog.Gateway{
@@ -1570,5 +1577,7 @@ func (c *embedCall) record(plan Plan, served *backends.Backend, attempts []llm.C
 		Err:         out.redacted,
 		Request:     request,
 		BodyLogging: c.s.BodyLogging,
-	})
+	}
+	rc.mark(&row)
+	c.d.Record(row)
 }

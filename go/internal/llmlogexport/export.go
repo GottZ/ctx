@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/pgxdb"
 )
 
@@ -64,6 +65,10 @@ type ExportSummary struct {
 	RowsBody         int64      `json:"rows_body"`
 	RowsBodylessSlim int64      `json:"rows_bodyless_slim"`
 	RowsBodylessNull int64      `json:"rows_bodyless_null"`
+	// RowsRecordedSealed zählt die aufgezeichneten Gateway-Zeilen (issue
+	// #571), deren Bodies der Export versiegelt ausgibt (exportSelect); sie
+	// stehen zugleich in rows_bodyless_slim bzw. rows_bodyless_null.
+	RowsRecordedSealed int64 `json:"rows_recorded_sealed"`
 	// CountGate ist count(*) mit demselben Fenster im selben Snapshot —
 	// muss RowsTotal gleichen (Live-Gate KW1).
 	CountGate int64      `json:"count_gate"`
@@ -153,6 +158,7 @@ type exportRow struct {
 	body      []byte
 	hasBody   bool
 	anyNull   bool
+	sealed    bool
 }
 
 // exportWindow baut das Fenster-Prädikat als Klausel-Liste + Argumente —
@@ -183,12 +189,30 @@ func exportWindow(opts ExportOptions, until time.Time) (string, []any) {
 // Slim schreibt den Leerstring (Slimmed), EvictBodies schreibt NULL. Ein naiver
 // IS NOT NULL-Filter ließe Leer-Prompts als Replay-Kandidaten durch
 // (design/02 §5.2 — genau dieser Fehler steckte in der Erst-Inventur).
-const exportSelect = `
-	SELECT created_at, id::text, to_jsonb(t),
-	       (coalesce(request_system, '') <> '' OR coalesce(request_user, '') <> '')     AS has_body,
-	       (request_system IS NULL OR request_user IS NULL OR response_content IS NULL) AS any_null
+//
+// Aufgezeichnete Gateway-Zeilen (issue #571, llmlog.SQLBodiesServerAdminOnly:
+// metadata.gw.recorded, und fail-closed jede Gateway-Zeile ohne lesbare
+// Markierung) verlassen den Export versiegelt: ihre Bodies stehen als
+// Leerstring in der Zeile (NULL bleibt NULL — die Retention-Klassifikation
+// bleibt gleich), has_body ist false, und sealed zählt sie. Ihre Bodies
+// können Zugangsdaten im Klartext tragen; sie gehören in keinen Export und in
+// keine Trainings-Pipeline — gelesen werden sie nur von einem Server-Admin
+// (GET /api/llmlog/{id}, docs/operations.md „Recording a consumer").
+var exportSelect = `
+	SELECT created_at, id::text,
+	       CASE WHEN ` + exportSealed + ` THEN to_jsonb(t) || jsonb_build_object(
+	                 'request_system',   CASE WHEN t.request_system   IS NULL THEN NULL ELSE '' END,
+	                 'request_user',     CASE WHEN t.request_user     IS NULL THEN NULL ELSE '' END,
+	                 'response_content', CASE WHEN t.response_content IS NULL THEN NULL ELSE '' END)
+	            ELSE to_jsonb(t) END,
+	       (NOT ` + exportSealed + ` AND (coalesce(request_system, '') <> '' OR coalesce(request_user, '') <> '')) AS has_body,
+	       (request_system IS NULL OR request_user IS NULL OR response_content IS NULL) AS any_null,
+	       ` + exportSealed + ` AS sealed
 	FROM context_llm_log t
 	WHERE `
+
+// exportSealed ist die Versiegelungs-Bedingung über dem Alias t.
+var exportSealed = llmlog.SQLBodiesServerAdminOnly("t")
 
 // pageSQL liefert die Seiten-Query. Der Cursor trägt neben der Rowcompare das
 // redundante `created_at >= $k`: logisch impliziert, aber die einzige Form,
@@ -317,11 +341,14 @@ func exportPage(ctx context.Context, pool *pgxpool.Pool, cw io.Writer, q string,
 		defer rows.Close()
 		for rows.Next() {
 			var r exportRow
-			if err := rows.Scan(&r.createdAt, &r.id, &r.body, &r.hasBody, &r.anyNull); err != nil {
+			if err := rows.Scan(&r.createdAt, &r.id, &r.body, &r.hasBody, &r.anyNull, &r.sealed); err != nil {
 				return fmt.Errorf("llmlog export: scan: %w", err)
 			}
 			n++
 			sum.RowsTotal++
+			if r.sealed {
+				sum.RowsRecordedSealed++
+			}
 			switch {
 			case r.anyNull:
 				sum.RowsBodylessNull++

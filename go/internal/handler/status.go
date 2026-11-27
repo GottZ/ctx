@@ -307,11 +307,17 @@ type statusResponse struct {
 type llmlogWriteStatus struct {
 	InsertFailures int64 `json:"insert_failures"`
 	InsertDropped  int64 `json:"insert_dropped"`
+	// RecordedBodiesLost counts the rows of recording consumers written
+	// without a body they should carry (llmlog.RecordedBodiesLost; the row
+	// names it in metadata.gw.record_lost) — monotone since start, like the
+	// two above.
+	RecordedBodiesLost int64 `json:"recorded_bodies_lost"`
 }
 
 // readLLMLogWriteStatus is the production llmlogStats source.
 func readLLMLogWriteStatus() llmlogWriteStatus {
-	return llmlogWriteStatus{InsertFailures: llmlog.InsertFailures(), InsertDropped: llmlog.InsertDropped()}
+	return llmlogWriteStatus{InsertFailures: llmlog.InsertFailures(), InsertDropped: llmlog.InsertDropped(),
+		RecordedBodiesLost: llmlog.RecordedBodiesLost()}
 }
 
 // advisoryRow is one named reason on the admin status surface (A02-W4):

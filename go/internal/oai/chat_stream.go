@@ -146,6 +146,9 @@ func (c *chatCall) streamAttempt(st *walkState, spec llm.UpstreamSpec, lane stri
 			}
 			return werr
 		}
+		// A recording consumer's row keeps every relayed line (record.go):
+		// after the relay took it, so the stream's own path is unchanged.
+		c.recording.addStream(chunk.out)
 		st.relayed++
 		return nil
 	})

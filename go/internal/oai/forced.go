@@ -50,6 +50,7 @@ func registerForcedRow(l LimitReservation, record func(llmlog.GatewayRow), build
 	row.Gateway.Finish = llmlog.FinishAborted
 	row.Err = &llmlog.RedactedErr{Class: "shutdown", Code: CodeServiceUnavailable}
 	row.BodyLogging = llmlog.BodyLoggingNone
+	markForced(&row, row.Recorded) // a recording consumer's row says what it lacks
 	fs.OnForcedSettle(func(u dispatch.Usage) {
 		r := row
 		r.Telemetry = llmlog.Entry{RequiredSensitivity: required, Metadata: map[string]any{},

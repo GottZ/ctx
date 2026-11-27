@@ -489,7 +489,7 @@ func (c *rerankCall) admitLimiter() bool {
 	// The row the shutdown's forced settle writes should the request still
 	// be open after the HTTP drain (W06-13 (e)).
 	registerForcedRow(res, c.d.Record, func() llmlog.GatewayRow {
-		return llmlog.GatewayRow{Pipeline: rerankPipeline, ConsumerID: c.ca.ConsumerID,
+		return llmlog.GatewayRow{Pipeline: rerankPipeline, ConsumerID: c.ca.ConsumerID, Recorded: c.ca.RecordBodies,
 			Gateway: withFederation(c.r.Context(), llmlog.Gateway{Alias: c.alias.Name, Hop: c.rec.Hop, ClientReqID: clientRequestID(c.r), ModelKeyID: c.ca.ModelKeyID})}
 	}, string(c.required))
 	return true
@@ -1115,14 +1115,26 @@ func (c *rerankCall) record(plan Plan, served *backends.Backend, attempts []llm.
 		usage = llmlog.UsageBackend
 	}
 	request := ""
-	if c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil) {
+	rc := recording{on: c.ca.RecordBodies}
+	switch {
+	case rc.on:
+		// A recording consumer's row (issue #571): the whole text of the
+		// query and the documents, reserved against the recording account
+		// (record.go). The answer — indexes and scores, the echo repeats the
+		// documents — is not kept.
+		if n := rerankLogSize(c.req, noLogLimit); rc.reserve(int64(n)) {
+			request = rerankLogText(c.req, n, noLogLimit)
+		} else {
+			rc.loseBody(llmlog.RecordLostRequest)
+		}
+	case c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil):
 		// The row's text of the query and the documents is sized, then
 		// booked, then written (the embeddings route's rule).
-		if n := rerankLogSize(c.req); c.ledger.cover(int64(n)) {
-			request = rerankLogText(c.req, n)
+		if n := rerankLogSize(c.req, bodyLogTextMax); c.ledger.cover(int64(n)) {
+			request = rerankLogText(c.req, n, bodyLogTextMax)
 		}
 	}
-	c.d.Record(llmlog.GatewayRow{
+	row := llmlog.GatewayRow{
 		Pipeline:   rerankPipeline,
 		ConsumerID: c.ca.ConsumerID,
 		Gateway: withFederation(c.r.Context(), llmlog.Gateway{
@@ -1134,22 +1146,25 @@ func (c *rerankCall) record(plan Plan, served *backends.Backend, attempts []llm.
 		Err:         out.redacted,
 		Request:     request,
 		BodyLogging: c.s.BodyLogging,
-	})
+	}
+	rc.mark(&row)
+	c.d.Record(row)
 }
 
 // rerankLogSize is the length of rerankLogText: the query's text, a line
-// break and the documents' text (bodyLogSize of each raw value).
-func rerankLogSize(req *rerankRequest) int {
-	return bodyLogSize(req.queryRaw) + 1 + bodyLogSize(req.docsRaw)
+// break and the documents' text (bodyLogSizeN of each raw value, each up to
+// limit — bodyLogTextMax, or noLogLimit for a recorded row).
+func rerankLogSize(req *rerankRequest, limit int) int {
+	return bodyLogSizeN(req.queryRaw, limit) + 1 + bodyLogSizeN(req.docsRaw, limit)
 }
 
 // rerankLogText is the log row's text of the request, written once into
 // size bytes (bodyLogText's form over two values).
-func rerankLogText(req *rerankRequest, size int) string {
+func rerankLogText(req *rerankRequest, size, limit int) string {
 	var b strings.Builder
 	b.Grow(size)
-	bodyLogWalk(req.queryRaw, func(p []byte) { b.Write(p) })
+	bodyLogWalkN(req.queryRaw, limit, func(p []byte) { b.Write(p) })
 	b.WriteByte('\n')
-	bodyLogWalk(req.docsRaw, func(p []byte) { b.Write(p) })
+	bodyLogWalkN(req.docsRaw, limit, func(p []byte) { b.Write(p) })
 	return b.String()
 }

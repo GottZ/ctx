@@ -133,6 +133,11 @@ type Entry struct {
 	// persists as NULL instead of a fake 0 — Duration measures the wire
 	// call, and there was none.
 	NoWireCall bool
+
+	// recordedHeld is what a recorded gateway row's texts hold of the
+	// recording account (recorded.go); the writer releases it when the row
+	// is inserted, fails or is dropped. Set by GatewayEntry only.
+	recordedHeld int64
 }
 
 // StampPrompt records WHICH prompt body produced this row: metadata.prompt_id
@@ -285,6 +290,7 @@ func InsertDropped() int64 { return insertDropped.Load() }
 // closed pool — is allowed: the row is then a counted failure.
 func Record(pool *pgxpool.Pool, e Entry) {
 	if pool == nil || e.Pipeline == "" {
+		ReleaseRecorded(e.recordedHeld)
 		return
 	}
 	writerFor(pool).enqueue(e)
@@ -294,6 +300,7 @@ func (w *writer) enqueue(e Entry) {
 	w.mu.Lock()
 	if len(w.queue) >= maxQueuedInserts {
 		w.mu.Unlock()
+		ReleaseRecorded(e.recordedHeld)
 		insertDropped.Add(1)
 		warnLoss("llmlog: insert queue full, row dropped", e.Pipeline, nil)
 		return
@@ -332,6 +339,7 @@ func (w *writer) drain() {
 			slog.Debug("llmlog: insert failed", "pipeline", e.Pipeline, "error", err)
 			warnLoss("llmlog: insert failed, row lost", e.Pipeline, err)
 		}
+		ReleaseRecorded(e.recordedHeld) // the texts are no longer the writer's
 		w.pending.Add(-1)
 	}
 }
