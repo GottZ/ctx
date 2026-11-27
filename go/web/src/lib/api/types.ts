@@ -694,6 +694,8 @@ export interface LLMLogDetail {
   request_system: string | null
   request_user: string | null
   response_content: string | null
+  /** The row of a recording consumer (metadata.gw.recorded, issue #571): its bodies are whole and can hold credentials in clear text. */
+  recorded: boolean
 }
 
 // Source: go/internal/handler/llmlog.go (HandleLLMLogDetail happy path). An
@@ -2106,6 +2108,8 @@ export interface GatewayStatus {
   top_consumers_1h: GatewayTopConsumer[] | null
   consumers_used_1h: number
   consumers_expiring: number
+  /** Ids of the active consumers with record_bodies on, sorted (the tenant's own on the tenant path); [] when none. */
+  recording_consumers: string[]
   /** Server-admin only; not assigned by stampGateway yet (S3) — absent today. */
   instance_envelope?: Record<string, GatewayEnvelopeUse>
   /**

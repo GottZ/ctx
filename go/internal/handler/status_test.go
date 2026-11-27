@@ -296,8 +296,9 @@ func TestStatusGoldenKeys(t *testing.T) {
 	assertKeys(t, "advisories.row", advs[0], []string{"subject", "state"})
 
 	// W06-1: the llmlog write-path section — two process-wide loss counters,
-	// nothing else (no pipeline names, no error text: those are log material).
-	assertKeys(t, "llmlog", top["llmlog"], []string{"insert_failures", "insert_dropped"})
+	// nothing else (no pipeline names, no error text: those are log material);
+	// issue #571 adds the recording account's loss counter and fill.
+	assertKeys(t, "llmlog", top["llmlog"], []string{"insert_failures", "insert_dropped", "recorded_bodies_lost", "recorded_held_bytes"})
 
 	// FOLGE-Y: the query-synthesis latency block — exactly the four names
 	// the bench contract reads (p95_ms only when samples >= 20).

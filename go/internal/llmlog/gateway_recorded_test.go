@@ -104,6 +104,28 @@ func TestRecordedRowNamesWhatItLost(t *testing.T) {
 	}
 }
 
+// TestRecordedBodiesLostCounts: RecordGateway counts a recorded row written
+// without a body it should carry (llmlog.recorded_bodies_lost on the status
+// frame) — and nothing else: a whole recorded row, or an unrecorded row that
+// names a loss it cannot have, leaves the counter.
+func TestRecordedBodiesLostCounts(t *testing.T) {
+	before := RecordedBodiesLost()
+	whole := recordedRow(BodyLoggingNone, "public")
+	RecordGateway(nil, whole)
+	plain := recordedRow(BodyLoggingNone, "public")
+	plain.Recorded, plain.RecordLost = false, []string{RecordLostRequest}
+	RecordGateway(nil, plain)
+	if got := RecordedBodiesLost() - before; got != 0 {
+		t.Fatalf("a whole recorded row and an unrecorded one counted %d losses", got)
+	}
+	lost := recordedRow(BodyLoggingNone, "public")
+	lost.RecordLost, lost.RecordLostCause = []string{RecordLostResponse}, RecordLostMemory
+	RecordGateway(nil, lost)
+	if got := RecordedBodiesLost() - before; got != 1 {
+		t.Fatalf("a recorded row without its answer counted %d losses, want 1", got)
+	}
+}
+
 // recordedAccount resets the recording account for a test and checks it is
 // back at zero afterwards.
 func recordedAccount(t *testing.T) {

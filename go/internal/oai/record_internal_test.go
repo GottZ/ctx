@@ -90,7 +90,7 @@ func TestForcedRowOfARecordingConsumerNamesWhatItLacks(t *testing.T) {
 	}{
 		{chatPipeline, []string{llmlog.RecordLostRequest, llmlog.RecordLostResponse}},
 		{embedPipeline, []string{llmlog.RecordLostRequest}},
-		{rerankPipeline, []string{llmlog.RecordLostRequest}},
+		{rerankPipeline, []string{llmlog.RecordLostRequest, llmlog.RecordLostResponse}},
 	} {
 		row := llmlog.GatewayRow{Pipeline: c.pipeline}
 		markForced(&row, true)

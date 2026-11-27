@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -137,6 +138,22 @@ func TestV1RecordedConsumerRowAndItsReaders(t *testing.T) {
 	}
 	recID, recKey := mkConsumer("v1-rec-on", map[string]any{"record_bodies": true, "confirm_record_bodies": true})
 	plainID, plainKey := mkConsumer("v1-rec-off", nil)
+	// A recording consumer of another tenant: the tenant-admin's status must
+	// not name it, the server-admin's must.
+	status, body, resp = v1RecAPI(t, f, http.MethodPost, "/api/manage", v1RecAdminKey, map[string]any{
+		"action": "tenant-create", "data": map[string]any{"slug": "v1rec-other", "display_name": "v1 rec other"}})
+	otherTn, _ := resp["tenant"].(map[string]any)
+	otherTenant, _ := otherTn["id"].(string)
+	if status != http.StatusOK || otherTenant == "" {
+		t.Fatalf("tenant-create other: %d %s", status, body)
+	}
+	status, body, resp = v1RecAPI(t, f, http.MethodPost, "/api/manage", v1RecAdminKey, map[string]any{"action": "model-consumer-create",
+		"data": map[string]any{"label": "v1-rec-foreign", "tenant_id": otherTenant, "record_bodies": true, "confirm_record_bodies": true}})
+	foreign, _ := resp["consumer"].(map[string]any)
+	foreignID, _ := foreign["id"].(string)
+	if status != http.StatusOK || foreignID == "" {
+		t.Fatalf("foreign recording consumer: %d %s", status, body)
+	}
 
 	content := v1RecSecret + " " + strings.Repeat("0123456789abcdef", 5<<10) // 80 KiB
 	chat := `{"model":"` + v1ChatAlias + `","messages":[{"role":"user","content":"` + content + `"}]}`
@@ -191,12 +208,18 @@ func TestV1RecordedConsumerRowAndItsReaders(t *testing.T) {
 		}
 	})
 	t.Run("status", func(t *testing.T) {
-		for name, key := range map[string]string{"server_admin": v1RecAdminKey, "tenant_admin": tenantAdmin} {
-			st, b, out := v1RecAPI(t, f, http.MethodGet, "/api/status", key, nil)
+		both := []string{recID, foreignID}
+		sort.Strings(both)
+		for name, c := range map[string]struct {
+			key  string
+			want []string
+		}{"server_admin": {v1RecAdminKey, both}, "tenant_admin": {tenantAdmin, []string{recID}}} {
+			st, b, out := v1RecAPI(t, f, http.MethodGet, "/api/status", c.key, nil)
 			gw, _ := out["gateway"].(map[string]any)
-			ids, _ := gw["recording_consumers"].([]any)
-			if st != http.StatusOK || len(ids) != 1 || ids[0] != recID || strings.Contains(string(b), "Tr0ub4dor") {
-				t.Errorf("%s status: %d recording_consumers %v — want exactly [%s], no body", name, st, gw["recording_consumers"], recID)
+			raw, _ := json.Marshal(gw["recording_consumers"])
+			want, _ := json.Marshal(c.want)
+			if st != http.StatusOK || string(raw) != string(want) || strings.Contains(string(b), "Tr0ub4dor") {
+				t.Errorf("%s status: %d recording_consumers %s — want exactly %s, no body", name, st, raw, want)
 			}
 		}
 	})

@@ -426,6 +426,12 @@ func GatewayEntry(r GatewayRow) Entry {
 // and GatewayEntry for every other.
 func RecordedGatewayEntry(r GatewayRow) Entry {
 	e := gatewayRowBase(r, true)
+	if !backends.ValidSensitivity(backends.Sensitivity(e.RequiredSensitivity)) {
+		// The bodies are kept whatever the class; the defect is still logged
+		// as bodiesAllowed logs it for every other row.
+		wiringError(&lastSensWarn, "llmlog: a gateway row without a defined required_sensitivity — recorded whole (recording consumer)",
+			"pipeline", e.Pipeline, "required_sensitivity", cleanText(e.RequiredSensitivity, gatewayTokenMax))
+	}
 	e.RequestUser, e.ResponseContent = storable(r.Request), storable(r.Response)
 	e.recordedHeld = r.RecordedHeld
 	return e

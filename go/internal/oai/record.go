@@ -1,6 +1,7 @@
 package oai
 
 import (
+	"io"
 	"math"
 	"strings"
 
@@ -13,8 +14,9 @@ import (
 // client received (a non-streamed chat answer as written, a stream's data
 // lines as relayed). Every text is reserved against llmlog's recording
 // account (llmlog.ReserveRecorded) before it is made — never against the
-// request's in-flight budget, so the switch changes no booking, no refusal
-// and no answer of the request. A text the account cannot take is not made:
+// request's in-flight budget, so the switch changes no refusal and no answer
+// of the request (the one booking it drops is the body policy's own 64 KiB
+// log text at the request's end, which a recorded row does not take). A text the account cannot take is not made:
 // the row goes without it and names it (record_lost, cause "memory"). The
 // zero value records nothing; on is set once, from the door's ConsumerAuth.
 type recording struct {
@@ -70,7 +72,23 @@ func (r *recording) bytes(b []byte, body string) string {
 	return string(b)
 }
 
-// addStream appends one relayed data line of a stream. The buffer grows as
+// recordWriter hands the bytes written to the client to the capture of a
+// recording consumer's request — after the client write, so the answer the
+// client gets is the one it gets without the switch (the rerank answer,
+// which writeRerank writes piece by piece and never holds whole).
+type recordWriter struct {
+	w io.Writer
+	r *recording
+}
+
+func (t recordWriter) Write(p []byte) (int, error) {
+	n, err := t.w.Write(p)
+	t.r.addStream(p[:n])
+	return n, err
+}
+
+// addStream appends one piece of an answer written piece by piece — a
+// stream's relayed data line, a part of a rerank answer. The buffer grows as
 // strings.Builder.Grow grows it (to 2 × its capacity + the line, then the
 // allocator's size class); the new capacity is reserved before the growth
 // and the allocator's rounding right after it — the account holds the
@@ -141,15 +159,15 @@ func (r *recording) release() {
 
 // markForced puts the recording on the row the shutdown's forced settle
 // writes: recorded, without a body (it is built at the admission, before
-// there is an answer) — the request's text is named lost, and for chat the
-// answer too.
+// there is an answer) — the request's text is named lost, and for chat and
+// rerank the answer too (embeddings keep none).
 func markForced(row *llmlog.GatewayRow, on bool) {
 	if !on {
 		return
 	}
 	row.Recorded = true
 	row.RecordLost = []string{llmlog.RecordLostRequest}
-	if row.Pipeline == chatPipeline {
+	if row.Pipeline != embedPipeline {
 		row.RecordLost = append(row.RecordLost, llmlog.RecordLostResponse)
 	}
 	row.RecordLostCause = llmlog.RecordLostShutdown

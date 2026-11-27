@@ -18,8 +18,11 @@ import (
 // not against the request's in-flight budget: from the moment a route
 // captures a text (ReserveRecorded) until the writer has inserted the row or
 // lost it (queue full, failed insert). The request path books nothing for
-// them, so its bookings, its 503s and its answer are the same with and
-// without the switch; and the rows of recorded calls the writer has not
+// them, so its chain, its refusals and its answer are the same with and
+// without the switch — the one booking that differs is the body policy's own
+// log text (at most 64 KiB, booked at the request's end under
+// gateway.body_logging errors/full), which a recorded row does not take; and
+// the rows of recorded calls the writer has not
 // inserted yet — a slow database, a burst of large requests — hold at most
 // maxRecordedHeld bytes of text. A text the account cannot take is not
 // captured: the row is still written, without it, and says so

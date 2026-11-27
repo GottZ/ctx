@@ -176,11 +176,16 @@ type rerankCall struct {
 	// scores (sigmoid, in place) — one slice of the answer reserve, made
 	// once per request.
 	logits []float64
+	// recording is the capture of a recording consumer's request (record.go;
+	// off for every other consumer): the query and documents, and the answer
+	// as written to the client.
+	recording recording
 }
 
 func newRerankCall(d Deps, w http.ResponseWriter, r *http.Request, ca *auth.ConsumerAuth, entry time.Time, dialect RerankDialect) *rerankCall {
 	s := d.Settings()
 	c := &rerankCall{d: d, w: w, s: s, ca: ca, entry: entry, client: r.Context(), rec: AccessRecordFrom(r.Context()), dialect: dialect}
+	c.recording.on = ca != nil && ca.RecordBodies
 	if c.rec == nil {
 		c.rec = &AccessRecord{} // outside a model group: filled, never read
 	}
@@ -222,6 +227,7 @@ func (c *rerankCall) close() {
 	for _, stop := range c.stops {
 		stop()
 	}
+	c.recording.release() // what no row of this request took
 }
 
 func (c *rerankCall) refuse(code, message string, shouldRetry bool) {
@@ -942,7 +948,11 @@ func (c *rerankCall) success(st *rerankState) embedOutcome {
 	if returnDocs {
 		a.docs = c.req.docs
 	}
-	if err := writeRerank(c.w, a); err != nil {
+	var out io.Writer = c.w
+	if c.recording.on {
+		out = recordWriter{w: c.w, r: &c.recording} // the bytes the client was written, for its row
+	}
+	if err := writeRerank(out, a); err != nil {
 		slog.Warn("gateway: failed to write the answer", "error", err, "request_id", c.w.Header().Get("X-Request-ID"))
 		return embedOutcome{finish: llmlog.FinishAborted}
 	}
@@ -1114,19 +1124,18 @@ func (c *rerankCall) record(plan Plan, served *backends.Backend, attempts []llm.
 	if st.usage.PromptTokens > 0 {
 		usage = llmlog.UsageBackend
 	}
-	request := ""
-	rc := recording{on: c.ca.RecordBodies}
+	request, response := "", ""
 	switch {
-	case rc.on:
+	case c.recording.on:
 		// A recording consumer's row (issue #571): the whole text of the
-		// query and the documents, reserved against the recording account
-		// (record.go). The answer — indexes and scores, the echo repeats the
-		// documents — is not kept.
-		if n := rerankLogSize(c.req, noLogLimit); rc.reserve(int64(n)) {
+		// query and the documents and the answer as the client was written
+		// it (success), reserved against the recording account (record.go).
+		if n := rerankLogSize(c.req, noLogLimit); c.recording.reserve(int64(n)) {
 			request = rerankLogText(c.req, n, noLogLimit)
 		} else {
-			rc.loseBody(llmlog.RecordLostRequest)
+			c.recording.loseBody(llmlog.RecordLostRequest)
 		}
+		response = c.recording.streamText()
 	case c.s.BodyLogging == llmlog.BodyLoggingFull || (c.s.BodyLogging == llmlog.BodyLoggingErrors && out.redacted != nil):
 		// The row's text of the query and the documents is sized, then
 		// booked, then written (the embeddings route's rule).
@@ -1145,9 +1154,10 @@ func (c *rerankCall) record(plan Plan, served *backends.Backend, attempts []llm.
 		Attempts:    attempts,
 		Err:         out.redacted,
 		Request:     request,
+		Response:    response,
 		BodyLogging: c.s.BodyLogging,
 	}
-	rc.mark(&row)
+	c.recording.mark(&row)
 	c.d.Record(row)
 }
 

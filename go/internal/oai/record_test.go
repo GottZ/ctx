@@ -192,4 +192,8 @@ func TestRecordedRerankKeepsQueryAndDocuments(t *testing.T) {
 	if want := string(q) + "\n" + string(d); stored.RequestUser != want {
 		t.Errorf("recorded rerank request %d bytes, want query, line break and documents (%d bytes)", len(stored.RequestUser), len(want))
 	}
+	if stored.ResponseContent != string(on.body) || rows[0].Response != "" {
+		t.Errorf("recorded rerank answer %q, want the answer the client received %q (the unrecorded row keeps none: %q)",
+			stored.ResponseContent, on.body, rows[0].Response)
+	}
 }
