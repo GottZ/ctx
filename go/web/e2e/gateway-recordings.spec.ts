@@ -160,18 +160,38 @@ test.describe('recordings detail (#575)', () => {
 
   test('recordings: Stop aborts a running translation and asks for no further part', async ({ page }) => {
     await seedSession(page, { role: 'server-admin', theme: 'dark', capabilities: CAPS })
-    // hold the translation: the answer never comes until the test is done
-    let held = 0
-    await page.route('**/api/manage', async (route: Route) => {
-      let a: unknown
+    const isTranslate = (body: unknown): boolean => (body as { action?: unknown } | null)?.action === 'model-recording-translate'
+    // Stop must end the request on the wire, not only the page's state
+    const aborted: string[] = []
+    page.on('requestfailed', (r) => {
+      let body: unknown
       try {
-        a = (route.request().postDataJSON() as { action?: unknown } | null)?.action
+        body = r.postDataJSON()
       } catch {
-        a = undefined
+        body = undefined
       }
-      if (a !== 'model-recording-translate') return route.fallback()
+      if (isTranslate(body)) aborted.push(r.failure()?.errorText ?? '')
+    })
+    // hold the translation until the test releases it, then answer part 1 of
+    // 2: a client that kept the request would show it and ask for part 2
+    let held = 0
+    let release: () => void = () => {}
+    let late: Promise<void> = Promise.resolve()
+    await page.route('**/api/manage', async (route: Route) => {
+      let body: unknown
+      try {
+        body = route.request().postDataJSON()
+      } catch {
+        body = undefined
+      }
+      if (!isTranslate(body)) return route.fallback()
       held++
-      await new Promise(() => {})
+      late = new Promise<void>((r) => (release = r)).then(() =>
+        route
+          .fulfill({ json: { success: true, id: REC_ID, address: 'request/messages/1', chunk: 0, chunks: 2, language: 'en', text: 'LATE PART', model: 'm', generated: true } })
+          .catch(() => {}),
+      )
+      await late
     })
     await open(page, detail)
     const user = page.locator('[data-block="request/messages/1"]')
@@ -181,6 +201,13 @@ test.describe('recordings detail (#575)', () => {
     await user.getByRole('button', { name: 'Stop' }).click()
     await expect(user.getByRole('status')).toHaveText('stopped after 0 of ? parts')
     await expect(user.getByRole('button', { name: 'Translate' })).toBeEnabled()
+    await expect.poll(() => aborted.length, 'Stop aborts the request on the wire').toBe(1)
+    // the late answer (fulfilled after the abort, so it reaches nobody)
+    // changes nothing and asks for nothing
+    release()
+    await late
+    await expect(user.getByRole('status')).toHaveText('stopped after 0 of ? parts')
+    await expect(user.getByText('LATE PART')).toHaveCount(0)
     // the held route answers translate before the session mock would record
     // it, so the count of the route is the count of the calls: one part asked
     // for, none after Stop
