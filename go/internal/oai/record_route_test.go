@@ -144,6 +144,11 @@ func (s *recStore) Finish(ctx context.Context, id string, o llmlog.RecordedOutco
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		// A canceled statement commits nothing — whatever the gate's select
+		// picked when both were ready.
+		return err
+	}
 	if s.finishErr != nil {
 		return s.finishErr
 	}
@@ -756,7 +761,10 @@ func TestRecordingStatementSlots(t *testing.T) {
 // of the same request without the switch carries both; the recorded row is
 // marked with its recording id. Chat, a stream, embeddings and rerank.
 func TestRecordedLLMLogRowCarriesNoBodies(t *testing.T) {
-	check := func(t *testing.T, rig *chatRig, store *recStore) {
+	// loggedAnswer: the route hands its answer to the LLM-log row (a
+	// non-streamed chat answer); the stream, embeddings and rerank rows carry
+	// a request only — the positive control is explicit per route.
+	check := func(t *testing.T, rig *chatRig, store *recStore, loggedAnswer bool) {
 		t.Helper()
 		rows := rig.rows.all()
 		if len(rows) != 2 {
@@ -766,6 +774,10 @@ func TestRecordedLLMLogRowCarriesNoBodies(t *testing.T) {
 		if off.RequestUser == "" {
 			t.Fatalf("the unrecorded row carries no request under body_logging=full (handed %d bytes, sensitivity %q) — the test does not reach the body policy",
 				len(rows[0].Request), off.RequiredSensitivity)
+		}
+		if (off.ResponseContent != "") != loggedAnswer {
+			t.Fatalf("the unrecorded row's answer: %d bytes, want an answer %v for this route — the positive control does not hold",
+				len(off.ResponseContent), loggedAnswer)
 		}
 		if on.RequestSystem != "" || on.RequestUser != "" || on.ResponseContent != "" {
 			t.Errorf("the recorded llmlog row carries bodies (request %d, response %d bytes) — want none, the recording holds them",
@@ -787,7 +799,7 @@ func TestRecordedLLMLogRowCarriesNoBodies(t *testing.T) {
 				t.Fatalf("switch %v: %d %s", on, a.status, a.body)
 			}
 		}
-		check(t, rig, store)
+		check(t, rig, store, true)
 	})
 	t.Run("stream", func(t *testing.T) {
 		u := newUpstream(t, "")
@@ -802,7 +814,7 @@ func TestRecordedLLMLogRowCarriesNoBodies(t *testing.T) {
 				t.Fatalf("switch %v: stream %d %q", on, a.status, a.raw)
 			}
 		}
-		check(t, rig, store)
+		check(t, rig, store, false)
 	})
 	t.Run("embeddings", func(t *testing.T) {
 		e := newEmbedEngine(t, 8)
@@ -819,7 +831,7 @@ func TestRecordedLLMLogRowCarriesNoBodies(t *testing.T) {
 				t.Fatalf("switch %v: %d %s", on, a.status, a.body)
 			}
 		}
-		check(t, rig, store)
+		check(t, rig, store, false)
 	})
 	t.Run("rerank", func(t *testing.T) {
 		e := newRerankEngine(t)
@@ -832,7 +844,7 @@ func TestRecordedLLMLogRowCarriesNoBodies(t *testing.T) {
 				t.Fatalf("switch %v: %d %s", on, a.status, a.body)
 			}
 		}
-		check(t, rig, store)
+		check(t, rig, store, false)
 	})
 }
 
