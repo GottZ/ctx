@@ -2401,6 +2401,8 @@ export interface RecordingBlock {
   preview_truncated: boolean
   /** No preview inline: a payload, not valid UTF-8, or past the answer's preview budget. */
   preview_omitted: boolean
+  /** role, name, tool_call_id or media_type was cut to 256 bytes (the raw body holds it whole). */
+  labels_truncated?: boolean
 }
 
 /** model-recording-get. */

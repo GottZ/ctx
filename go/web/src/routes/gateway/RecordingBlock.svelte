@@ -89,6 +89,7 @@
       {#if b.name}<span class="meta">name <code>{b.name}</code></span>{/if}
       {#if b.tool_call_id}<span class="meta">call <code>{b.tool_call_id}</code></span>{/if}
       {#if b.media_type}<span class="meta">{b.media_type}</span>{/if}
+      {#if b.labels_truncated}<span class="chip" data-labels-cut title="A role, name, call id or media type was cut at 256 bytes; the raw body holds it whole">labels cut</span>{/if}
       <span class="meta">{fmtBytes(b.bytes)}</span>
       {#if !b.utf8}<span class="chip">not UTF-8</span>{/if}
     </div>

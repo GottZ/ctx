@@ -60,6 +60,11 @@ const (
 	// its default page): a request of thousands of messages is read page by
 	// page (block_offset).
 	recordingBlocksPage = 500
+	// recordingLabelBytes bounds each label of a block view — role, name,
+	// tool call id, media type: a message's labels stand in every block of
+	// the message, so an unbounded one would be written once per block (a
+	// 4 MiB name times a page of 500 parts). The raw body holds it whole.
+	recordingLabelBytes = 256
 	// recordingWindowDefault / recordingWindowMax bound a window read.
 	recordingWindowDefault = 64 << 10
 	recordingWindowMax     = 1 << 20
@@ -328,6 +333,25 @@ type recordingBlockView struct {
 	// PreviewOmitted: no preview inline — the block is a payload (an image,
 	// audio, a file), not valid UTF-8, or past the answer's preview budget.
 	PreviewOmitted bool `json:"preview_omitted"`
+	// LabelsTruncated: a label was cut to recordingLabelBytes.
+	LabelsTruncated bool `json:"labels_truncated,omitempty"`
+}
+
+// cutLabels cuts each label of b to recordingLabelBytes at a character
+// boundary (a copy, so the long value is not held); true when one was cut.
+func cutLabels(b *recblocks.Block) bool {
+	cut := false
+	for _, f := range []*string{&b.Role, &b.Name, &b.ToolCallID, &b.MediaType} {
+		if len(*f) <= recordingLabelBytes {
+			continue
+		}
+		n := recordingLabelBytes
+		for n > 0 && !utf8.RuneStart((*f)[n]) {
+			n--
+		}
+		*f, cut = strings.Clone((*f)[:n]), true
+	}
+	return cut
 }
 
 // recordingBlockViews renders the blocks with their previews — copies, the
@@ -337,6 +361,7 @@ func recordingBlockViews(blocks []recblocks.Block) []recordingBlockView {
 	budget := recordingPreviewBudget
 	for _, b := range blocks {
 		v := recordingBlockView{Block: b.WithoutContent()}
+		v.LabelsTruncated = cutLabels(&v.Block)
 		c := b.Content()
 		switch {
 		case !b.Inline || !b.UTF8 || budget <= 0:

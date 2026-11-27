@@ -94,6 +94,12 @@ describe('RecordingBlock — the original is text', () => {
     expect(root.querySelector('[data-original]')?.textContent).toBe(url)
   })
 
+  it('a block whose labels the server cut says so; one with whole labels does not', () => {
+    const cut = dom(model(block({ name: 'n'.repeat(256), labels_truncated: true })))
+    expect(cut.querySelector('[data-labels-cut]')?.textContent).toBe('labels cut')
+    expect(dom(model(block({ name: 'bob' }))).querySelector('[data-labels-cut]')).toBeNull()
+  })
+
   it('a payload shows its media type and size, no preview and no image', () => {
     const root = dom(model(block({ kind: 'image', media_type: 'image/png', bytes: 2048, inline: false, preview: '', preview_omitted: true, translatable: false })))
     expect(root.querySelector('img')).toBeNull()
