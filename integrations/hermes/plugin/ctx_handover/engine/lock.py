@@ -139,20 +139,30 @@ def _in_list(ids: Sequence[str]) -> str:
 
 
 def _busy_from_store(
-    signals: Callable, lineage: Sequence[str], session_key: str | None, reasons: list[str], warnings: list[str]
+    db, lineage: Sequence[str], session_key: str | None, reasons: list[str], warnings: list[str]
 ) -> list[dict]:
-    """``probe_busy`` through the store's own reads (``db.busy_signals``, the storage interface): the same queued
-    prompts and running delegations, matched to the lineage as the SQL path matches them."""
+    """``probe_busy`` through the store's own reads (``db.queued_prompt_count`` and ``db.inflight_delegations``, the
+    storage interface): the same queued prompts and running delegations, matched to the lineage as the SQL path
+    matches them. Each signal is read on its own, as the SQL path reads each table on its own: a read that fails is
+    a warning naming that signal, and the reason the other read confirmed stays."""
     try:
-        queued, running = signals(list(lineage))
+        queued = int(db.queued_prompt_count(list(lineage)))
     except Exception as exc:  # best effort like the SQL path: an unreadable signal is a warning, never an abort
         warnings.append(
-            f"could not fully check whether the session is in use: its queued prompts and delegated tasks are not "
-            f"readable ({exc.__class__.__name__}: {exc})"
+            f"could not fully check whether the session is in use: its queued prompts are not readable "
+            f"({exc.__class__.__name__}: {exc})"
+        )
+    else:
+        if queued > 0:
+            reasons.append(f"{queued} queued prompt(s) waiting for this session")
+    try:
+        running = db.inflight_delegations()
+    except Exception as exc:  # as above, for the second signal
+        warnings.append(
+            f"could not fully check whether the session is in use: its delegated tasks are not readable "
+            f"({exc.__class__.__name__}: {exc})"
         )
         return []
-    if int(queued) > 0:
-        reasons.append(f"{int(queued)} queued prompt(s) waiting for this session")
     delegations = []
     for d in running:
         linked = {str(d.get(k) or "") for k in ("origin_session_id", "parent_session_id")}
@@ -165,15 +175,14 @@ def _busy_from_store(
 
 def probe_busy(db, state_db: Path, info: SessionInfo, hermes_home: Path, session_key: str | None) -> BusyReport:
     """Queued prompts and live delegations make the session busy; background processes and attached cron jobs
-    are reported. A ``db`` with ``busy_signals`` (the storage interface, ``hostcompat.StoreSessionDB``) answers the
-    first two through the store; otherwise ``state.db`` is read over its own read-only connection."""
+    are reported. A ``db`` with ``queued_prompt_count`` (the storage interface, ``hostcompat.StoreSessionDB``)
+    answers the first two through the store; otherwise ``state.db`` is read over its own read-only connection."""
     lineage = [str(s) for s in info.lineage_ids] or [info.tip_id]
     reasons: list[str] = []
     warnings: list[str] = []
     delegations: list[dict] = []
-    signals = getattr(db, "busy_signals", None)
-    if callable(signals):
-        delegations = _busy_from_store(signals, lineage, session_key, reasons, warnings)
+    if callable(getattr(db, "queued_prompt_count", None)):
+        delegations = _busy_from_store(db, lineage, session_key, reasons, warnings)
         conn = None
     else:
         try:

@@ -41,7 +41,7 @@ def test_probe_busy_opens_state_db_read_only(session_db, make_session, hermes_ho
     assert report.busy is False and report.warnings == (), report
     if is_store_host():
         # the storage interface answers the probe (issue GottZ/ctx#570): no connection of the plugin's own on the
-        # database file at all. Mutant: probe_busy ignores ``busy_signals`` → the SQL path opens state.db.
+        # database file at all. Mutant: probe_busy ignores ``queued_prompt_count`` → the SQL path opens state.db.
         assert attempts == [], attempts
         return
     assert attempts, "probe_busy opened no connection on state.db"

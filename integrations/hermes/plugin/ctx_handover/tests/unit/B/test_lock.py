@@ -232,11 +232,9 @@ def test_probe_busy_idle(session_db, make_session, hermes_home):
     assert report.warnings == ()
 
 
-def test_probe_busy_queued_admission(session_db, make_session, hermes_home):
-    """A queued prompt admitted through the unified runtime's own path (``admit_session_input``; on a host with the
-    storage interface ``runtime.begin_epoch`` + ``admissions.admit``, read back through the store) makes the
-    session busy."""
-    tip = build(make_session, drivers=False)
+def _queue_prompt(session_db, tip: str) -> None:
+    """A queued prompt for ``tip``, admitted through the unified runtime's own path (``admit_session_input``; on a
+    host with the storage interface ``runtime.begin_epoch`` + ``admissions.admit``)."""
     if is_store_host():
         store = session_db.store
         epoch = store.runtime.begin_epoch(instance_id="test")
@@ -250,16 +248,12 @@ def test_probe_busy_queued_admission(session_db, make_session, hermes_home):
         admit_session_input(
             session_db, epoch=epoch, principal_id="local", session_id=tip, request_id="r1", payload={"text": "next"}
         )
-    report = lock.probe_busy(session_db, hermes_home / "state.db", describe(session_db, tip), hermes_home, None)
-    assert report.busy is True
-    assert any("queued prompt" in r for r in report.reasons)
 
 
-def test_probe_busy_running_delegation(session_db, make_session, hermes_home):
-    """A delegation recorded through the delegation tool's own writer (``_persist_dispatch``) makes it busy."""
+def _dispatch_delegation(tip: str) -> None:
+    """A running delegation of ``tip``, recorded through the delegation tool's own writer (``_persist_dispatch``)."""
     from tools import async_delegation
 
-    tip = build(make_session, drivers=False)
     async_delegation._persist_dispatch(
         {
             "delegation_id": "d1",
@@ -269,9 +263,82 @@ def test_probe_busy_running_delegation(session_db, make_session, hermes_home):
             "goal": "do it",
         }
     )
+
+
+def test_probe_busy_queued_admission(session_db, make_session, hermes_home):
+    """A queued prompt (``_queue_prompt``; on a host with the storage interface read back through the store) makes
+    the session busy."""
+    tip = build(make_session, drivers=False)
+    _queue_prompt(session_db, tip)
+    report = lock.probe_busy(session_db, hermes_home / "state.db", describe(session_db, tip), hermes_home, None)
+    assert report.busy is True
+    assert any("queued prompt" in r for r in report.reasons)
+
+
+def test_probe_busy_running_delegation(session_db, make_session, hermes_home):
+    """A delegation recorded through the delegation tool's own writer (``_dispatch_delegation``) makes it busy."""
+    tip = build(make_session, drivers=False)
+    _dispatch_delegation(tip)
     report = lock.probe_busy(session_db, hermes_home / "state.db", describe(session_db, tip), hermes_home, None)
     assert report.busy is True
     assert [d["delegation_id"] for d in report.delegations] == ["d1"]
+
+
+_SIGNAL_TABLES = {"queued prompts": "session_admissions", "delegated tasks": "async_delegations"}
+_SIGNAL_REASONS = {
+    "queued prompts": "1 queued prompt(s) waiting for this session",
+    "delegated tasks": "1 delegated task(s) still running",
+}
+
+
+@pytest.mark.parametrize("unreadable", ["queued prompts", "delegated tasks"])
+def test_probe_busy_one_unreadable_signal_keeps_the_other(
+    session_db, make_session, hermes_home, tmp_path, monkeypatch, unreadable
+):
+    """Each busy signal is read on its own: when one cannot be read, the reason the other one confirmed still makes
+    the session busy (``LocalSource.lock`` then refuses without ``--force``), and the failed read is a warning
+    naming that signal. With a prompt queued and a delegation running, the SQL path of a ``SessionDB`` host does so
+    when one of the two tables is missing (a copy of ``state.db`` without it); the store path of a storage-interface
+    host the same, with the same texts, when one repository read raises.
+
+    Mutant: the store path reads both signals in one step → one failing read drops the other's confirmed reason
+    and the session is reported idle."""
+    import sqlite3
+
+    tip = build(make_session, drivers=False)
+    _queue_prompt(session_db, tip)
+    _dispatch_delegation(tip)
+    state_db = hermes_home / "state.db"
+    if is_store_host():
+
+        def unavailable(self, *args, **kwargs):
+            raise RuntimeError("store unavailable")
+
+        repository, verb = {
+            "queued prompts": (session_db.store.admissions, "list"),
+            "delegated tasks": (session_db.store.coordination, "list_inflight_delegations"),
+        }[unreadable]
+        monkeypatch.setattr(type(repository), verb, unavailable)
+    else:
+        copy = tmp_path / "drifted" / "state.db"
+        copy.parent.mkdir()
+        src, dst = sqlite3.connect(state_db), sqlite3.connect(copy)
+        try:
+            src.backup(dst)
+            dst.execute(f"DROP TABLE {_SIGNAL_TABLES[unreadable]}")
+            dst.commit()
+        finally:
+            src.close()
+            dst.close()
+        state_db = copy
+    report = lock.probe_busy(session_db, state_db, describe(session_db, tip), hermes_home, None)
+    other = next(s for s in _SIGNAL_REASONS if s != unreadable)
+    assert report.busy is True, report
+    assert report.reasons == (_SIGNAL_REASONS[other],)
+    assert [w.split(" (", 1)[0] for w in report.warnings] == [
+        f"could not fully check whether the session is in use: its {unreadable} are not readable"
+    ]
+    assert [d["delegation_id"] for d in report.delegations] == ([] if unreadable == "delegated tasks" else ["d1"])
 
 
 def test_probe_busy_processes_and_cron(session_db, make_session, hermes_home):
@@ -314,22 +381,27 @@ def test_probe_busy_processes_and_cron(session_db, make_session, hermes_home):
 
 def test_probe_busy_store_failure_is_a_warning(session_db, make_session, hermes_home, monkeypatch):
     """On a host with the storage interface the queued prompts and delegations come from the store
-    (``StoreSessionDB.busy_signals``), never from the database file: a store that cannot answer is a warning, not
-    an abort and not "busy" (the SQL path's rule, O8); on a ``SessionDB`` host the file is read (below)."""
+    (``StoreSessionDB.queued_prompt_count`` and ``inflight_delegations``), never from the database file: a store
+    that cannot answer either is a warning per signal, not an abort and not "busy" (the SQL path's rule, O8); on a
+    ``SessionDB`` host the file is read (below)."""
     if not is_store_host():
-        assert not hasattr(session_db, "busy_signals")
+        assert not hasattr(session_db, "queued_prompt_count")
         pytest.skip("the store path exists on a storage-interface host only")
     tip = build(make_session, drivers=False)
 
-    def broken(lineage):
+    def broken(*args):
         raise RuntimeError("store unavailable")
 
-    monkeypatch.setattr(session_db.engine_db, "busy_signals", broken)
+    monkeypatch.setattr(session_db.engine_db, "queued_prompt_count", broken)
+    monkeypatch.setattr(session_db.engine_db, "inflight_delegations", broken)
     report = lock.probe_busy(
         session_db, hermes_home / "nope" / "state.db", describe(session_db, tip), hermes_home, None
     )
     assert report.busy is False
-    assert any("queued prompts and delegated tasks are not readable" in w for w in report.warnings)
+    assert [w.split(" (", 1)[0].rsplit(": ", 1)[1] for w in report.warnings] == [
+        "its queued prompts are not readable",
+        "its delegated tasks are not readable",
+    ]
 
 
 def test_probe_busy_schema_drift_is_a_warning(session_db, make_session, hermes_home, tmp_path):

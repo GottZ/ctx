@@ -649,17 +649,24 @@ class StoreSessionDB:
         return self._store.coordination.get_compression_lock_holder(session_id=session_id)
 
     # -- busy signals (``lock.probe_busy``) ------------------------------------------------------------------
-    def busy_signals(self, lineage: list[str]) -> tuple[int, list[dict]]:
-        """``(queued prompts for any session of lineage, running delegations)`` through the interface — the store's
-        own reads of what ``lock.probe_busy`` reads over SQL on the old host: admissions ``queued`` targeting a
-        lineage session, and every ``running`` delegation with ``delegation_id``, ``state``, ``dispatched_at``,
-        ``parent_session_id``, ``origin_session_id`` and ``origin_session`` (the caller matches them)."""
+    # Two reads, one per signal, so a failing one never takes the other's answer with it (``lock._busy_from_store``
+    # reads each on its own, as the SQL path of the old host reads each table on its own).
+    def queued_prompt_count(self, lineage: list[str]) -> int:
+        """Queued prompts for any session of ``lineage`` through the interface (``admissions.list``) — the store's own
+        read of what ``lock.probe_busy`` counts over SQL on the old host: admissions ``queued`` targeting a lineage
+        session."""
         queued = 0
         for session_id in lineage:
             for record in self._store.admissions.list(session_id=session_id, pending_only=True):
                 if str(getattr(record.status, "value", record.status)) == "queued":
                     queued += 1
-        delegations = [
+        return queued
+
+    def inflight_delegations(self) -> list[dict]:
+        """Every running delegation through the interface (``coordination.list_inflight_delegations``) with
+        ``delegation_id``, ``state``, ``dispatched_at``, ``parent_session_id``, ``origin_session_id`` and
+        ``origin_session`` (the caller matches them to the lineage, as over SQL on the old host)."""
+        return [
             {
                 "delegation_id": str(d.delegation_id),
                 "state": str(d.state),
@@ -670,7 +677,6 @@ class StoreSessionDB:
             }
             for d in self._store.coordination.list_inflight_delegations()
         ]
-        return queued, delegations
 
     # -- state_meta --------------------------------------------------------------------------------------------
     def get_meta(self, key: str) -> str | None:
