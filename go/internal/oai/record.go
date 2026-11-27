@@ -255,7 +255,7 @@ func (s *RecordingStage) begin(ca *auth.ConsumerAuth, r *http.Request) *requestR
 	if err != nil {
 		id = uuid.New()
 	}
-	rr := &requestRecording{stage: s, acct: recAccount, access: AccessRecordFrom(r.Context()), req: llmlog.RecordedRequest{
+	rr := &requestRecording{stage: s, acct: recAccount, access: AccessRecordFrom(r.Context()), client: r.Context(), req: llmlog.RecordedRequest{
 		ID: id.String(), ConsumerID: ca.ConsumerID, ModelKeyID: ca.ModelKeyID, Path: r.URL.Path,
 		ClientRequestID: clientRequestID(r), Declared: r.ContentLength,
 	}}
@@ -273,6 +273,9 @@ type requestRecording struct {
 	stage  *RecordingStage
 	acct   *recordingAccount
 	access *AccessRecord // the access log's record: the refusal's code
+	// client is the request's own context at the stage, which the door's
+	// registry ends with auth.ErrCredentialRevoked (release).
+	client context.Context
 	req    llmlog.RecordedRequest
 	stats  *recordingConsumerStats
 
@@ -663,13 +666,14 @@ func (rr *requestRecording) logUnfinished(err error) {
 		"answer_withheld", rr.withheld, "error", err)
 }
 
-// supersedeReplaced writes the outcome of a held answer that release
-// replaced with 503 recording_unavailable — its row's commit failed, and it
-// may have gone through all the same: that 503 supersedes whatever the row
-// holds. A failure stays counted as unfinished.
-func (rr *requestRecording) supersedeReplaced() {
+// supersedeReplaced writes the outcome o of a held answer that release
+// replaced — with 503 recording_unavailable when its row's commit failed
+// (it may have gone through all the same), with the 401 of a key revoked
+// after the commit —: o supersedes whatever the row holds. A failure stays
+// counted as unfinished.
+func (rr *requestRecording) supersedeReplaced(o llmlog.RecordedOutcome) {
 	rr.withheld = true
-	o := llmlog.RecordedOutcome{Status: http.StatusServiceUnavailable, Code: CodeRecordingUnavailable, Supersedes: true}
+	o.Supersedes = true
 	if err := rr.finish(context.Background(), o); err != nil {
 		rr.logUnfinished(err)
 		return
@@ -731,8 +735,10 @@ func (rr *requestRecording) endStage(p any, w http.ResponseWriter) {
 		_ = http.NewResponseController(w).Flush()
 	}
 	rr.end(code)
-	if p == nil && rr.release(w) {
-		rr.supersedeReplaced()
+	if p == nil {
+		if o := rr.release(w); o != nil {
+			rr.supersedeReplaced(*o)
+		}
 	}
 	recStats.done(rr.stats, rr.row, rr.unfinished, rr.unfinished && rr.streamed)
 }
@@ -847,33 +853,53 @@ func (a *renderedAnswer) Write(p []byte) (int, error) {
 // release writes the held answer once the request's outcome is decided:
 // as held when the row holds it (settled) or when the request never reached
 // its walk (no open row: a refusal in the gateway's own words, nothing a
-// backend sent); otherwise — the row was opened and could not take what the
-// client would get — 503 recording_unavailable in its place, from the
-// headers at the stage, flushed before the row's superseding attempt;
-// replaced reports that.
-func (rr *requestRecording) release(w http.ResponseWriter) (replaced bool) {
+// backend sent). Otherwise something else goes out in its place, from the
+// headers at the stage and flushed before the row's superseding attempt,
+// and release returns that outcome for the row (endStage supersedes it):
+// 503 recording_unavailable when the row was opened and could not take what
+// the client would get; the 401 invalid_api_key of a key that stopped
+// authenticating between the commit of an opened request's held answer and
+// this write (read on the request's own context, as heldStillServes does) —
+// the held answer can carry a backend's text, and a revoked key gets
+// nothing of it.
+func (rr *requestRecording) release(w http.ResponseWriter) *llmlog.RecordedOutcome {
 	rr.statusMu.Lock()
 	holding, code, body := rr.holding, rr.heldCode, rr.heldBody
 	rr.holding, rr.heldBody, rr.passed = false, nil, true
 	rr.statusMu.Unlock()
 	if !holding {
-		return false
+		return nil
 	}
-	if !rr.settled && rr.opened {
+	if rr.opened && (!rr.settled || errors.Is(context.Cause(rr.client), auth.ErrCredentialRevoked)) {
 		h := w.Header()
 		clear(h)
 		for k, v := range rr.entry {
 			h[k] = v
 		}
-		refuseRecording(rr.access, w)
+		if !rr.settled {
+			refuseRecording(rr.access, w)
+			_ = http.NewResponseController(w).Flush()
+			return &llmlog.RecordedOutcome{Status: http.StatusServiceUnavailable, Code: CodeRecordingUnavailable}
+		}
+		a := renderAnswer(WriteInvalidAPIKey)
+		if rr.access != nil {
+			rr.access.Reason = CodeInvalidAPIKey
+		}
+		for k, v := range a.header {
+			h[k] = v
+		}
+		w.WriteHeader(a.code)
+		if _, err := w.Write(a.body.Bytes()); err != nil {
+			slog.Warn("gateway: failed to write the refusal of a revoked key", "error", err, "recording_id", rr.req.ID)
+		}
 		_ = http.NewResponseController(w).Flush()
-		return true
+		return &llmlog.RecordedOutcome{Status: a.code, Code: CodeInvalidAPIKey, Response: a.body.Bytes()}
 	}
 	w.WriteHeader(code)
 	if _, err := w.Write(body); err != nil { //nolint:gosec // G705: body is the route's own error envelope (WriteCode, refuseParam — encoding/json's escape), held and written unchanged: the bytes the unrecorded path writes
 		slog.Warn("gateway: failed to write a held answer", "error", err, "recording_id", rr.req.ID)
 	}
-	return false
+	return nil
 }
 
 // refuseRecording answers a request whose recording failed: 503

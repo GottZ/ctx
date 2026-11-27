@@ -1332,3 +1332,48 @@ func TestRecordingForcedCopiesWaitWithoutBooking(t *testing.T) {
 	}
 	t.Logf("four waiting answers of %d B hold %d B", answer, waiting)
 }
+
+// TestRecordingHeldErrorWithheldWhenRevoked: a held error answer — here a
+// backend's rejection text the gateway relays — whose key is revoked while
+// its row commits it does not go out: the client gets 401 invalid_api_key,
+// and the row's outcome becomes that refusal with its bytes.
+func TestRecordingHeldErrorWithheldWhenRevoked(t *testing.T) {
+	u := newUpstream(t, recChatAnswer)
+	u.setRespond(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"` + recRejection + `","type":"invalid_request_error"}}`))
+	})
+	store := newRecStore(nil)
+	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withRecordings(store))
+	rig.setSettings(func(s *oai.Settings) { s.RelayUpstream4xxMessages = true })
+	rig.ca.Store(recordingConsumer(true))
+	gate := make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(gate) })
+	store.set(func(s *recStore) { s.finishGate = gate })
+	rv := newRevoker()
+	srv := serveHTTP(t, rv.wrap(rig.router))
+	done := make(chan chatAnswer, 1)
+	go func() { done <- postVia(t, srv, "/v1/chat/completions", chatBody("pub")) }()
+	if !waitFor(5*time.Second, func() bool { return store.inFinish.Load() == 1 }) {
+		t.Fatal("the held error's commit did not start")
+	}
+	if n := rv.revoke(); n != 1 {
+		t.Fatalf("revoked %d running requests, want 1", n)
+	}
+	once.Do(func() { close(gate) })
+	var a chatAnswer
+	select {
+	case a = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no answer after the revocation")
+	}
+	if code, _, _ := a.envelope(t); a.status != http.StatusUnauthorized || code != oai.CodeInvalidAPIKey || strings.Contains(string(a.body), "marker-571-rejected") {
+		t.Fatalf("answer %d %q %s — want 401 invalid_api_key, without the backend's text", a.status, code, a.body)
+	}
+	r := store.only(t)
+	if r.state != llmlog.RecordingDone || r.out.Status != http.StatusUnauthorized || r.out.Code != oai.CodeInvalidAPIKey || string(r.response) != string(a.body) {
+		t.Errorf("row: state %q status %d code %q answer %q — want done 401 invalid_api_key with the client's %q", r.state, r.out.Status, r.out.Code, r.response, a.body)
+	}
+}
