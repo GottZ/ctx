@@ -1005,10 +1005,11 @@ func (s *recordingStats) done(c *recordingConsumerStats, row, unfinished, stream
 // (gateway.recording.consumers).
 type RecordingConsumer struct {
 	ConsumerID string `json:"consumer_id"`
-	// Admitted requests passed the door as this consumer; each is in
-	// flight, recorded (its row is in context_llm_recordings) or
-	// unrecordable (no row could be written: an inference request was
-	// refused, not served; a model list may have been answered).
+	// Admitted requests passed the door as this consumer since Since; each
+	// is in flight, recorded (its row was written to context_llm_recordings
+	// — a count in this process's memory, which a deleted row does not
+	// lower) or unrecordable (no row could be written: an inference request
+	// was refused, not served; a model list may have been answered).
 	Admitted     int64 `json:"admitted"`
 	InFlight     int64 `json:"in_flight"`
 	Recorded     int64 `json:"recorded"`
