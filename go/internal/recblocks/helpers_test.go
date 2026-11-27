@@ -50,7 +50,7 @@ func rawOf(side string, body []byte) wb {
 
 // addrRE is the address grammar: a side, then fixed words or decimal
 // indices without leading zeros.
-var addrRE = regexp.MustCompile(`^(request|response)(/(messages|content|tool_calls|reasoning|tools|params|input|query|documents|choices|results|error|0|[1-9][0-9]*))*$`)
+var addrRE = regexp.MustCompile(`^(request|response)(/(messages|content|tool_calls|reasoning|refusal|function_call|tools|params|input|query|documents|choices|results|error|0|[1-9][0-9]*))*$`)
 
 var kinds = map[string]bool{
 	"text": true, "image": true, "audio": true, "file": true, "tool_call": true,

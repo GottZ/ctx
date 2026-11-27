@@ -200,7 +200,8 @@ type msgMeta struct {
 // message decomposes one chat message at base (request/messages/{i} or
 // response/choices/{idx}); textAddr is the address of a string content
 // (the message's own in a request, base/content in an answer). Its blocks
-// come in a fixed order: reasoning, content, tool calls.
+// come in a fixed order: reasoning, content, refusal, tool calls, the
+// legacy function_call.
 func (b *builder) message(base, textAddr string, raw []byte) {
 	o, ok := parseObject(raw)
 	if !ok {
@@ -217,9 +218,37 @@ func (b *builder) message(base, textAddr string, raw []byte) {
 	if c, ok := o.get("content"); ok && !isNull(c) {
 		b.content(base, textAddr, c, m)
 	}
+	if r, ok := o.str("refusal"); ok {
+		b.text(Block{Address: base + "/refusal", Kind: kindText, Role: m.role, Name: "refusal"}, r)
+	}
 	if tc, ok := o.get("tool_calls"); ok && !isNull(tc) {
 		b.toolCalls(base, m.role, tc)
 	}
+	if fc, ok := o.get("function_call"); ok && !isNull(fc) {
+		b.functionCall(base+"/function_call", m.role, fc)
+	}
+}
+
+// functionCall is the legacy single call of a message ({name, arguments}):
+// a tool_call block like toolCall's, without an id.
+func (b *builder) functionCall(addr, role string, raw []byte) {
+	blk := Block{Address: addr, Kind: kindToolCall, Role: role}
+	o, ok := parseObject(raw)
+	if !ok {
+		b.text(blk, raw)
+		return
+	}
+	blk.Name = o.text("name")
+	args, ok := o.get("arguments")
+	if !ok {
+		b.text(blk, raw)
+		return
+	}
+	if s, ok := decodeString(args); ok {
+		b.text(blk, s)
+		return
+	}
+	b.text(blk, args)
 }
 
 // reasoningOf is a message's or a delta's reasoning: "reasoning_content",

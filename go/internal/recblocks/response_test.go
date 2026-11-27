@@ -221,3 +221,16 @@ func TestStreamNothingParsed(t *testing.T) {
 	}
 	equalBlocks(t, sideBlocks(t, r, "response"), []wb{rawOf("response", []byte(bad))})
 }
+
+// TestRefusalAndFunctionCall: a message's refusal and its legacy
+// function_call are blocks of their own, in the request and in the answer.
+func TestRefusalAndFunctionCall(t *testing.T) {
+	req := `{"messages":[{"role":"assistant","content":null,"function_call":{"name":"lookup","arguments":"{\"q\":1}"}}]}`
+	ans := `{"choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"I can't help with that."}}]}`
+	r := recblocks.Decompose(answer("chat", "/v1/chat/completions", false, 200, req, ans))
+	fc := toolCallBlock("request/messages/0/function_call", "assistant", "lookup", "", `{"q":1}`)
+	equalBlocks(t, sideBlocks(t, r, "request"), []wb{fc})
+	ref := txt("response/choices/0/refusal", "assistant", "I can't help with that.")
+	ref.Name = "refusal"
+	equalBlocks(t, sideBlocks(t, r, "response"), []wb{ref})
+}

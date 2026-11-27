@@ -63,6 +63,14 @@ const (
 	RecordingTranslateMaxTokens = 4096
 )
 
+// recordingTranslateRequired is the call's sensitivity — a recording counts
+// as credentials — and recordingTranslateLocalOnly drops every external row
+// after the trust gate. One value each for the chain check and the walk.
+const (
+	recordingTranslateRequired  = backends.SensCredentials
+	recordingTranslateLocalOnly = true
+)
+
 // RecordingTranslateTimeout is the call's timeout when the chain row names
 // none for the chat role.
 const RecordingTranslateTimeout = 100 * time.Second
@@ -205,13 +213,15 @@ func recordingTranslatePrompt(in RecordingTranslateInput, tag string) string {
 // credentials, external rows dropped. *backends.ErrNoEligibleBackend when
 // nothing is left.
 func RecordingTranslateChain(pool *backends.Pool) ([]backends.Backend, error) {
-	chain, err := pool.Chain(backends.RoleChat, backends.SensCredentials, "")
+	chain, err := pool.Chain(backends.RoleChat, recordingTranslateRequired, "")
 	if err != nil {
 		return nil, err
 	}
-	chain = dropExternal(chain, backends.RoleChat)
+	if recordingTranslateLocalOnly {
+		chain = dropExternal(chain, backends.RoleChat)
+	}
 	if len(chain) == 0 {
-		return nil, &backends.ErrNoEligibleBackend{Role: backends.RoleChat, Required: backends.SensCredentials,
+		return nil, &backends.ErrNoEligibleBackend{Role: backends.RoleChat, Required: recordingTranslateRequired,
 			Excluded: []backends.ExclusionReason{{Backend: "*", Reason: "local-only call, all eligible backends external"}}}
 	}
 	return chain, nil
@@ -268,14 +278,14 @@ func TranslateRecordingBlock(ctx context.Context, c RecordingTranslateCall, in R
 	resp, err := ChainCall{
 		Pool:       c.Pool,
 		Role:       backends.RoleChat,
-		Required:   backends.SensCredentials,
+		Required:   recordingTranslateRequired,
 		Pipeline:   RecordingTranslatePipeline,
 		Prompt:     promptRecordingTranslate,
 		System:     recordingTranslateSystemPrompt,
 		User:       user,
 		Opts:       Options{Temperature: 0.2, NumPredict: RecordingTranslateMaxTokens, CapLocked: true},
 		DefTimeout: RecordingTranslateTimeout,
-		LocalOnly:  true,
+		LocalOnly:  recordingTranslateLocalOnly,
 		APIKeyID:   c.APIKeyID,
 		Quota:      c.Quota,
 		QuotaScope: c.QuotaScope,

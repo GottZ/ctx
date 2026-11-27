@@ -632,6 +632,22 @@ func TestRecordingViewContent(t *testing.T) {
 		if n := w.audits(t) - audits; n != 1 {
 			t.Errorf("audit rows: %d new, want 1", n)
 		}
+		// The rendering is kept nowhere: no audit row, no llmlog row, no
+		// recording carries a byte of it.
+		var kept int
+		if err := w.f.seed.QueryRow(ctx, `SELECT
+			  (SELECT count(*) FROM context_settings_audit
+			    WHERE strpos(COALESCE(old_value::text, '') || COALESCE(new_value::text, '') || metadata::text, $1) > 0)
+			+ (SELECT count(*) FROM context_llm_log
+			    WHERE strpos(COALESCE(request_system, '') || COALESCE(request_user, '') || COALESCE(response_content, '') || metadata::text, $1) > 0)
+			+ (SELECT count(*) FROM context_llm_recordings
+			    WHERE position(convert_to($1, 'UTF8') IN COALESCE(request_body, ''::bytea) || COALESCE(response_body, ''::bytea)) > 0)`,
+			"# Übersetzung").Scan(&kept); err != nil {
+			t.Fatal(err)
+		}
+		if kept != 0 {
+			t.Errorf("%d rows carry the translation", kept)
+		}
 		if status, body, _ := w.adminCall(t, "model-recording-translate", map[string]any{"id": id, "address": "request/messages/1", "language": "de", "text": "FOREIGN"}); status != http.StatusBadRequest {
 			t.Errorf("a text field: %d %s, want 400 — the block comes from the recording only", status, body)
 		}
