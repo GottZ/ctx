@@ -17,6 +17,7 @@
   import { ConsumerDetailModel } from './consumer.svelte'
   import { auditEntries, keyChain } from './chain'
   import { callRows } from './calls'
+  import { showRecordingsLink } from './recording-data'
   import { STATUS_LABEL, consumerTone, fmtDay, fmtMinute, keyTone, recordingText } from './format'
   import LimitsCard from './LimitsCard.svelte'
   import UsagePanel from './UsagePanel.svelte'
@@ -92,7 +93,13 @@
         <dd>{c.allowed_cidrs === null ? 'any source' : c.allowed_cidrs.join(', ')}</dd>
         {#if c.record_bodies}
           <dt>recording</dt>
-          <dd data-consumer-recording>{recordingText}</dd>
+          <dd data-consumer-recording>
+            {recordingText}
+            <!-- #575: the recordings view is server-admin only (guard + server tier) -->
+            {#if showRecordingsLink(session.caps, [c])}
+              <a href={`/gateway/recordings/${c.id}`} data-recordings-link>View recordings</a>
+            {/if}
+          </dd>
         {/if}
         <dt>last used</dt>
         <dd>{c.last_used_at === null ? 'never' : fmtMinute(c.last_used_at)}</dd>

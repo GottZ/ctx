@@ -1524,7 +1524,7 @@ export interface ConsumerView {
   /** null = any source address. */
   allowed_cidrs: string[] | null
   allow_plaintext: boolean
-  /** Recording (migration 197): every request of the consumer is held in full in context_llm_recordings before it is served — set by a server-admin, readable in the database only. */
+  /** Recording (migration 197): every request of the consumer is held in full in context_llm_recordings before it is served — set by a server-admin, readable in the database and by a server-admin on /gateway/recordings (#575). */
   record_bodies: boolean
   active: boolean
   status: ConsumerStatus
@@ -2283,3 +2283,159 @@ export interface BackendView {
   capabilities?: BackendCapabilities
 }
 // FOLGE-Z end ==================================================================
+
+// #575 recordings ==============================================================
+// The server-admin's view of context_llm_recordings: five POST /api/manage
+// actions model-recording-* (go/internal/handler/model_recordings.go,
+// model_recordings_translate.go; blocks: go/internal/recblocks). docs/api.md
+// "Recordings of a recording consumer".
+
+/** This process's counts of one recording consumer (oai.RecordingConsumer, GET /api/status gateway.recording). */
+export interface RecordingProcessCounts {
+  admitted: number
+  in_flight: number
+  recorded: number
+  unrecordable: number
+  unfinished: number
+  stream_answers_unrecorded: number
+}
+
+/** One consumer of model-recording-consumers (llmlog.RecordingConsumer + process). */
+export interface RecordingConsumerView {
+  consumer_id: string
+  /** null: the consumer row is gone (its recordings stay — no foreign key). */
+  label: string | null
+  tenant_id: string | null
+  tenant_slug: string | null
+  record_bodies: boolean
+  active: boolean
+  deleted: boolean
+  last_recorded_at: string | null
+  /** null when this ctxd process admitted none of its requests. */
+  process: RecordingProcessCounts | null
+}
+
+/** model-recording-consumers. */
+export interface RecordingConsumersResponse {
+  success: true
+  process_id: string
+  /** When this process's counts began. */
+  since: string
+  consumers: RecordingConsumerView[]
+}
+
+/** The op filter of model-recording-list (none = no route parsed the request). */
+export type RecordingOpFilter = 'chat' | 'embed' | 'rerank' | 'none'
+/** The state filter. */
+export type RecordingStateFilter = 'open' | 'done'
+/** The status-class filter (none = the gateway wrote no status). */
+export type RecordingStatusFilter = '2xx' | '3xx' | '4xx' | '5xx' | 'none'
+
+/** One recording without its bodies (llmlog.RecordingMeta). */
+export interface RecordingMeta {
+  id: string
+  consumer_id: string
+  created_at: string
+  finished_at: string | null
+  process_id: string
+  model_key_id: string | null
+  path: string
+  op: string | null
+  client_request_id: string | null
+  model: string | null
+  stream: boolean | null
+  declared_bytes: number | null
+  request_bytes: number
+  request_complete: boolean
+  /** open | done */
+  state: string
+  status: number | null
+  code: string | null
+  response_bytes: number
+  /** The retention NULLed the request body. */
+  request_cleared: boolean
+  /** No response body: cleared by the retention when response_bytes > 0, never recorded otherwise. */
+  response_null: boolean
+}
+
+/** model-recording-list. */
+export interface RecordingListResponse {
+  success: true
+  recordings: RecordingMeta[]
+  /** Opaque; null at the end of the consumer's line. */
+  next_cursor: string | null
+  /** Rows this call walked. */
+  scanned: number
+  /** A filtered walk stopped at its bound (2000 rows); next_cursor goes on from there. */
+  scan_limit_reached: boolean
+}
+
+/** One side of a recording (recblocks.Side). */
+export interface RecordingSide {
+  address: 'request' | 'response'
+  /** request: present | cleared | empty; response: present | cleared | none | pending */
+  state: string
+  /** json | not_json | not_utf8 — only when present. */
+  format?: string
+  bytes: number
+  stream_lines?: number
+  stream_lines_unparsed?: number
+}
+
+/** One block of a recording (recblocks.Block + its preview, recordingBlockView). */
+export interface RecordingBlock {
+  address: string
+  side: 'request' | 'response'
+  /** text | image | audio | file | tool_call | tool_result | json | tokens | error | raw */
+  kind: string
+  role?: string
+  name?: string
+  tool_call_id?: string
+  media_type?: string
+  bytes: number
+  utf8: boolean
+  translatable: boolean
+  /** false: a payload (image, audio, file) — read in windows only. */
+  inline: boolean
+  preview: string
+  preview_truncated: boolean
+  /** No preview inline: a payload, not valid UTF-8, or past the answer's preview budget. */
+  preview_omitted: boolean
+}
+
+/** model-recording-get. */
+export interface RecordingGetResponse {
+  success: true
+  recording: RecordingMeta
+  request: RecordingSide
+  response: RecordingSide
+  blocks: RecordingBlock[]
+}
+
+/** model-recording-read — one window; data is base64. */
+export interface RecordingReadResponse {
+  success: true
+  address: string
+  offset: number
+  limit: number
+  total: number
+  eof: boolean
+  /** Only for a block (not for the whole-body addresses request/response). */
+  utf8?: boolean
+  data: string
+}
+
+/** model-recording-translate — one chunk, generated by a model, stored nowhere. */
+export interface RecordingTranslateResponse {
+  success: true
+  id: string
+  address: string
+  chunk: number
+  chunks: number
+  language: string
+  /** Markdown. */
+  text: string
+  model: string
+  generated: true
+}
+// #575 recordings end ==========================================================

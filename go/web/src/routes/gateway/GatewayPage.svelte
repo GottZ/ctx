@@ -42,6 +42,7 @@
   import { STATUS_LABEL, cancelledText } from './format'
   import { canRotate } from './rotate'
   import { canEditPolicy, canReactivate, deactivateTyped, hintTail } from './rows'
+  import { showRecordingsLink } from './recording-data'
 
   const model = new ConsumersModel()
 
@@ -219,6 +220,13 @@
         </div>
       {/if}
     </form>
+
+    <!-- #575: the recordings view — server-admin only, and only while a listed consumer records -->
+    {#if showRecordingsLink(session.caps, model.consumers)}
+      <p class="note" data-recordings-link-row>
+        A listed consumer records its requests in full. <a href="/gateway/recordings">Recordings</a>
+      </p>
+    {/if}
 
     {#if session.caps.mintModelKeys}
       <div class="page-actions">

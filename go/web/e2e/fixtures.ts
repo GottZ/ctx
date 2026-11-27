@@ -11,6 +11,7 @@ import type { Page, Route } from '@playwright/test'
 import { workflowMock } from './issue-fixtures'
 import { ISSUES_BASE } from '../src/lib/api/issues'
 import { PanelWorld, gatewayStatusSections, mockStartLimits, panelGet, type PanelSeed } from './gateway-panels-fixtures'
+import { recordingsManage } from './recordings-fixtures'
 
 export type Role = 'server-admin' | 'tenant-admin' | 'member'
 
@@ -1830,6 +1831,11 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
             json: { success: false, error: fault.error ?? DEFAULT_ERROR[fault.status] ?? 'error' },
           })
         }
+      }
+      // #575 recordings: the five server-admin-only model-recording-* actions (recordings-fixtures.ts)
+      {
+        const r = recordingsManage(action, data, opts.role, state)
+        if (r !== null) return route.fulfill({ status: r.status, json: r.json })
       }
       // Model API consumer list (W05-05): role/state-aware, so it is served
       // here rather than in the role-agnostic manageFixture layer.

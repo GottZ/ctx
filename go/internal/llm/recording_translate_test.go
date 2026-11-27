@@ -2,6 +2,8 @@ package llm
 
 import (
 	"errors"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -156,6 +158,35 @@ func TestRecordingLanguageIsClosed(t *testing.T) {
 	for code, name := range RecordingLanguages {
 		if len(code) != 2 || name == "" || strings.ContainsAny(name, "\n\r") {
 			t.Errorf("language %q: %q", code, name)
+		}
+	}
+}
+
+// TestRecordingLanguagesMatchTheSPA: the SPA offers exactly the server's
+// closed set (go/web/src/lib/api/recordings.ts RECORDING_LANGUAGES) — a code
+// only one side knows is a select option that answers 400 or a language the
+// page never offers.
+func TestRecordingLanguagesMatchTheSPA(t *testing.T) {
+	src, err := os.ReadFile("../../web/src/lib/api/recordings.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(src)
+	i := strings.Index(text, "export const RECORDING_LANGUAGES")
+	j := strings.Index(text[max(i, 0):], "\n}")
+	if i < 0 || j < 0 {
+		t.Fatal("RECORDING_LANGUAGES not found in recordings.ts")
+	}
+	spa := map[string]string{}
+	for _, m := range regexp.MustCompile(`(?m)^\s+([a-z]{2}): '([^']+)',`).FindAllStringSubmatch(text[i:i+j], -1) {
+		spa[m[1]] = m[2]
+	}
+	if len(spa) != len(RecordingLanguages) {
+		t.Errorf("the SPA offers %d languages, the server takes %d", len(spa), len(RecordingLanguages))
+	}
+	for code, name := range RecordingLanguages {
+		if spa[code] != name {
+			t.Errorf("language %s: server %q, SPA %q", code, name, spa[code])
 		}
 	}
 }

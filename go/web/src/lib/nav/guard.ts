@@ -14,7 +14,7 @@
 // (viewTenants); /tenant (+/tenant/*) needs tenant-admin or higher
 // (manageTenantKeys); /gateway (+/gateway/*, W05-05) needs viewModelApi —
 // server-admin always, tenant-admin only while model_api.enabled, member
-// never. `loading` → ALWAYS null: no redirect during the
+// never — except /gateway/recordings (+/*, #575), server-admin only. `loading` → ALWAYS null: no redirect during the
 // session-restore race (R6), else a deep link would kick the user out before
 // whoami resolves. Visibility is UX only — the real authorization stays
 // server-side (RequireAdmin / RequireAdminOrTenantAdmin, R2); this redirect is
@@ -41,15 +41,22 @@ export function landingFor(caps: Capabilities): LandingPath {
  * Tier-gated area prefixes: each prefix paired with the capability it requires.
  * Matched prefix-style (`p === prefix || p.startsWith(`${prefix}/`)`, same as
  * areaMode / the reserved namespace) so deep sub-routes (/admin/tenants,
- * /tenant/backends) inherit their area's gate. Prefixes are disjoint, so match
- * order is irrelevant.
+ * /tenant/backends) inherit their area's gate. The FIRST matching prefix
+ * decides: the top-level prefixes are disjoint, and the one nested, stricter
+ * prefix (/gateway/recordings) stands before the area it lies in.
  */
 const TIER_GATED: ReadonlyArray<readonly [string, (caps: Capabilities) => boolean]> = [
   ['/admin', (caps) => caps.viewTenants], // server-admin only
   ['/tenant', (caps) => caps.manageTenantKeys], // tenant-admin or higher
+  // Recordings of the recording consumers (#575): a recording holds a request
+  // whole, credentials in clear text included — server-admin only, like the
+  // five model-recording-* actions behind it. Stricter than its area, so it
+  // must stand BEFORE /gateway (a tenant-admin with the gateway on enters
+  // /gateway, never this).
+  ['/gateway/recordings', (caps) => caps.viewTenants],
   // Model API area (design/05 §4.6): a tier AND the gateway flag below
   // server-admin. Disjoint from /admin and /tenant — the peer page lives under
-  // /admin (/admin/peers), never as a stricter sub-prefix of /gateway.
+  // /admin (/admin/peers).
   ['/gateway', (caps) => caps.viewModelApi],
 ]
 

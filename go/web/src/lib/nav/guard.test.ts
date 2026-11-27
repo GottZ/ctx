@@ -151,6 +151,27 @@ describe('guardArea', () => {
     expect(guardArea('/tenant', tenantAdminGatewayOff)).toBeNull()
   })
 
+  it('/gateway/recordings is server-admin only — the stricter prefix wins over /gateway (#575)', () => {
+    // Recordings carry credentials in clear text: a tenant-admin who may enter
+    // /gateway must never reach them; the first match of TIER_GATED decides,
+    // so the sub-prefix stands before /gateway.
+    for (const path of ['/gateway/recordings', '/gateway/recordings/01900000-0000-7000-8000-00000000c0a6', '/gateway/recordings/c/r']) {
+      expect(guardArea(path, member), path).toBe('/home')
+      expect(guardArea(path, memberGatewayOn), path).toBe('/home')
+      expect(guardArea(path, tenantAdmin), path).toBe('/status')
+      expect(guardArea(path, tenantAdminGatewayOn), path).toBe('/status')
+      expect(guardArea(path, serverAdmin), path).toBeNull()
+      expect(guardArea(path, serverAdminGatewayOff), path).toBeNull()
+      expect(guardArea(path, loading), path).toBeNull()
+    }
+    // the prefix stops at a path boundary: /gateway/recordingsx is /gateway's
+    expect(guardArea('/gateway/recordingsx', tenantAdminGatewayOn)).toBeNull()
+    expect(guardArea('/gateway/recordingsx', member)).toBe('/home')
+    // /gateway itself keeps its own gate for the tenant-admin
+    expect(guardArea('/gateway', tenantAdminGatewayOn)).toBeNull()
+    expect(guardArea('/gateway/consumers/x', tenantAdminGatewayOn)).toBeNull()
+  })
+
   it('the workflow surface stays ungated for every tier (deep-link renders EmptyState, U04)', () => {
     // design 04 §4.1.4: /issues, /issues/:id, /board are member surfaces — the
     // guard never redirects them; visibility is the viewWorkflow flag's job, the
