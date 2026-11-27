@@ -286,14 +286,19 @@ def _new_messages(messages: list[dict]) -> list:
     return rows
 
 
-def _media_root() -> str:
-    """The profile's retained media root a session delete names (``gateway.session_ingress_media.native_inputs_root``
-    is not public: the same folder from the public ``gateway.platforms.base.get_document_cache_dir``)."""
+def _media_root(home: Path) -> str:
+    """The retained media root a session delete names for the profile at ``home`` — Hermes' own
+    ``gateway.session_ingress_media.native_inputs_root`` (not public): ``native-inputs`` under the profile's document
+    cache, resolved. The folder is named without creating anything: ``gateway.platforms.base.get_document_cache_dir``
+    creates the cache and raises where it cannot (a regular file at ``cache/documents``), and a delete — the rollback
+    of a failed import — must run all the same. ``hermes_constants.get_hermes_dir`` names the cache as
+    ``get_document_cache_dir`` does (a populated legacy ``document_cache/`` first)."""
     try:
-        from gateway.platforms.base import get_document_cache_dir
+        from hermes_constants import get_hermes_dir
     except ImportError as exc:
-        raise _missing("gateway.platforms.base.get_document_cache_dir") from exc
-    return str((Path(get_document_cache_dir()) / "native-inputs").resolve())
+        raise _missing("hermes_constants.get_hermes_dir") from exc
+    cache = get_hermes_dir("cache/documents", "document_cache", home=Path(home))
+    return str((Path(cache) / "native-inputs").resolve())
 
 
 _collected_handles: queue.SimpleQueue = queue.SimpleQueue()
@@ -350,6 +355,7 @@ class StoreSessionDB:
         self.MAX_TITLE_LENGTH = int(MAX_TITLE_LENGTH)
         self.CANONICAL_BOT_CHAT_TITLE = str(CANONICAL_BOT_CHAT_TITLE)
         self.db_path = store_location(scope)
+        self._home = Path(scope.profile_dir)
         _ensure_reaper()
         self._store = open_persistence(scope, eager=True)
         self._finalizer = weakref.finalize(self, _collected_handles.put, self._store)
@@ -428,9 +434,10 @@ class StoreSessionDB:
     def delete_session(self, session_id: str, include_compression_chain: bool = False) -> bool:
         """The store's delete (lineage, delegate children, ids retired) — without Hermes' ``on_session_delete``
         hook and transcript-file clean-up, which run only in the core's private ``session_retention``; the engine
-        deletes only sessions it imported itself and never showed (README, Limits)."""
+        deletes only sessions it imported itself and never showed (README, Limits). The media root is this store's
+        profile's (``_media_root``), named without creating a folder."""
         removed = self._store.sessions.delete(
-            session_id, include_compression_chain=bool(include_compression_chain), media_root=_media_root()
+            session_id, include_compression_chain=bool(include_compression_chain), media_root=_media_root(self._home)
         )
         return bool(removed)
 

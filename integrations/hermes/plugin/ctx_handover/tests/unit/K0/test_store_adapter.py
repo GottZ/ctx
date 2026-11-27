@@ -120,6 +120,59 @@ def test_batch_writers_take_display_metadata_as_object_or_json_text(session_db, 
     assert last.get("display_metadata") == stored
 
 
+def test_delete_names_the_core_s_media_root_without_creating_it(session_db, hermes_home, tmp_path):
+    """``delete_session`` names the media root Hermes' own delete names (``native_inputs_root`` of the store's
+    profile) and creates nothing to name it: for the ``HERMES_HOME`` profile, for a profile bound as the context's
+    home (``set_hermes_home_override``), for one whose legacy ``document_cache/`` holds files, and for a store opened
+    at another profile than the active one (that store's profile's root, not the active one's).
+
+    Mutant: the media root from ``get_document_cache_dir()`` → naming it creates the profile's cache folder, and a
+    store of another profile names the active profile's root."""
+    if not is_store_host():
+        pytest.skip("the adapter exists on a storage-interface host only")
+    from gateway.session_ingress_media import native_inputs_root
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    from ctx_handover.tests.fakes.hoststore import open_session_db
+
+    def core_root(home=None) -> str:
+        token = None if home is None else set_hermes_home_override(home)
+        try:
+            return str(native_inputs_root())
+        finally:
+            if token is not None:
+                reset_hermes_home_override(token)
+
+    def tree(home) -> list[str]:
+        return sorted(str(p.relative_to(home)) for p in home.rglob("*"))
+
+    before = tree(hermes_home)
+    named = hostcompat._media_root(session_db.engine_db._home)
+    assert tree(hermes_home) == before
+    assert named == core_root()
+
+    work = tmp_path / "root" / "profiles" / "work"
+    work.mkdir(parents=True)
+    legacy = tmp_path / "root" / "profiles" / "legacy"
+    (legacy / "document_cache").mkdir(parents=True)
+    (legacy / "document_cache" / "kept.pdf").write_bytes(b"%PDF-1.7")
+    for home in (work, legacy):
+        db = open_session_db(home / "state.db")
+        try:
+            before = tree(home)
+            token = set_hermes_home_override(home)
+            try:
+                named = hostcompat._media_root(db.engine_db._home)
+                assert tree(home) == before
+                assert named == str(native_inputs_root())
+            finally:
+                reset_hermes_home_override(token)
+            assert hostcompat._media_root(db.engine_db._home) == core_root(home) != core_root()
+        finally:
+            db.close()
+    assert core_root(legacy).startswith(str((legacy / "document_cache").resolve()))
+
+
 def test_a_busy_store_in_a_lease_call_is_not_acquired(session_db, make_session, ledger, monkeypatch):
     """The store's ``StoreContention`` in a lease call reaches ``lock`` as the ``sqlite3.OperationalError`` it
     treats as "not acquired": ``acquire`` refuses (``SessionBusy``) and ``refresh`` reports a lost lease — never an

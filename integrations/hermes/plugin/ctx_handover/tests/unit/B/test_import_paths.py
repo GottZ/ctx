@@ -106,6 +106,38 @@ def test_import_verify_failed_discards(make_session, session_db, target_db, stor
     assert all(target_db.get_session(s.new_id) is None for s in p.segments)
 
 
+def test_import_rollback_deletes_without_a_document_cache(
+    make_session, session_db, target_db, store, source_paths, target_cwd, hermes_home, target_home
+):
+    """A failed import removes what it wrote even where the profile's document cache cannot be created (a regular
+    file at ``cache/documents``, in the active profile and in the target's): the media root a delete of the
+    storage interface names is determined without creating a folder, so the delete runs and no imported session stays
+    hidden in the store [I3].
+
+    Mutant: the media root taken from ``get_document_cache_dir()``, which creates the folder → the delete raises
+    before it runs and the imported segments stay."""
+    import shutil
+
+    tip = rich_lineage(make_session)
+    _info, cap = export(session_db, store, tip, source_paths)
+    capsule = session_export.read_capsule(store, cap.capsule_id, max_json_bytes=64 * 1024**2)
+    page = capsule["segments"][-1]["pages"][0]
+    forged = store.forge_capsule(cap.capsule_id, page, lambda data: data.replace(b"user ", b"usr! ", 1))
+    for home in (hermes_home, target_home):
+        documents = home / "cache" / "documents"
+        if documents.is_dir():
+            shutil.rmtree(documents)
+        documents.parent.mkdir(parents=True, exist_ok=True)
+        documents.write_text("not a folder")
+    p = plan(target_db, capsule, target_cwd)
+    with pytest.raises(VerifyFailed):
+        session_import.import_hidden(target_db, store, forged, p)
+    assert all(target_db.get_session(s.new_id) is None for s in p.segments)
+    listed = {r["id"] for r in target_db.list_sessions_rich(limit=100, include_hidden=True, include_children=True)}
+    assert not listed & {s.new_id for s in p.segments}
+    assert all((home / "cache" / "documents").is_file() for home in (hermes_home, target_home))
+
+
 def test_import_refuses_object_readdressed_under_old_id(
     make_session, session_db, target_db, store, source_paths, target_cwd
 ):
