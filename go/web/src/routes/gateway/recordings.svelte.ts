@@ -34,6 +34,7 @@ import {
 import type {
   RecordingBlock,
   RecordingConsumerView,
+  RecordingGetResponse,
   RecordingListResponse,
   RecordingMeta,
   RecordingOpFilter,
@@ -425,12 +426,22 @@ function sideReader(api: RecordingsApi, id: string, side: RecordingSide | null, 
   return new WindowReader(api, id, address, { utf8: side?.format === 'not_utf8' ? false : null })
 }
 
-/** One recording as blocks. */
+/**
+ * One recording as blocks, read a page at a time: the server answers at most
+ * 500 blocks per call (block_offset / blocks_total), so a request of 100 000
+ * messages never arrives — nor renders — whole; Load more blocks appends the
+ * next page. Every read carries an AbortSignal: leaving the page cancels it.
+ */
 export class RecordingDetailModel {
   recording = $state<RecordingMeta | null>(null)
   request = $state<RecordingSide | null>(null)
   response = $state<RecordingSide | null>(null)
+  /** The loaded blocks, in the server's order (request first, then the answer's) — pages appended. */
   views = $state.raw<BlockModel[]>([])
+  /** All blocks of the recording (the server's blocks_total). */
+  blocksTotal = $state(0)
+  loadingMoreBlocks = $state(false)
+  moreBlocksError = $state<RecordingErrorState | null>(null)
   status = $state<ResourceStatus>('idle')
   /** The server answered 404 not_found. */
   notFound = $state(false)
@@ -445,6 +456,9 @@ export class RecordingDetailModel {
 
   readonly #api: RecordingsApi
   #gen = 0
+  #id = ''
+  /** The running detail read (first page or a next one). */
+  #ctrl: AbortController | null = null
   #sides = $state.raw<Record<'request' | 'response', WindowReader>>({
     request: new WindowReader({}, '', 'request', { utf8: null }),
     response: new WindowReader({}, '', 'response', { utf8: null }),
@@ -464,6 +478,19 @@ export class RecordingDetailModel {
     return this.views.filter((v) => v.block.side === 'response')
   }
 
+  /** Blocks of the recording that are not loaded yet. */
+  get hasMoreBlocks(): boolean {
+    return this.status === 'ready' && this.views.length < this.blocksTotal
+  }
+
+  #read(offset: number | undefined): { ctrl: AbortController; run: Promise<RecordingGetResponse> } {
+    this.#ctrl?.abort()
+    const ctrl = new AbortController()
+    this.#ctrl = ctrl
+    const opts = offset === undefined ? { signal: ctrl.signal } : { blockOffset: offset, signal: ctrl.signal }
+    return { ctrl, run: this.#api.get(this.#id, opts) }
+  }
+
   /** The raw reader of a whole body. */
   sideReader(address: 'request' | 'response'): WindowReader {
     return this.#sides[address]
@@ -472,35 +499,68 @@ export class RecordingDetailModel {
   async load(id: string): Promise<void> {
     const gen = ++this.#gen
     this.#disposeParts()
+    this.#id = id
     this.status = 'loading'
     this.error = null
     this.notFound = false
+    this.moreBlocksError = null
+    this.loadingMoreBlocks = false
+    const { ctrl, run } = this.#read(undefined)
     try {
-      const res = await this.#api.get(id)
-      if (gen !== this.#gen) return
+      const res = await run
+      if (gen !== this.#gen || ctrl.signal.aborted) return
       this.recording = res.recording
       this.request = res.request
       this.response = res.response
       this.views = res.blocks.map((b) => new BlockModel(this.#api, res.recording.id, b, this.language))
+      this.blocksTotal = res.blocks_total
       this.#sides = {
         request: sideReader(this.#api, res.recording.id, res.request, 'request'),
         response: sideReader(this.#api, res.recording.id, res.response, 'response'),
       }
       this.status = 'ready'
     } catch (e) {
-      if (gen !== this.#gen) return
+      if (gen !== this.#gen || ctrl.signal.aborted) return
       const err = recordingError(toApiError(e))
       this.recording = null
       this.request = null
       this.response = null
       this.views = []
+      this.blocksTotal = 0
       this.error = err
       this.notFound = err.code === 'not_found'
       this.status = 'error'
+    } finally {
+      if (this.#ctrl === ctrl) this.#ctrl = null
+    }
+  }
+
+  /** Append the next page of blocks (block_offset = the blocks loaded so far). */
+  async loadMoreBlocks(): Promise<void> {
+    if (!this.hasMoreBlocks || this.loadingMoreBlocks) return
+    const gen = this.#gen
+    this.loadingMoreBlocks = true
+    this.moreBlocksError = null
+    const { ctrl, run } = this.#read(this.views.length)
+    try {
+      const res = await run
+      if (gen !== this.#gen || ctrl.signal.aborted) return
+      const id = this.recording?.id ?? this.#id
+      this.views = [...this.views, ...res.blocks.map((b) => new BlockModel(this.#api, id, b, this.language))]
+      // an empty page below the total would offer the button for ever: the end is where the blocks end
+      this.blocksTotal = res.blocks.length === 0 ? this.views.length : res.blocks_total
+    } catch (e) {
+      if (gen !== this.#gen || ctrl.signal.aborted) return
+      this.moreBlocksError = recordingError(toApiError(e))
+    } finally {
+      if (gen === this.#gen) this.loadingMoreBlocks = false
+      if (this.#ctrl === ctrl) this.#ctrl = null
     }
   }
 
   #disposeParts(): void {
+    this.#ctrl?.abort()
+    this.#ctrl = null
     for (const v of this.views) v.dispose()
     this.#sides.request.dispose()
     this.#sides.response.dispose()

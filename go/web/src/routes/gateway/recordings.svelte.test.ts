@@ -303,13 +303,29 @@ describe('RecordingDetailModel', () => {
       block('request/params', { kind: 'json', role: undefined, translatable: false }),
       block('response', { side: 'response', kind: 'raw', role: undefined, utf8: false, translatable: false, preview: '', preview_omitted: true, bytes: 4 }),
     ],
+    block_offset: 0,
+    blocks_total: 3,
+  }
+
+  /** A page of a recording with `total` blocks: request messages, the last `responses` of them answer blocks. */
+  function pageOf(offset: number, size: number, total: number, responses: number): RecordingGetResponse {
+    const blocks = Array.from({ length: Math.max(0, Math.min(size, total - offset)) }, (_, k) => {
+      const i = offset + k
+      return i < total - responses
+        ? block(`request/messages/${i}`)
+        : block(`response/choices/${i - (total - responses)}/content`, { side: 'response', role: 'assistant' })
+    })
+    return { ...GET, blocks, block_offset: offset, blocks_total: total }
   }
 
   it('loads the recording, its sides and one view per block; only translatable blocks translate', async () => {
     const get = vi.fn().mockResolvedValue(GET)
     const m = new RecordingDetailModel({ get })
     await m.load(RID)
-    expect(get).toHaveBeenCalledWith(RID)
+    expect(get.mock.calls[0]?.[0]).toBe(RID)
+    expect(get.mock.calls[0]?.[1]?.blockOffset, 'the first page names no offset').toBeUndefined()
+    expect(m.blocksTotal).toBe(3)
+    expect(m.hasMoreBlocks).toBe(false)
     expect(m.status).toBe('ready')
     expect(m.recording?.id).toBe(RID)
     expect(m.request?.format).toBe('json')
@@ -328,6 +344,74 @@ describe('RecordingDetailModel', () => {
     expect(de.views[0]?.translation?.language, 'the blocks start in the page’s language').toBe('de')
     expect(new RecordingDetailModel({}, 'tlh').language).toBe('en')
     expect(new RecordingDetailModel({}, undefined).language).toBe('en')
+  })
+
+  it('more blocks than one page: Load more blocks appends the next page by block_offset, grouped by side, until the end', async () => {
+    const get = vi.fn().mockImplementation(async (_id: string, opts?: { blockOffset?: number }) => pageOf(opts?.blockOffset ?? 0, 500, 1200, 50))
+    const m = new RecordingDetailModel({ get })
+    await m.load(RID)
+    expect(m.views).toHaveLength(500)
+    expect(m.blocksTotal).toBe(1200)
+    expect(m.hasMoreBlocks).toBe(true)
+    expect(m.responseBlocks, 'the answer’s blocks lie past the first page').toHaveLength(0)
+    await m.loadMoreBlocks()
+    expect(get.mock.calls[1]?.[1]?.blockOffset).toBe(500)
+    expect(m.views).toHaveLength(1000)
+    expect(m.hasMoreBlocks).toBe(true)
+    await m.loadMoreBlocks()
+    expect(get.mock.calls[2]?.[1]?.blockOffset).toBe(1000)
+    expect(m.views).toHaveLength(1200)
+    expect(m.hasMoreBlocks, 'at the end the button goes').toBe(false)
+    expect(m.requestBlocks).toHaveLength(1150)
+    expect(m.responseBlocks.map((v) => v.block.address).slice(0, 2)).toEqual(['response/choices/0/content', 'response/choices/1/content'])
+    expect(new Set(m.views.map((v) => v.block.address)).size, 'no block twice across pages').toBe(1200)
+    await m.loadMoreBlocks()
+    expect(get, 'nothing is read past the last block').toHaveBeenCalledTimes(3)
+  })
+
+  it('a failing next page keeps the loaded blocks and names the error', async () => {
+    const get = vi.fn().mockResolvedValueOnce(pageOf(0, 500, 600, 0)).mockRejectedValueOnce(envelope(503, 'audit_unavailable'))
+    const m = new RecordingDetailModel({ get })
+    await m.load(RID)
+    await m.loadMoreBlocks()
+    expect(m.views).toHaveLength(500)
+    expect(m.moreBlocksError?.code).toBe('audit_unavailable')
+    expect(m.hasMoreBlocks).toBe(true)
+  })
+
+  it('leaving the page (dispose) aborts a running detail read; its late answer never lands', async () => {
+    let signal: AbortSignal | undefined
+    let release: (v: RecordingGetResponse) => void = () => {}
+    const get = vi.fn().mockImplementation((_id: string, opts?: { signal?: AbortSignal }) => {
+      signal = opts?.signal
+      return new Promise<RecordingGetResponse>((r) => (release = r))
+    })
+    const m = new RecordingDetailModel({ get })
+    const run = m.load(RID)
+    expect(signal, 'the read carries a signal').toBeDefined()
+    m.dispose()
+    expect(signal?.aborted).toBe(true)
+    release(GET)
+    await run
+    expect(m.views).toEqual([])
+    expect(m.recording).toBeNull()
+  })
+
+  it('leaving the page aborts a running next-page read as well', async () => {
+    const signals: (AbortSignal | undefined)[] = []
+    const get = vi
+      .fn()
+      .mockImplementationOnce(async () => pageOf(0, 500, 900, 0))
+      .mockImplementationOnce((_id: string, opts?: { signal?: AbortSignal }) => {
+        signals.push(opts?.signal)
+        return new Promise(() => {})
+      })
+    const m = new RecordingDetailModel({ get })
+    await m.load(RID)
+    void m.loadMoreBlocks()
+    await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+    m.dispose()
+    expect(signals[0]?.aborted).toBe(true)
   })
 
   it('an unknown id is notFound', async () => {
@@ -597,6 +681,8 @@ describe('nothing of a recording or a translation is stored in the browser', () 
         request: { address: 'request', state: 'present', format: 'json', bytes: 6 },
         response: { address: 'response', state: 'none', bytes: 0 },
         blocks: [block('request/messages/0', { preview: 'sec', preview_truncated: true, bytes: 6 })],
+        block_offset: 0,
+        blocks_total: 1,
       }),
       read: vi.fn().mockResolvedValue(window(all, 0, all.length)),
       translate: vi.fn().mockResolvedValue(tr(0, 1, 'geheim')),

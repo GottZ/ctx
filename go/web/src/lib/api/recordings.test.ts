@@ -6,7 +6,7 @@
 // and the person's translation brake frees at once. Pure node, fetch stubbed.
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { readRecording, translateRecording } from './recordings'
+import { getRecording, readRecording, translateRecording } from './recordings'
 
 function stubFetch(body: unknown): ReturnType<typeof vi.fn> {
   const mock = vi.fn().mockResolvedValue(
@@ -33,6 +33,22 @@ describe('recordings client — the abort signal reaches fetch', () => {
     const sent = JSON.parse(String(init.body)) as { action: string; data: Record<string, unknown> }
     expect(sent.action).toBe('model-recording-translate')
     expect(Object.keys(sent.data).sort()).toEqual(['address', 'chunk', 'id', 'language'])
+  })
+
+  it('get: the first page is the id alone, a later page names block_offset (and block_limit when given), the signal reaches fetch', async () => {
+    const answer = { success: true, recording: {}, request: {}, response: {}, blocks: [], block_offset: 0, blocks_total: 0 }
+    const mock = stubFetch(answer)
+    const ctrl = new AbortController()
+    await getRecording('r1', { signal: ctrl.signal })
+    let [path, init] = mock.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe('/api/manage')
+    expect(init.signal, 'leaving the detail page cancels the read').toBe(ctrl.signal)
+    expect(JSON.parse(String(init.body))).toEqual({ action: 'model-recording-get', data: { id: 'r1' } })
+    mock.mockResolvedValue(new Response(JSON.stringify(answer), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await getRecording('r1', { blockOffset: 500, blockLimit: 100 })
+    ;[, init] = mock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({ action: 'model-recording-get', data: { id: 'r1', block_offset: 500, block_limit: 100 } })
+    expect(init.signal).toBeUndefined()
   })
 
   it('read: the signal reaches fetch', async () => {

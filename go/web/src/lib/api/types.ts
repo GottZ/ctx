@@ -2409,7 +2409,12 @@ export interface RecordingGetResponse {
   recording: RecordingMeta
   request: RecordingSide
   response: RecordingSide
+  /** One page of the blocks (at most 500), from block_offset on. */
   blocks: RecordingBlock[]
+  /** The index of the page's first block among all blocks of the recording. */
+  block_offset: number
+  /** The number of all blocks of the recording (request blocks first, then the answer's). */
+  blocks_total: number
 }
 
 /** model-recording-read — one window; data is base64. */

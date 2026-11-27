@@ -4,15 +4,15 @@
 //
 //   listRecordingConsumers  model-recording-consumers  —
 //   listRecordings          model-recording-list       {consumer_id, cursor?, since?, until?, op?, state?, status?, limit?}
-//   getRecording            model-recording-get        {id}
+//   getRecording            model-recording-get        {id, block_offset?, block_limit?}
 //   readRecording           model-recording-read       {id, address, offset?, limit?}
 //   translateRecording      model-recording-translate  {id, address, language, chunk?}
 //
 // Bodies are built from explicit field lists, never a spread of the caller's
 // object: translate names a block by its address, never text (the server
 // refuses an unknown field), so this client cannot send content anywhere.
-// An optional field is left out rather than sent empty. read and translate
-// take an AbortSignal (Stop, leaving the page).
+// An optional field is left out rather than sent empty. get, read and
+// translate take an AbortSignal (Stop, leaving the page).
 
 import { apiFetch, type ApiError } from '../api'
 import type {
@@ -121,9 +121,25 @@ export function listRecordings(p: RecordingListParams): Promise<RecordingListRes
   return manage<RecordingListResponse>('model-recording-list', data)
 }
 
-/** model-recording-get — one recording as blocks, each with a preview (audited). */
-export function getRecording(id: string): Promise<RecordingGetResponse> {
-  return manage<RecordingGetResponse>('model-recording-get', { id })
+/** model-recording-get options: a page of blocks (server default and cap 500 from 0) and the abort signal. */
+export interface RecordingGetOptions {
+  /** Index of the first block of the page (≥ 0); left out = 0. */
+  blockOffset?: number
+  /** Blocks of the page (1–500); left out = the server's 500. */
+  blockLimit?: number
+  signal?: AbortSignal
+}
+
+/**
+ * model-recording-get — one recording as blocks, each with a preview, one page
+ * of blocks at a time (audited). The signal reaches fetch: leaving the page
+ * cancels a heavy read.
+ */
+export function getRecording(id: string, opts: RecordingGetOptions = {}): Promise<RecordingGetResponse> {
+  const data: Record<string, unknown> = { id }
+  if (opts.blockOffset !== undefined) data.block_offset = opts.blockOffset
+  if (opts.blockLimit !== undefined) data.block_limit = opts.blockLimit
+  return manage<RecordingGetResponse>('model-recording-get', data, opts.signal)
 }
 
 /** model-recording-read — one window of a block or of a whole body (audited). */

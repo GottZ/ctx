@@ -24,6 +24,11 @@ export const REC_CONSUMER_OFF = '01900000-0000-7000-8000-00000000c576'
 export const REC_CONSUMER_GONE = '01900000-0000-7000-8000-00000000c577'
 /** The detail recording: a chat request with every block kind, a 502 answer that is not UTF-8. */
 export const REC_ID = '01900000-0000-7000-8000-0000000575a1'
+/** A recording of 1200 blocks (1150 request messages, 50 answer choices) — three pages of 500. */
+export const REC_ID_MANY = '01900000-0000-7000-8000-0000000575b1'
+/** The block count of REC_ID_MANY and how many of them belong to the answer. */
+export const REC_MANY_TOTAL = 1200
+export const REC_MANY_RESPONSES = 50
 
 /** The hostile strings of the translated block (original AND translation carry them). */
 export const REC_HOSTILE_LINES = [
@@ -318,6 +323,37 @@ function detail(world: 'default' | 'empty' | '10k'): Record<string, unknown> {
   }
 }
 
+/** The server's page bound of model-recording-get (recordingBlocksPage). */
+const BLOCKS_PAGE = 500
+
+/** One page of a detail answer: blocks[block_offset, +block_limit), with block_offset and blocks_total. */
+function blockPage(all: Record<string, unknown>, d: Record<string, unknown>): MockAnswer {
+  const offset = d.block_offset === undefined ? 0 : d.block_offset
+  const limit = d.block_limit === undefined ? BLOCKS_PAGE : d.block_limit
+  if (typeof offset !== 'number' || typeof limit !== 'number' || offset < 0 || limit < 1 || limit > BLOCKS_PAGE) {
+    return recError(400, 'invalid_body', 'block_offset must be >= 0 and block_limit between 1 and 500')
+  }
+  const blocks = all.blocks as unknown[]
+  return { status: 200, json: { ...all, blocks: blocks.slice(offset, offset + limit), block_offset: offset, blocks_total: blocks.length } }
+}
+
+/** REC_ID_MANY: a chat of many short messages and choices (the 100 000-message case, scaled down). */
+function manyDetail(): Record<string, unknown> {
+  const req = REC_MANY_TOTAL - REC_MANY_RESPONSES
+  const blocks = Array.from({ length: REC_MANY_TOTAL }, (_, i) =>
+    i < req
+      ? block(`request/messages/${i}`, { role: 'user', bytes: String(i).length, preview: String(i) })
+      : block(`response/choices/${i - req}/content`, { side: 'response', role: 'assistant', bytes: 2, preview: 'ok' }),
+  )
+  return {
+    success: true,
+    recording: meta({ id: REC_ID_MANY }),
+    request: { address: 'request', state: 'present', format: 'json', bytes: 9000 },
+    response: { address: 'response', state: 'present', format: 'json', bytes: 2400 },
+    blocks,
+  }
+}
+
 function read(data: Record<string, unknown>, world: 'default' | 'empty' | '10k'): MockAnswer {
   if (data.id !== REC_ID) return recError(404, 'not_found', 'recording not found')
   const address = String(data.address ?? '')
@@ -416,8 +452,10 @@ export function recordingsManage(action: string | undefined, data: Record<string
       return { status: 200, json: consumers(world) }
     case 'model-recording-list':
       return list(d, world)
-    case 'model-recording-get':
-      return d.id === REC_ID ? { status: 200, json: detail(world) } : recError(404, 'not_found', 'recording not found')
+    case 'model-recording-get': {
+      const all = d.id === REC_ID ? detail(world) : d.id === REC_ID_MANY ? manyDetail() : null
+      return all === null ? recError(404, 'not_found', 'recording not found') : blockPage(all, d)
+    }
     case 'model-recording-read':
       return read(d, world)
     case 'model-recording-translate':

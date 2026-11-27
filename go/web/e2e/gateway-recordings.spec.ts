@@ -15,7 +15,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 import { gotoArea, modelApiCapabilities, seedSession } from './fixtures'
 import { PANEL_CONSUMER_A, PANEL_TENANT_ID } from './gateway-panels-fixtures'
-import { REC_CONSUMER, REC_ID } from './recordings-fixtures'
+import { REC_CONSUMER, REC_ID, REC_ID_MANY, REC_MANY_RESPONSES, REC_MANY_TOTAL } from './recordings-fixtures'
 
 const CAPS = modelApiCapabilities(true, true)
 
@@ -189,5 +189,29 @@ test.describe('recordings detail (#575)', () => {
     await resp.getByRole('button', { name: 'Raw body' }).click()
     await expect(resp.locator('.side-bytes')).toContainText('raw bytes · hex (not valid UTF-8)')
     await expect(resp.locator('.side-bytes pre[data-raw]')).toContainText('00000010  62 61 64 20 67 77 00 ff')
+  })
+
+  test('recordings: a recording of 1200 blocks comes 500 at a time — Load more blocks appends by block_offset, grouped by side, until the end', async ({ page }) => {
+    const session = await seedSession(page, { role: 'server-admin', theme: 'dark', capabilities: CAPS })
+    await open(page, `/gateway/recordings/${REC_CONSUMER}/${REC_ID_MANY}`)
+    const content = page.locator('main.content')
+    const req = content.locator('section[data-side="request"]')
+    const resp = content.locator('section[data-side="response"]')
+    await expect(content.locator('[data-block]')).toHaveCount(500)
+    // the first page ends inside the request: the button sits there
+    await expect(req.locator('[data-more-blocks]')).toContainText(`showing 500 of ${REC_MANY_TOTAL} blocks`)
+    await expect(resp.locator('[data-block]')).toHaveCount(0)
+    await req.getByRole('button', { name: 'Load more blocks' }).click()
+    await expect(content.locator('[data-block]')).toHaveCount(1000)
+    await expect(req.locator('[data-more-blocks]')).toContainText(`showing 1000 of ${REC_MANY_TOTAL} blocks`)
+    await expect(page.locator('[data-block="request/messages/500"] button').first(), 'focus moves to the first block of the new page').toBeFocused()
+    await req.getByRole('button', { name: 'Load more blocks' }).click()
+    await expect(content.locator('[data-block]')).toHaveCount(REC_MANY_TOTAL)
+    await expect(content.locator('[data-more-blocks]'), 'at the end the button goes').toHaveCount(0)
+    await expect(req.locator('[data-block]')).toHaveCount(REC_MANY_TOTAL - REC_MANY_RESPONSES)
+    await expect(resp.locator('[data-block]')).toHaveCount(REC_MANY_RESPONSES)
+    await expect(resp.locator('[data-block]').first()).toHaveAttribute('data-block', 'response/choices/0/content')
+    const gets = session.calls.filter((c) => c.action === 'model-recording-get').map((c) => (c.body as { data: Record<string, unknown> }).data)
+    expect(gets).toEqual([{ id: REC_ID_MANY }, { id: REC_ID_MANY, block_offset: 500 }, { id: REC_ID_MANY, block_offset: 1000 }])
   })
 })

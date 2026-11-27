@@ -14,7 +14,7 @@
   //
   // Server-admin only (guard: /gateway/recordings → viewTenants; the page
   // checks the tier again before its first call).
-  import { onDestroy, untrack } from 'svelte'
+  import { onDestroy, tick, untrack } from 'svelte'
   import { route } from '../../router'
   import { session } from '../../lib/auth.svelte'
   import type { RecordingSide } from '../../lib/api/types'
@@ -36,6 +36,22 @@
   })
 
   onDestroy(() => model.dispose())
+
+  // Blocks come a page (≤ 500) at a time; the button sits in the card whose
+  // blocks the loaded page ends with (request blocks come first).
+  const cutSide = $derived(model.views.at(-1)?.block.side ?? 'request')
+
+  // Focus stays sane: after a page arrived, focus moves to the first control
+  // of its first block (the button may have moved to the other card or gone).
+  async function moreBlocks(): Promise<void> {
+    const before = model.views.length
+    await model.loadMoreBlocks()
+    const first = model.views[before]
+    if (first === undefined) return
+    await tick()
+    const el = document.querySelector(`[data-block="${CSS.escape(first.block.address)}"]`)
+    el?.querySelector<HTMLElement>('button, [tabindex="0"]')?.focus()
+  }
 
   const LANGS = Object.entries(RECORDING_LANGUAGES)
 
@@ -172,6 +188,18 @@
         {#each g.blocks as view (view.block.address)}
           <RecordingBlock model={view} language={model.language} />
         {/each}
+        <!-- the next page continues where the loaded blocks end: in this card -->
+        {#if model.hasMoreBlocks && cutSide === address}
+          <div class="more-blocks" data-more-blocks>
+            <span role="status">showing {model.views.length} of {model.blocksTotal} blocks</span>
+            <button type="button" disabled={model.loadingMoreBlocks} onclick={() => void moreBlocks()}>
+              {model.loadingMoreBlocks ? 'loading…' : 'Load more blocks'}
+            </button>
+            {#if model.moreBlocksError !== null}
+              <p class="err" role="alert" data-error-code={model.moreBlocksError.code}>{model.moreBlocksError.text}</p>
+            {/if}
+          </div>
+        {/if}
       </section>
     {/each}
   {/if}
@@ -310,6 +338,23 @@
     padding: var(--space-2) var(--space-3);
     color: var(--text-dim);
     font-size: var(--fs-sm);
+  }
+  .more-blocks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    align-items: center;
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: var(--fs-sm);
+  }
+  .err {
+    flex-basis: 100%;
+    margin: 0;
+    color: var(--text);
+    border-left: 2px solid var(--danger);
+    padding-left: var(--space-2);
   }
   .translate-bar {
     display: flex;
