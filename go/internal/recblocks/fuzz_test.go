@@ -29,10 +29,25 @@ func FuzzDecompose(f *testing.F) {
 			t.Fatal("Decompose is not deterministic")
 		}
 		checkInvariants(t, r)
+		if r.Total != len(r.Blocks) {
+			t.Fatalf("Total %d, %d blocks", r.Total, len(r.Blocks))
+		}
 		for _, b := range r.Blocks {
 			got, ok := recblocks.Lookup(r, in, b.Address)
 			if !ok || !reflect.DeepEqual(got, b) {
 				t.Fatalf("Lookup(%q) does not return its block", b.Address)
+			}
+			_, found, ok := recblocks.Find(in, b.Address)
+			if !ok || !reflect.DeepEqual(found, b) {
+				t.Fatalf("Find(%q) does not return its block", b.Address)
+			}
+		}
+		for _, w := range [][2]int{{0, 1}, {1, 2}, {len(r.Blocks) / 2, 3}, {len(r.Blocks), 5}} {
+			win := recblocks.DecomposeWindow(in, w[0], w[1])
+			lo, hi := min(w[0], len(r.Blocks)), min(w[0]+w[1], len(r.Blocks))
+			if win.Total != len(r.Blocks) || !reflect.DeepEqual(win.Blocks, r.Blocks[lo:hi]) ||
+				win.Request != r.Request || win.Response != r.Response {
+				t.Fatalf("DecomposeWindow(%d, %d) is not the slice [%d:%d] of Decompose", w[0], w[1], lo, hi)
 			}
 		}
 		for side, s := range map[string]recblocks.Side{"request": r.Request, "response": r.Response} {

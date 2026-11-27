@@ -56,6 +56,10 @@ const (
 	// carries over all its blocks (a chat of thousands of messages):
 	// beyond it the blocks are listed without a preview.
 	recordingPreviewBudget = 256 << 10
+	// recordingBlocksPage is the most blocks one detail answer carries (and
+	// its default page): a request of thousands of messages is read page by
+	// page (block_offset).
+	recordingBlocksPage = 500
 	// recordingWindowDefault / recordingWindowMax bound a window read.
 	recordingWindowDefault = 64 << 10
 	recordingWindowMax     = 1 << 20
@@ -282,8 +286,11 @@ func recordingInput(row *llmlog.RecordingRow) recblocks.Input {
 }
 
 // loadRecordingBlocks reads a recording whole under the content slot and
-// decomposes it.
-func (h *ManageHandler) loadRecordingBlocks(ctx context.Context, id string) (*llmlog.RecordingRow, recblocks.Input, recblocks.Result, error) {
+// decomposes it with split — a window of its blocks (the detail) or the one
+// block of an address (a read, a translation): the walk meets every block,
+// only those are kept, so the number of blocks of a body (millions, for a
+// body of tiny elements) never becomes a list in memory or an answer.
+func (h *ManageHandler) loadRecordingBlocks(ctx context.Context, id string, split func(recblocks.Input) recblocks.Result) (*llmlog.RecordingRow, recblocks.Input, recblocks.Result, error) {
 	release, err := acquireRecordingContent(ctx)
 	if err != nil {
 		return nil, recblocks.Input{}, recblocks.Result{}, err
@@ -294,7 +301,16 @@ func (h *ManageHandler) loadRecordingBlocks(ctx context.Context, id string) (*ll
 		return nil, recblocks.Input{}, recblocks.Result{}, err
 	}
 	in := recordingInput(row)
-	return row, in, recblocks.Decompose(in), nil
+	return row, in, split(in), nil
+}
+
+// recordingBlockAt is the split of a read or a translation: the block at
+// address alone.
+func recordingBlockAt(address string) func(recblocks.Input) recblocks.Result {
+	return func(in recblocks.Input) recblocks.Result {
+		r, _, _ := recblocks.Find(in, address)
+		return r
+	}
 }
 
 // recordingBlockView is one block of the detail.
@@ -340,23 +356,36 @@ func recordingBlockViews(blocks []recblocks.Block) []recordingBlockView {
 
 func (h *ManageHandler) handleModelRecordingGet(w http.ResponseWriter, r *http.Request, ar *auth.AuthResult, req manageRequest) {
 	var d struct {
-		ID string `json:"id"`
+		ID          string `json:"id"`
+		BlockOffset int    `json:"block_offset"`
+		BlockLimit  int    `json:"block_limit"`
 	}
 	if err := decodeConsumerPayload(req.Data, &d); err != nil || d.ID == "" {
 		writeRecordingError(w, http.StatusBadRequest, "invalid_body", "id is required")
 		return
 	}
-	row, _, res, err := h.loadRecordingBlocks(r.Context(), d.ID)
+	if d.BlockLimit == 0 {
+		d.BlockLimit = recordingBlocksPage
+	}
+	if d.BlockOffset < 0 || d.BlockLimit < 1 || d.BlockLimit > recordingBlocksPage {
+		writeRecordingError(w, http.StatusBadRequest, "invalid_body", "block_offset must be >= 0 and block_limit between 1 and 500")
+		return
+	}
+	row, _, res, err := h.loadRecordingBlocks(r.Context(), d.ID, func(in recblocks.Input) recblocks.Result {
+		return recblocks.DecomposeWindow(in, d.BlockOffset, d.BlockLimit)
+	})
 	if err != nil {
 		writeRecordingStoreError(w, r, err, "model-recording-get")
 		return
 	}
-	if !h.auditRecordingRead(w, r, ar, &row.RecordingMeta, store.RecordingAuditRead, map[string]any{"blocks": len(res.Blocks)}) {
+	if !h.auditRecordingRead(w, r, ar, &row.RecordingMeta, store.RecordingAuditRead,
+		map[string]any{"block_offset": d.BlockOffset, "blocks": len(res.Blocks), "blocks_total": res.Total}) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true, "recording": row.RecordingMeta,
 		"request": res.Request, "response": res.Response, "blocks": recordingBlockViews(res.Blocks),
+		"block_offset": d.BlockOffset, "blocks_total": res.Total,
 	})
 }
 
@@ -404,7 +433,7 @@ func (h *ManageHandler) handleModelRecordingRead(w http.ResponseWriter, r *http.
 		h.readRecordingSide(w, r, ar, d, offset, limit, detail)
 		return
 	}
-	row, in, res, err := h.loadRecordingBlocks(r.Context(), d.ID)
+	row, in, res, err := h.loadRecordingBlocks(r.Context(), d.ID, recordingBlockAt(d.Address))
 	if err != nil {
 		writeRecordingStoreError(w, r, err, "model-recording-read")
 		return

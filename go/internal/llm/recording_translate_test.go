@@ -44,6 +44,10 @@ func TestRecordingChunks(t *testing.T) {
 			t.Errorf("%s: two splits differ", name)
 		}
 	}
+	// A block past the bound: the split stops one chunk after it.
+	if c := RecordingChunks(strings.Repeat("ab ", 8<<20/3)); len(c) != RecordingTranslateMaxChunks+1 {
+		t.Errorf("an 8 MiB block: %d chunks, want the bound plus one (%d)", len(c), RecordingTranslateMaxChunks+1)
+	}
 	if c := RecordingChunks(cases["lines"]); !strings.HasSuffix(c[0], "\n") {
 		t.Errorf("a chunk of lines ends mid-line: %q", c[0][len(c[0])-20:])
 	}
@@ -109,8 +113,15 @@ func TestRecordingTranslateChain(t *testing.T) {
 	if !errors.As(err, &nb) || nb.Required != backends.SensCredentials {
 		t.Fatalf("chain without a local full-trust row: %v, want ErrNoEligibleBackend at credentials", err)
 	}
+	peer := recordingRow("peer-full", backends.TrustFull, backends.LocalityLAN, 32768)
+	peer.ProviderClass = backends.ProviderCtx // another ctx instance in the LAN
+	pool.SeedSnapshotForTest([]backends.Backend{peer})
+	if _, err := RecordingTranslateChain(pool); !errors.As(err, &nb) {
+		t.Fatalf("chain of a ctx peer alone: %v, want ErrNoEligibleBackend — a peer is another instance", err)
+	}
 	pool.SeedSnapshotForTest([]backends.Backend{
 		recordingRow("ext-full", backends.TrustFull, backends.LocalityExternal, 32768),
+		peer,
 		recordingRow("lan-full", backends.TrustFull, backends.LocalityLAN, 32768),
 		recordingRow("local-nocred", backends.TrustNoCredentials, backends.LocalityLocal, 32768),
 	})

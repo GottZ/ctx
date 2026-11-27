@@ -28,10 +28,12 @@ import (
 //
 // The dispatcher sees the call as interactive — a human waits for it — and
 // the brake holds it to one call per person at a time (recordingBrake, the
-// coupling the daily synthesis' interactive class carries): a recording
-// consumer's /v1 requests share the backend with at most one such call per
-// server-admin, and the external partition the dispatcher keeps for them is
-// not touched by it.
+// coupling the daily synthesis' interactive class carries). An interactive
+// lease takes any free slot of its target (held+1 ≤ S); the external
+// partition E = S − R caps external work, it reserves nothing for it. So a
+// recording consumer's /v1 request waits only while translations and other
+// interactive work fill every slot of the target — bounded by one call per
+// server-admin, each ending within the chain's timeouts.
 
 // recordingTranslateRequest is the action's data.
 type recordingTranslateRequest struct {
@@ -72,7 +74,7 @@ func (h *ManageHandler) handleModelRecordingTranslate(w http.ResponseWriter, r *
 	}
 	defer h.recBrake.release(who)
 
-	row, in, res, err := h.loadRecordingBlocks(r.Context(), d.ID)
+	row, in, res, err := h.loadRecordingBlocks(r.Context(), d.ID, recordingBlockAt(d.Address))
 	if err != nil {
 		writeRecordingStoreError(w, r, err, "model-recording-translate")
 		return

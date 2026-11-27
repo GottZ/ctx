@@ -752,6 +752,47 @@ func TestRecordingViewContent(t *testing.T) {
 		<-done
 		ch = make(chan struct{}) // the deferred close gets its own channel
 	})
+	t.Run("blocks_page_by_page", func(t *testing.T) {
+		_, body, all := w.adminCall(t, "model-recording-get", map[string]any{"id": id})
+		total, _ := all["blocks_total"].(float64)
+		bs, _ := all["blocks"].([]any)
+		if int(total) != len(bs) || total < 3 {
+			t.Fatalf("whole detail: %s", body)
+		}
+		_, body, page := w.adminCall(t, "model-recording-get", map[string]any{"id": id, "block_offset": 1, "block_limit": 1})
+		pb, _ := page["blocks"].([]any)
+		if len(pb) != 1 || page["blocks_total"] != total || pb[0].(map[string]any)["address"] != bs[1].(map[string]any)["address"] {
+			t.Errorf("block page [1,2): %s", body)
+		}
+		if status, body, _ := w.adminCall(t, "model-recording-get", map[string]any{"id": id, "block_limit": 501}); status != http.StatusBadRequest {
+			t.Errorf("a page past 500 blocks: %d %s", status, body)
+		}
+	})
+	t.Run("a_body_of_many_tiny_blocks", func(t *testing.T) {
+		// 100 000 one-character messages (3.2 MB): the detail carries one
+		// page of 500 blocks and names the total; the last block reads by its
+		// address.
+		var b strings.Builder
+		b.WriteString(`{"model":"` + v1ChatAlias + `","messages":[`)
+		for i := 0; i < 100_000; i++ {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(`{"role":"user","content":"x"}`)
+		}
+		b.WriteString(`]}`)
+		w.v1([]byte(b.String()))
+		many := w.newest(t)
+		_, body, resp := w.adminCall(t, "model-recording-get", map[string]any{"id": many})
+		bs, _ := resp["blocks"].([]any)
+		if len(bs) != 500 || resp["blocks_total"].(float64) < 100_000 || len(body) > 1<<20 {
+			t.Fatalf("detail of 100 000 blocks: %d blocks, total %v, %d bytes", len(bs), resp["blocks_total"], len(body))
+		}
+		status, body, resp := w.adminCall(t, "model-recording-read", map[string]any{"id": many, "address": "request/messages/99999"})
+		if status != http.StatusOK || string(b64(t, resp["data"])) != "x" {
+			t.Errorf("the last block: %d %s", status, body)
+		}
+	})
 	t.Run("cleared_by_the_retention", func(t *testing.T) {
 		if a := w.v1(recViewChat("old " + recViewSecret)); a.status != http.StatusOK {
 			t.Fatalf("chat: %d", a.status)
@@ -823,9 +864,12 @@ func TestRecordingViewContent(t *testing.T) {
 
 func TestRecordingViewTranslateTrust(t *testing.T) {
 	w := newRecViewWorld(t, func(e *recViewEngine) []backends.Backend {
+		peer := e.row("peer-full", backends.TrustFull, "lan")
+		peer.ProviderClass = backends.ProviderCtx // another ctx instance
 		return []backends.Backend{
 			e.row("ext-full", backends.TrustFull, "external"),
 			e.row("local-nocred", backends.TrustNoCredentials, "local"),
+			peer,
 		}
 	})
 	w.v1(recViewChat(recViewSecret))

@@ -133,12 +133,55 @@ type Result struct {
 	Request  Side
 	Response Side
 	Blocks   []Block // request blocks first, then response blocks, each in document order
+	// Total is the number of blocks of the row — len(Blocks) for
+	// Decompose, every block the walk met for DecomposeWindow and Find.
+	Total int
 }
 
-// Decompose splits the row in into its sides and blocks.
+// Decompose splits the row in into its sides and all its blocks.
 func Decompose(in Input) Result {
+	return decompose(in, keepAll{})
+}
+
+// DecomposeWindow is Decompose keeping only the blocks [from, from+limit)
+// of the row's order: the walk meets every block (Total counts them), but
+// only those of the window are kept — a body of millions of tiny elements
+// costs the walk, never a block list of its size.
+func DecomposeWindow(in Input, from, limit int) Result {
+	return decompose(in, keepWindow{from: from, to: from + limit})
+}
+
+// Find is the block at address, decomposing in and keeping only that
+// block; for the side addresses "request" and "response" Lookup's
+// synthetic raw block. ok=false: no such address, or the side is
+// cleared/absent (the Result's Side.State tells which).
+func Find(in Input, address string) (Result, Block, bool) {
+	r := decompose(in, keepAddress(address))
+	b, ok := Lookup(r, in, address)
+	return r, b, ok
+}
+
+// keeper decides which blocks a decomposition keeps (n: the block's
+// position in the row's order).
+type keeper interface {
+	keep(n int, address string) bool
+}
+
+type keepAll struct{}
+
+func (keepAll) keep(int, string) bool { return true }
+
+type keepWindow struct{ from, to int }
+
+func (k keepWindow) keep(n int, _ string) bool { return n >= k.from && n < k.to }
+
+type keepAddress string
+
+func (k keepAddress) keep(_ int, address string) bool { return address == string(k) }
+
+func decompose(in Input, k keeper) Result {
 	res := Result{Request: requestSide(in), Response: responseSide(in)}
-	b := &builder{side: sideRequest}
+	b := &builder{side: sideRequest, keeper: k}
 	if res.Request.State == statePresent {
 		res.Request.Format = b.request(in, bytes.Clone(in.Request))
 	}
@@ -146,7 +189,7 @@ func Decompose(in Input) Result {
 	if res.Response.State == statePresent {
 		b.response(in, bytes.Clone(in.Response), &res.Response)
 	}
-	res.Blocks = b.blocks
+	res.Blocks, res.Total = b.blocks, b.n
 	if res.Blocks == nil {
 		res.Blocks = []Block{}
 	}
@@ -213,15 +256,28 @@ func rawBlock(side string, body []byte) Block {
 		Translatable: ok, Inline: true, content: body}
 }
 
-// builder collects the blocks of a row, side by side.
+// builder collects the blocks of a row, side by side; keeper decides which
+// it keeps, n counts every block met.
 type builder struct {
 	side   string
 	blocks []Block
+	keeper keeper
+	n      int
+}
+
+// met counts a block and reports whether the builder keeps it.
+func (b *builder) met(address string) bool {
+	n := b.n
+	b.n++
+	return b.keeper == nil || b.keeper.keep(n, address)
 }
 
 // add appends blk with content: its side, size and UTF-8 flag come from
 // here, and nothing that is not valid UTF-8 is translatable.
 func (b *builder) add(blk Block, content []byte) {
+	if !b.met(blk.Address) {
+		return
+	}
 	blk.Side = b.side
 	blk.content = content
 	blk.Bytes = len(content)
@@ -245,7 +301,9 @@ func (b *builder) jsonBlock(address string, content []byte, translatable bool) {
 // raw appends the one block of a body that is not valid UTF-8 or not valid
 // JSON: the side address, the bytes unchanged.
 func (b *builder) raw(body []byte) {
-	b.blocks = append(b.blocks, rawBlock(b.side, body))
+	if b.met(b.side) {
+		b.blocks = append(b.blocks, rawBlock(b.side, body))
+	}
 }
 
 // bodyFormat is the format of a valid UTF-8 body.

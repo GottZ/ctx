@@ -652,6 +652,19 @@ func dropExternal(chain []backends.Backend, role string) []backends.Backend {
 	return kept
 }
 
+// instanceOwn keeps the rows of chain that are this instance's own (see
+// ChainCall.InstanceOnly), in order, in a fresh slice.
+func instanceOwn(chain []backends.Backend) []backends.Backend {
+	kept := chain[:0:0]
+	for i := range chain {
+		b := &chain[i]
+		if (b.Locality == backends.LocalityLocal || b.Locality == backends.LocalityLAN) && b.ProviderClass != backends.ProviderCtx {
+			kept = append(kept, *b)
+		}
+	}
+	return kept
+}
+
 // PoolReporter wires ChatChain attempt outcomes back into the pool's health
 // state (the same closure every chained call site needs — extracted in P3).
 func PoolReporter(bpool *backends.Pool) ReportFunc {
@@ -700,6 +713,12 @@ type ChainCall struct {
 	// holds even against a full-trust external row a psql edit smuggled past
 	// the 422 validation).
 	LocalOnly bool
+	// InstanceOnly keeps this instance's own backends only, after the trust
+	// gate and LocalOnly: a row whose locality is local or lan (an allowlist,
+	// not "not external") and that is no ctx peer — a ProviderCtx row is
+	// another ctx instance, which serves what it gets under its own policy
+	// (issue #575: a recording's chunk carries credentials in clear text).
+	InstanceOnly bool
 	// APIKeyID is the caller attribution for the slim llmlog row (04-W3/T35b,
 	// design/04 §4.3). Foreground callers (query translate/temporal/rerank)
 	// pass ar.ApiKeyID; background callers (sensitivity-audit classify) leave
@@ -769,6 +788,15 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 			return nil, &backends.ErrNoEligibleBackend{
 				Role: c.Role, Required: c.Required,
 				Excluded: []backends.ExclusionReason{{Backend: "*", Reason: "local-only call, all eligible backends external"}},
+			}
+		}
+	}
+	if c.InstanceOnly {
+		chain = instanceOwn(chain)
+		if len(chain) == 0 {
+			return nil, &backends.ErrNoEligibleBackend{
+				Role: c.Role, Required: c.Required,
+				Excluded: []backends.ExclusionReason{{Backend: "*", Reason: "instance-only call, no local or lan backend of this instance"}},
 			}
 		}
 	}

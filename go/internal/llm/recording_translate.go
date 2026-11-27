@@ -26,9 +26,10 @@ import (
 // What holds, and where:
 //   - sensitivity: a recording counts as credentials (it may carry them in
 //     clear text, migration 197), so the chain is the pool's chat role at
-//     backends.SensCredentials — only full-trust rows — and LocalOnly drops
-//     every external row after the trust gate: the text never leaves the
-//     instance's own backends. An empty chain is the caller's error
+//     backends.SensCredentials — only full-trust rows — and only this
+//     instance's own rows stay after the trust gate (locality local or lan,
+//     no ctx peer — another instance): the text never leaves the instance's
+//     own backends. An empty chain is the caller's error
 //     (*backends.ErrNoEligibleBackend), never a walk onto a less trusted row.
 //   - no second copy: the call is an llm.ChainCall, whose context_llm_log row
 //     is the slim one — no prompt, no answer (newChainEntry sets neither) —
@@ -64,8 +65,10 @@ const (
 )
 
 // recordingTranslateRequired is the call's sensitivity — a recording counts
-// as credentials — and recordingTranslateLocalOnly drops every external row
-// after the trust gate. One value each for the chain check and the walk.
+// as credentials — and recordingTranslateLocalOnly keeps only this
+// instance's own rows after the trust gate (locality local or lan, no ctx
+// peer: ChainCall.LocalOnly and InstanceOnly). One value each for the chain
+// check and the walk.
 const (
 	recordingTranslateRequired  = backends.SensCredentials
 	recordingTranslateLocalOnly = true
@@ -113,18 +116,20 @@ var ErrRecordingWindow = errors.New("llm: recording translate: context window to
 // RecordingChunks splits a block's text into chunks of at most
 // RecordingTranslateChunkRunes runes. Deterministic: the same text gives the
 // same chunks. A chunk ends after the last line break in its last fifth, or
-// else after the last white space there, or else at the bound.
+// else after the last white space there, or else at the bound. It stops after
+// RecordingTranslateMaxChunks+1 chunks — one more than a block may have, which
+// tells the caller the block is too large — and walks each rune once.
 func RecordingChunks(text string) []string {
 	if text == "" {
 		return []string{""}
 	}
 	var out []string
-	for text != "" {
-		if utf8.RuneCountInString(text) <= RecordingTranslateChunkRunes {
+	for text != "" && len(out) <= RecordingTranslateMaxChunks {
+		cut := byteIndexOfRune(text, RecordingTranslateChunkRunes)
+		if cut >= len(text) {
 			out = append(out, text)
 			break
 		}
-		cut := byteIndexOfRune(text, RecordingTranslateChunkRunes)
 		floor := byteIndexOfRune(text, RecordingTranslateChunkRunes*4/5)
 		if i := strings.LastIndexByte(text[floor:cut], '\n'); i >= 0 {
 			cut = floor + i + 1
@@ -211,11 +216,11 @@ func RecordingTranslateChain(pool *backends.Pool) ([]backends.Backend, error) {
 		return nil, err
 	}
 	if recordingTranslateLocalOnly {
-		chain = dropExternal(chain, backends.RoleChat)
+		chain = instanceOwn(chain)
 	}
 	if len(chain) == 0 {
 		return nil, &backends.ErrNoEligibleBackend{Role: backends.RoleChat, Required: recordingTranslateRequired,
-			Excluded: []backends.ExclusionReason{{Backend: "*", Reason: "local-only call, all eligible backends external"}}}
+			Excluded: []backends.ExclusionReason{{Backend: "*", Reason: "instance-only call, no local or lan backend of this instance"}}}
 	}
 	return chain, nil
 }
@@ -293,20 +298,21 @@ func TranslateRecordingBlock(ctx context.Context, c RecordingTranslateCall, in R
 	}
 	var model string
 	resp, err := ChainCall{
-		Pool:       c.Pool,
-		Role:       backends.RoleChat,
-		Required:   recordingTranslateRequired,
-		Pipeline:   RecordingTranslatePipeline,
-		Prompt:     promptRecordingTranslate,
-		System:     recordingTranslateSystemPrompt,
-		User:       user,
-		Opts:       Options{Temperature: 0.2, NumPredict: RecordingTranslateMaxTokens, CapLocked: true},
-		DefTimeout: RecordingTranslateTimeout,
-		LocalOnly:  recordingTranslateLocalOnly,
-		APIKeyID:   c.APIKeyID,
-		Quota:      c.Quota,
-		QuotaScope: c.QuotaScope,
-		OnServed:   func(_, m string) { model = m },
+		Pool:         c.Pool,
+		Role:         backends.RoleChat,
+		Required:     recordingTranslateRequired,
+		Pipeline:     RecordingTranslatePipeline,
+		Prompt:       promptRecordingTranslate,
+		System:       recordingTranslateSystemPrompt,
+		User:         user,
+		Opts:         Options{Temperature: 0.2, NumPredict: RecordingTranslateMaxTokens, CapLocked: true},
+		DefTimeout:   RecordingTranslateTimeout,
+		LocalOnly:    recordingTranslateLocalOnly,
+		InstanceOnly: recordingTranslateLocalOnly,
+		APIKeyID:     c.APIKeyID,
+		Quota:        c.Quota,
+		QuotaScope:   c.QuotaScope,
+		OnServed:     func(_, m string) { model = m },
 	}.Do(ctx, c.DB, c.Admission)
 	if err != nil {
 		return nil, err
