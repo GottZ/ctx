@@ -179,6 +179,8 @@ internal/promptguard/promptguard.go	Canonicalize	# Nonce zu Null-Nonce für den 
 internal/prompts/prompts.go	All	# Nur prompts_test.go:52/85/125: Registry-Vollständigkeit und Sortierung; Prod stempelt über Register
 internal/prompts/prompts.go	Lookup	# Nur prompts_test.go:103 und completeness_test.go:534/611: ID-zu-Identity-Probe der Registry-Gates
 internal/recall/recall.go	RunOnce	# Default-Hooks-Fassade; Prod ruft RunOnceWithHooks (events/recall_check.go:174), Test degradation_it:79
+internal/recblocks/recblocks.go	Decompose	# #575: the whole decomposition — the reference against which the package tests and FuzzDecompose hold DecomposeWindow and Find; production reads a page (DecomposeWindow) or one block (Find)
+internal/recblocks/recblocks.go	keepAll.keep	# #575: Decompose's keeper (keep every block), alive with Decompose
 internal/rrf/fts.go	BuildORQuery	# OR-Arm bewusst aus (query.go:882-885, queryOR=""), Reaktivierung ab 10k Blöcken; 11 Fälle in fts_test.go
 internal/rrf/graph.go	GraphExpand	# Report-lose Fassade; Prod fährt GraphExpandCached, 14 Testaufrufe (graph_test.go:303 u. a.) halten sie
 internal/rrf/graph.go	GraphExpandWithReport	# Prod-Referenz nur im toten GraphExpand:238; Prod dispatcht direkt, Test graph_budget_test.go:137
