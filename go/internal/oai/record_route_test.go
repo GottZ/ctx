@@ -1262,3 +1262,65 @@ func TestRecordingRefusedFloodProbe(t *testing.T) {
 	t.Logf("PROBE flood: %d requests of %d B, in-flight budget %d MiB: live heap at the wait %.1f MiB over the baseline, in-flight booked %.1f MiB, answers %v, rows %d",
 		n, size, budget>>20, float64(live)/(1<<20), float64(booked)/(1<<20), codes, len(store.rows))
 }
+
+// TestRecordingForcedCopiesWaitWithoutBooking: the final statement of a
+// captured answer (a rerank answer, a stream's lines) books its copies past
+// the account's bound — but only once it holds a statement slot: while it
+// waits for one, the account holds its capture and nothing more, so the
+// forced copies at any moment are those of at most four statements.
+func TestRecordingForcedCopiesWaitWithoutBooking(t *testing.T) {
+	e := newRerankEngine(t)
+	store := newRecStore(nil)
+	rig := newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 16, 1, withoutCensus, withRecordings(store))
+	rig.ca.Store(recordingConsumer(true))
+	body := rerankBody("rrpub", "q", []string{"d1", "d2"})
+	warm := rig.postRerank(t, "/v1/rerank", body)
+	if warm.status != 200 {
+		t.Fatalf("warm-up: %d %s", warm.status, warm.body)
+	}
+	answer := int64(len(warm.body))
+	// R1–R4 open and wait at the engine; S1–S4 then hold the four slots with
+	// their answers' commits; R1–R4's answers then wait for a slot.
+	engine := make(chan struct{})
+	var engineOnce sync.Once
+	defer engineOnce.Do(func() { close(engine) })
+	var calls atomic.Int64
+	e.setRespond(func(_ http.ResponseWriter, r *http.Request, _ int64, _ rerankCall) bool {
+		if calls.Add(1) <= 4 {
+			select {
+			case <-engine:
+			case <-r.Context().Done():
+			}
+		}
+		return false
+	})
+	gate := make(chan struct{})
+	var gateOnce sync.Once
+	defer gateOnce.Do(func() { close(gate) })
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() { rig.postRerank(t, "/v1/rerank", body) })
+	}
+	if !waitFor(3*time.Second, func() bool { return calls.Load() == 4 }) {
+		t.Fatal("R1–R4 did not reach the engine")
+	}
+	store.set(func(s *recStore) { s.finishGate = gate })
+	for range 4 {
+		wg.Go(func() { rig.postRerank(t, "/v1/rerank", body) })
+	}
+	if !waitFor(3*time.Second, func() bool { return store.inFinish.Load() == 4 }) {
+		t.Fatal("S1–S4 did not hold the slots with their commits")
+	}
+	before := oai.RecordingHeld()
+	engineOnce.Do(func() { close(engine) })
+	time.Sleep(300 * time.Millisecond) // R1–R4 have their answers captured and wait for a slot
+	waiting := oai.RecordingHeld() - before
+	gateOnce.Do(func() { close(gate) })
+	wg.Wait()
+	// Each waiter holds its capture (its buffer, at most twice the answer);
+	// its forced copies (3 × the answer) come with the slot.
+	if limit := 4 * 3 * answer; waiting >= limit {
+		t.Errorf("four answers waiting for a slot hold %d bytes of the account — want their captures only (< %d: no forced copies before the slot)", waiting, limit)
+	}
+	t.Logf("four waiting answers of %d B hold %d B", answer, waiting)
+}

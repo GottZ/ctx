@@ -377,25 +377,31 @@ func (rr *requestRecording) open(ctx context.Context) bool {
 }
 
 // statement runs one recording statement: n bytes of the account first
-// (waiting for room until wait ends; force: taken past the bound), then a
-// slot (waiting until wait ends), then fn under recordWriteTimeout. In this
-// order nobody waits while holding a slot — a slot holder only waits for the
-// database.
+// (waiting for room until wait ends), then a slot (waiting until wait ends),
+// then fn under recordWriteTimeout. In this order nobody waits while holding
+// a slot — a slot holder only waits for the database. force (a captured
+// answer's final copies) takes its n bytes past the bound, and only once it
+// holds a slot: taking does not wait, and the forced copies at any moment
+// are those of at most maxRecordingStatements statements.
 func (rr *requestRecording) statement(ctx context.Context, wait time.Duration, n int64, force bool, fn func(context.Context) error) error {
 	wctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
-	if force {
-		rr.acct.take(n)
-	} else if err := rr.acct.acquire(wctx, n, recordAccountLimit(rr.stage.settings())); err != nil {
-		return fmt.Errorf("oai: no room to record: %w", err)
+	if !force {
+		if err := rr.acct.acquire(wctx, n, recordAccountLimit(rr.stage.settings())); err != nil {
+			return fmt.Errorf("oai: no room to record: %w", err)
+		}
+		defer rr.acct.release(n)
 	}
-	defer rr.acct.release(n)
 	select {
 	case recordSlots <- struct{}{}:
 	case <-wctx.Done():
 		return fmt.Errorf("oai: no recording slot: %w", wctx.Err())
 	}
 	defer func() { <-recordSlots }()
+	if force {
+		rr.acct.take(n)
+		defer rr.acct.release(n)
+	}
 	sctx, scancel := context.WithTimeout(ctx, recordWriteTimeout)
 	defer scancel()
 	return fn(sctx)
