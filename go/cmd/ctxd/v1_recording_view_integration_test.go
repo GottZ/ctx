@@ -619,15 +619,15 @@ func TestRecordingViewContent(t *testing.T) {
 			t.Errorf("the translation call carries tools: %s", raw)
 		}
 		u := call.Messages[1].Content
-		begin, end := strings.Index(u, "-----BEGIN DATA "), strings.Index(u, "-----END DATA ")
+		begin, end := strings.Index(u, "<untrusted_block id="), strings.Index(u, "</untrusted_block id=")
 		if call.Messages[0].Role != "system" || !strings.Contains(call.Messages[0].Content, recViewMarker) || begin < 0 || end < begin ||
 			!strings.Contains(u[begin:end], recViewSecret) || strings.Contains(u[:begin], recViewSecret) ||
 			!strings.Contains(u[:begin], "Target language: German") || !strings.Contains(u[:begin], fmt.Sprintf("part 1 of %d", len(llm.RecordingChunks(user)))) {
 			t.Errorf("prompt shape: %q", u)
 		}
-		tag := strings.TrimSuffix(strings.SplitN(u[begin+len("-----BEGIN DATA "):], "\n", 2)[0], "-----")
-		if len(tag) != 32 || strings.Count(u, tag) != 2 {
-			t.Errorf("marker tag %q appears %d times", tag, strings.Count(u, tag))
+		nonce := strings.SplitN(u[begin+len("<untrusted_block id="):], " ", 2)[0]
+		if len(nonce) != 16 || strings.Count(u, "id="+nonce) != 2 || !strings.Contains(call.Messages[0].Content, "id="+nonce) {
+			t.Errorf("block nonce %q: %d times in the user message, in the system rule %v", nonce, strings.Count(u, "id="+nonce), strings.Contains(call.Messages[0].Content, "id="+nonce))
 		}
 		w.f.settle(t)
 		var pipeline, sens, sys, usr, res string
