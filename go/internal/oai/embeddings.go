@@ -185,8 +185,11 @@ func Embeddings(d Deps) http.Handler {
 		if rr != nil {
 			c.id = rr.req.ID // the answer and the attempts name the recorded row
 		}
-		defer c.close()
-		c.serve()
+		func() {
+			defer c.close()
+			c.serve()
+		}()
+		rr.endInRoute(w) // a refused request's row inside its in-flight reservation (record.go)
 	})
 }
 

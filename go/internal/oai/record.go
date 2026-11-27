@@ -285,8 +285,9 @@ type requestRecording struct {
 	// row: a row of the request is committed (open, or inserted at the
 	// end); opened: it was opened before the walk; ended: its outcome is
 	// committed (or known to be there); settled: the row holds the outcome
-	// the client gets (end).
-	row, opened, ended, settled bool
+	// the client gets (end); inserted: the row of a request refused before
+	// its walk was attempted (once: endInRoute or the stage).
+	row, opened, ended, settled, inserted bool
 	// unfinished: the outcome of an opened row could not be committed.
 	unfinished bool
 	// withheld: an answer was committed — or may have been: its commit
@@ -582,11 +583,12 @@ func (rr *requestRecording) noteStatus(code int) {
 	rr.statusMu.Unlock()
 }
 
-// end commits the request's outcome once it has ended (endStage): the open
-// row ends with the status the client got, code and a stream's or a rerank
-// answer's captured bytes; a request refused before its walk gets its row
-// with what was read of the body — the body itself held against the account
-// with its copies, since the request's in-flight reservation has ended. A
+// end commits the request's outcome once it has ended (endInRoute,
+// endStage): the open row ends with the status the client got, code and a
+// stream's or a rerank answer's captured bytes; a request refused before its
+// walk gets its row with what was read of the body — the body and the
+// statement's copies held against the account, waiting for room while the
+// request's in-flight reservation still books the body (endInRoute). A
 // failure is counted, never retried later.
 func (rr *requestRecording) end(code string) {
 	if rr.ended && !rr.withheld {
@@ -614,6 +616,10 @@ func (rr *requestRecording) end(code string) {
 		rr.settled = true
 		return
 	}
+	if rr.inserted {
+		return // attempted in the route (endInRoute): its body is not held past the reservation
+	}
+	rr.inserted = true
 	if rr.stage.store == nil {
 		slog.Error("gateway: a recording consumer's request without a recording store (wiring defect) — not recorded",
 			"consumer_id", rr.req.ConsumerID)
@@ -650,6 +656,33 @@ func (rr *requestRecording) supersedeReplaced() {
 		return
 	}
 	rr.unfinished, rr.settled = false, true
+}
+
+// endInRoute writes the row of a request the route refused before its walk
+// while the request's in-flight reservation still books the body the route
+// read: the budget stage (InflightBudget) runs inside the recording stage
+// and releases the reservation when the route returns, so a row written at
+// the stage would hold the body booked nowhere while it waits for room in
+// the recording account. Written here, that wait holds the reservation — it
+// is backpressure on the in-flight budget —, and the body is let go after
+// the attempt, written or not (a row that could not be written counts as
+// unrecordable, as at the stage). A request that was opened, and every
+// request a panic ends, ends at the stage. w is the route's writer: the
+// 503 recording_unavailable goes out before the attempt, as at the stage.
+// Nil-safe.
+func (rr *requestRecording) endInRoute(w http.ResponseWriter) {
+	if rr == nil || rr.opened || rr.ended || rr.inserted {
+		return
+	}
+	code := ""
+	if rr.access != nil {
+		code = rr.access.Reason
+	}
+	if code == CodeRecordingUnavailable {
+		_ = http.NewResponseController(w).Flush()
+	}
+	rr.end(code)
+	rr.req.Body = nil
 }
 
 // dropCapture gives the captured answer back to the account.

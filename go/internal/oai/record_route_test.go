@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1171,4 +1173,92 @@ func TestRecordingPanicAfterAHeldAnswer(t *testing.T) {
 		t.Errorf("client %d %q, row status %d code %q answer %q — want 503 internal_error both, without the held answer",
 			w.Code, w.Body.String(), r.out.Status, r.out.Code, r.response)
 	}
+}
+
+// refusedBody is an unparsable chat request of n bytes: the route reads it
+// whole and refuses it (invalid_json) before its walk.
+func refusedBody(n int) string {
+	head := `{"model":"pub","messages":"`
+	return head + strings.Repeat("x", n-len(head))
+}
+
+// TestRecordingRefusedBodyStaysBooked: the body of a request refused before
+// its walk stays booked while its row waits for room in the recording
+// account — the request's in-flight reservation is held until the row is
+// written, so the wait is backpressure on the in-flight budget, never a body
+// booked nowhere — and the row gets the body once there is room.
+func TestRecordingRefusedBodyStaysBooked(t *testing.T) {
+	u := newUpstream(t, recChatAnswer)
+	store := newRecStore(nil)
+	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withRecordings(store))
+	rig.ca.Store(recordingConsumer(true))
+	body := refusedBody(1 << 20)
+	release := oai.FillRecordingAccount(oai.RecordingAccountLimit(chatSettings()))
+	var once sync.Once
+	defer once.Do(release)
+	done := make(chan chatAnswer, 1)
+	go func() { done <- rig.post(t, body) }()
+	// The route has read and refused the body; its row waits for room.
+	time.Sleep(500 * time.Millisecond)
+	booked := rig.budget.InUse()
+	once.Do(release)
+	a := <-done
+	if booked < int64(len(body)) {
+		t.Errorf("while the refused request's row waited for room, the in-flight budget booked %d bytes — want its reservation (≥ %d, the body)", booked, len(body))
+	}
+	if code, _, _ := a.envelope(t); a.status != http.StatusBadRequest || code != "invalid_json" {
+		t.Errorf("client %d %q, want 400 invalid_json", a.status, code)
+	}
+	if r := store.only(t); string(r.body) != body || r.opened {
+		t.Errorf("row: %d bytes opened %v — want the whole refused body, never opened", len(r.body), r.opened)
+	}
+	if n := rig.budget.InUse(); n != 0 {
+		t.Errorf("the in-flight budget holds %d bytes after the request ended", n)
+	}
+}
+
+// TestRecordingRefusedFloodProbe (opt-in, CTX_RECORD_PROBE=1) measures what a
+// flood of refused 1.5 MiB requests of a recording consumer holds while their
+// rows wait for room in the recording account: the live heap at the wait
+// (after a collection), the in-flight budget's booking then, and how the
+// requests were answered.
+func TestRecordingRefusedFloodProbe(t *testing.T) {
+	if os.Getenv("CTX_RECORD_PROBE") != "1" {
+		t.Skip("opt-in probe (CTX_RECORD_PROBE=1)")
+	}
+	const n, size, budget = 48, 3 << 19, 64 << 20 // 48 requests of 1.5 MiB, a 64 MiB in-flight budget
+	u := newUpstream(t, recChatAnswer)
+	store := newRecStore(nil)
+	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withRecordings(store))
+	rig.setSettings(func(s *oai.Settings) { s.InflightBudget = budget })
+	rig.ca.Store(recordingConsumer(true))
+	body := refusedBody(size)
+	var base runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&base)
+	release := oai.FillRecordingAccount(oai.RecordingAccountLimit(chatSettings()))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	codes := map[int]int{}
+	for range n {
+		// One request after the other, as a client's steady stream: each
+		// finds the in-flight budget as the ones before it left it.
+		wg.Go(func() {
+			a := rig.post(t, body)
+			mu.Lock()
+			codes[a.status]++
+			mu.Unlock()
+		})
+		time.Sleep(25 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond) // the last one has been read and refused or turned away; the rows wait
+	var at runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&at)
+	booked := rig.budget.InUse()
+	release()
+	wg.Wait()
+	live := int64(at.HeapAlloc) - int64(base.HeapAlloc)
+	t.Logf("PROBE flood: %d requests of %d B, in-flight budget %d MiB: live heap at the wait %.1f MiB over the baseline, in-flight booked %.1f MiB, answers %v, rows %d",
+		n, size, budget>>20, float64(live)/(1<<20), float64(booked)/(1<<20), codes, len(store.rows))
 }

@@ -102,8 +102,14 @@ func ChatCompletions(d Deps) http.Handler {
 		}
 		c := newChatCall(d, w, r, ca, entry)
 		c.adoptRecording(rr)
-		defer c.close()
-		c.serve()
+		func() {
+			defer c.close()
+			c.serve()
+		}()
+		// A refused request's row while its in-flight reservation still
+		// books its body (record.go endInRoute); not on a panic — the stage
+		// ends that one.
+		rr.endInRoute(w)
 	})
 }
 
