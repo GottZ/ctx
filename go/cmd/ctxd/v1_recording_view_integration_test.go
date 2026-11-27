@@ -51,6 +51,7 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
+	"github.com/GottZ/ctx/internal/llmlog"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -72,6 +73,9 @@ type recViewEngine struct {
 	canceled atomic.Int64 // translation calls whose request ended before the answer
 	gate     atomic.Pointer[chan struct{}]
 	arrived  chan struct{}
+	// gateV1 holds the gateway's own requests (not the translations).
+	gateV1 atomic.Pointer[chan struct{}]
+	v1Hits atomic.Int64
 }
 
 func newRecViewEngine(t *testing.T) *recViewEngine {
@@ -83,6 +87,13 @@ func newRecViewEngine(t *testing.T) *recViewEngine {
 		raw, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		if !bytes.Contains(raw, []byte(recViewMarker)) {
+			e.v1Hits.Add(1)
+			if g := e.gateV1.Load(); g != nil {
+				select {
+				case <-*g:
+				case <-r.Context().Done():
+				}
+			}
 			_, _ = io.WriteString(w, v1ChatAnswer)
 			return
 		}
@@ -716,6 +727,61 @@ func TestRecordingViewContent(t *testing.T) {
 		}
 		if w.e.canceled.Load() == canceled {
 			t.Errorf("the model call was not canceled with the request")
+		}
+	})
+	t.Run("open_recording_is_readable", func(t *testing.T) {
+		ch := make(chan struct{})
+		w.e.gateV1.Store(&ch)
+		defer func() { close(ch); w.e.gateV1.Store(nil) }()
+		hits := w.e.v1Hits.Load()
+		done := make(chan v1Answer, 1)
+		go func() { done <- w.v1(recViewChat("still running " + recViewSecret)) }()
+		deadline := time.Now().Add(10 * time.Second)
+		for w.e.v1Hits.Load() == hits && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		open := w.newest(t)
+		_, body, resp := w.adminCall(t, "model-recording-get", map[string]any{"id": open})
+		rec, _ := resp["recording"].(map[string]any)
+		rs, _ := resp["response"].(map[string]any)
+		if rec["state"] != "open" || rs["state"] != "pending" || blockByAddress(resp, "request/messages/1") == nil {
+			t.Errorf("open recording: %s", body)
+		}
+		close(ch)
+		w.e.gateV1.Store(nil)
+		<-done
+		ch = make(chan struct{}) // the deferred close gets its own channel
+	})
+	t.Run("cleared_by_the_retention", func(t *testing.T) {
+		if a := w.v1(recViewChat("old " + recViewSecret)); a.status != http.StatusOK {
+			t.Fatalf("chat: %d", a.status)
+		}
+		old := w.newest(t)
+		// The row's age is set by hand (the only way to an old row in a
+		// test); the clearing is the retention janitor's own statement.
+		if _, err := w.f.seed.Exec(ctx, `UPDATE context_llm_recordings SET created_at = now() - interval '3 days' WHERE id = $1::uuid`, old); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := llmlog.EvictBodies(ctx, w.f.pool, 1); err != nil {
+			t.Fatal(err)
+		}
+		_, body, resp := w.adminCall(t, "model-recording-get", map[string]any{"id": old})
+		rq, _ := resp["request"].(map[string]any)
+		rs, _ := resp["response"].(map[string]any)
+		if bs, _ := resp["blocks"].([]any); rq["state"] != "cleared" || rs["state"] != "cleared" || len(bs) != 0 {
+			t.Errorf("cleared recording: %s", body)
+		}
+		for _, a := range []struct {
+			action string
+			data   map[string]any
+		}{
+			{"model-recording-read", map[string]any{"id": old, "address": "request"}},
+			{"model-recording-read", map[string]any{"id": old, "address": "request/messages/1"}},
+			{"model-recording-translate", map[string]any{"id": old, "address": "request/messages/1", "language": "de"}},
+		} {
+			if status, body, _ := w.adminCall(t, a.action, a.data); status != http.StatusConflict || !bytes.Contains(body, []byte("body_cleared")) {
+				t.Errorf("%s of a cleared body: %d %s, want 409 body_cleared", a.action, status, body)
+			}
 		}
 	})
 	t.Run("audit_failure_serves_nothing", func(t *testing.T) {

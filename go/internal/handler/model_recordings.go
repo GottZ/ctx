@@ -409,9 +409,8 @@ func (h *ManageHandler) handleModelRecordingRead(w http.ResponseWriter, r *http.
 		writeRecordingStoreError(w, r, err, "model-recording-read")
 		return
 	}
-	b, ok := recblocks.Lookup(res, in, d.Address)
+	b, ok := lookupRecordingBlock(w, res, in, d.Address)
 	if !ok {
-		writeRecordingError(w, http.StatusNotFound, "not_found", "no block at this address")
 		return
 	}
 	if !h.auditRecordingRead(w, r, ar, &row.RecordingMeta, store.RecordingAuditReadRaw, detail) {
@@ -424,6 +423,22 @@ func (h *ManageHandler) handleModelRecordingRead(w http.ResponseWriter, r *http.
 		"success": true, "address": d.Address, "offset": lo, "limit": hi - lo, "total": total, "eof": hi >= total,
 		"utf8": b.UTF8, "data": base64.StdEncoding.EncodeToString(c[lo:hi]),
 	})
+}
+
+// lookupRecordingBlock finds the block at address; when there is none it
+// answers — 409 body_cleared for an address on a side the retention
+// cleared, 404 otherwise.
+func lookupRecordingBlock(w http.ResponseWriter, res recblocks.Result, in recblocks.Input, address string) (recblocks.Block, bool) {
+	if b, ok := recblocks.Lookup(res, in, address); ok {
+		return b, true
+	}
+	side, _, _ := strings.Cut(address, "/")
+	if (side == "request" && res.Request.State == "cleared") || (side == "response" && res.Response.State == "cleared") {
+		writeRecordingError(w, http.StatusConflict, "body_cleared", "the retention cleared this body")
+		return recblocks.Block{}, false
+	}
+	writeRecordingError(w, http.StatusNotFound, "not_found", "no block at this address")
+	return recblocks.Block{}, false
 }
 
 // readRecordingSide answers a window of a whole body, cut by the database.

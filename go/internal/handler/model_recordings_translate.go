@@ -12,7 +12,6 @@ import (
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
 	"github.com/GottZ/ctx/internal/llm"
-	"github.com/GottZ/ctx/internal/recblocks"
 	"github.com/GottZ/ctx/internal/store"
 )
 
@@ -78,9 +77,8 @@ func (h *ManageHandler) handleModelRecordingTranslate(w http.ResponseWriter, r *
 		writeRecordingStoreError(w, r, err, "model-recording-translate")
 		return
 	}
-	b, ok := recblocks.Lookup(res, in, d.Address)
+	b, ok := lookupRecordingBlock(w, res, in, d.Address)
 	if !ok {
-		writeRecordingError(w, http.StatusNotFound, "not_found", "no block at this address")
 		return
 	}
 	if !b.Translatable {
