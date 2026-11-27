@@ -562,6 +562,7 @@ func TestRecordingCountsBalance(t *testing.T) {
 	ca := recordingConsumer(true)
 	ca.ConsumerID = "0195a6f0-0000-7000-8000-0000000c0571"
 	rig.ca.Store(ca)
+	held := oai.RecordingHeld()
 	rig.post(t, chatBody("pub"))  // served
 	rig.post(t, `{"model":"pub"`) // refused before the walk
 	store.set(func(s *recStore) { s.openErr = errors.New("down"); s.insertErr = errors.New("down") })
@@ -575,5 +576,34 @@ func TestRecordingCountsBalance(t *testing.T) {
 	if got.Admitted != 4 || got.InFlight != 0 || got.Recorded != 3 || got.Unrecordable != 1 || got.Unfinished != 1 ||
 		got.Admitted != got.InFlight+got.Recorded+got.Unrecordable || got.Recorded != rows {
 		t.Errorf("counts %+v with %d rows — want admitted 4 = in flight 0 + recorded 3 + unrecordable 1, unfinished 1, recorded = rows", got, rows)
+	}
+	if after := oai.RecordingHeld(); after != held {
+		t.Errorf("the recording account holds %d bytes after the requests ended, %d before — a request kept what it took", after, held)
+	}
+}
+
+// TestRecordingAccountGivesBack: a stream's and a rerank answer's captures
+// go back to the account when their requests end — served or not.
+func TestRecordingAccountGivesBack(t *testing.T) {
+	held := oai.RecordingHeld()
+	sh := streamShapes[0]
+	u := newUpstream(t, "")
+	u.setRespond(sseRespond(sh.steps(), nil, nil))
+	store := newRecStore(nil)
+	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings, withRecordings(store))
+	srv := serveHTTP(t, rig.router)
+	rig.ca.Store(recordingConsumer(true))
+	_ = postStream(context.Background(), t, srv, streamBody("chat"))
+	store.set(func(s *recStore) { s.finishErr = errors.New("down") })
+	_ = postStream(context.Background(), t, srv, streamBody("chat"))
+	e := newRerankEngine(t)
+	rstore := newRecStore(nil)
+	rr := newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 4, 1, withRecordings(rstore))
+	rr.ca.Store(recordingConsumer(true))
+	_ = rr.postRerank(t, "/v1/rerank", rerankBody("rrpub", "q", []string{"d1", "d2"}))
+	rstore.set(func(s *recStore) { s.finishErr = errors.New("down") })
+	_ = rr.postRerank(t, "/v1/rerank", rerankBody("rrpub", "q", []string{"d1", "d2"}))
+	if after := oai.RecordingHeld(); after != held {
+		t.Errorf("the recording account holds %d bytes after the requests ended, %d before", after, held)
 	}
 }
