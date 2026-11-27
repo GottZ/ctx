@@ -4,6 +4,7 @@
 // error states of a recordings call, the entry links' condition and the size
 // formatter.
 
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../../lib/api'
 import { capabilitiesFor } from '../../lib/auth/capabilities'
@@ -172,5 +173,21 @@ describe('fmtBytes', () => {
     expect(fmtBytes(null)).toBe('—')
     expect(fmtBytes(-1)).toBe('—')
     expect(fmtBytes(Number.NaN)).toBe('—')
+  })
+})
+
+// The gateway area's own pages show the entry links and nothing else of the
+// view: importing the recordings data layer from them puts it into a chunk
+// /gateway and the consumer page load for every reader (the bundler merged
+// it with format.ts once — 2177 B br on /gateway, the release budget's total
+// exceeded).
+describe('the gateway pages import none of the recordings view', () => {
+  const VIEW = /from '(?:\.\/recording-data|\.\/recordings\.svelte|\.\.\/\.\.\/lib\/api\/recordings)'/
+  it('GatewayPage, ConsumerDetail, format.ts and recording-link.ts import neither the view’s data layer nor its API client', () => {
+    expect(`import { x } from './recording-data'`).toMatch(VIEW)
+    expect(`import { y } from '../../lib/api/recordings'`).toMatch(VIEW)
+    for (const f of ['GatewayPage.svelte', 'ConsumerDetail.svelte', 'format.ts', 'recording-link.ts']) {
+      expect(readFileSync(new URL(f, import.meta.url), 'utf8'), f).not.toMatch(VIEW)
+    }
   })
 })
