@@ -995,19 +995,17 @@ func TestRecordingViewTranslateQuotaBeforeTheAudit(t *testing.T) {
 	}
 	// The router's accountant reads the quota through a cache it refreshes in
 	// the background and passes while it is cold: translate until the gate
-	// refuses — that refusal is the call under test.
+	// refuses once — that refusal may come from either gate, as the refresh
+	// can land between them — and then once more: with the cache warm (its
+	// TTL is 30 s), that call is the one under test.
+	translate := func() (int, []byte, map[string]any) {
+		return w.adminCall(t, "model-recording-translate", map[string]any{"id": id, "address": "request/messages/1", "language": "de"})
+	}
 	deadline := time.Now().Add(20 * time.Second)
 	for {
-		hits, audits := w.e.hits.Load(), w.audits(t)
-		status, body, resp := w.adminCall(t, "model-recording-translate", map[string]any{"id": id, "address": "request/messages/1", "language": "de"})
+		status, body, resp := translate()
 		if status == http.StatusTooManyRequests && resp["code"] == "quota_exceeded" {
-			if n := w.e.hits.Load() - hits; n != 0 {
-				t.Errorf("the refused translation made %d model calls, want none", n)
-			}
-			if n := w.audits(t) - audits; n != 0 {
-				t.Errorf("the refused translation wrote %d audit rows, want none — nothing was sent", n)
-			}
-			return
+			break
 		}
 		if status != http.StatusOK {
 			t.Fatalf("translate while the quota cache is cold: %d %s", status, body)
@@ -1016,5 +1014,15 @@ func TestRecordingViewTranslateQuotaBeforeTheAudit(t *testing.T) {
 			t.Fatal("the tenant quota never refused the translation")
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	hits, audits := w.e.hits.Load(), w.audits(t)
+	if status, body, resp := translate(); status != http.StatusTooManyRequests || resp["code"] != "quota_exceeded" {
+		t.Fatalf("translate with the quota spent: %d %s, want 429 quota_exceeded", status, body)
+	}
+	if n := w.e.hits.Load() - hits; n != 0 {
+		t.Errorf("the refused translation made %d model calls, want none", n)
+	}
+	if n := w.audits(t) - audits; n != 0 {
+		t.Errorf("the refused translation wrote %d audit rows, want none — nothing was sent", n)
 	}
 }
