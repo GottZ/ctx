@@ -53,8 +53,8 @@ const (
 	// RecordingTranslateChunkRunes is the size of one chunk of a block.
 	RecordingTranslateChunkRunes = 4000
 	// RecordingTranslateMaxChunks bounds a block: one over it is refused
-	// with its size named (ErrRecordingBlockTooLarge) — the raw view reads
-	// it in windows instead.
+	// with its size named (the handler's 413 block_too_large) — the raw
+	// view reads it in windows instead.
 	RecordingTranslateMaxChunks = 64
 	// RecordingTranslateMaxTokens is the output bound of one call (the
 	// rendering of a chunk is about as long as the chunk, plus explanations
@@ -104,13 +104,6 @@ var RecordingLanguages = map[string]string{
 
 // ErrRecordingLanguage: the language is not one of RecordingLanguages.
 var ErrRecordingLanguage = errors.New("llm: recording translate: unknown target language")
-
-// ErrRecordingBlockTooLarge: the block needs more than
-// RecordingTranslateMaxChunks chunks.
-var ErrRecordingBlockTooLarge = errors.New("llm: recording translate: block too large")
-
-// ErrRecordingChunk: the chunk index is outside the block's chunks.
-var ErrRecordingChunk = errors.New("llm: recording translate: no such chunk")
 
 // ErrRecordingWindow wraps the window check's refusal: the chain's smallest
 // context window does not hold one chunk's prompt and its output bound, or a
