@@ -9,7 +9,8 @@ with the storage interface (v0.23.3 and later) ``hostcompat.StoreSessionDB`` wra
 ``Home.db()``) the same wrapper. ``StoreTestDB`` forwards every engine method to the ``StoreSessionDB`` it wraps and
 adds the old ``SessionDB`` methods only tests call — the write paths the builders use to put real core state into a
 store (``append_message``, ``publish_compression_child``, ``archive_and_compact`` with a watermark …) — each over the
-repository verb the core itself writes that state with, never SQL. The engine never sees these methods.
+repository verb the core itself writes that state with, never SQL. The engine never sees these methods: the two it
+also calls (``rewind_to_message``, and ``archive_and_compact`` without fences) are the engine's own adapter.
 """
 
 from __future__ import annotations
@@ -166,9 +167,20 @@ class StoreTestDB:
         tail_count: int = 0,
         covered_ids: list[int] | None = None,
     ) -> int:
-        """``messages.compact`` with the compressor's fences, as Hermes' in-place compaction writes it."""
+        """``messages.compact`` with the compressor's fences, as Hermes' in-place compaction writes it. Called as the
+        engine calls it (no fence, no patch: path B′ of an import) it is the engine's own adapter
+        (``StoreSessionDB.archive_and_compact``), so an engine test handed this wrapper runs the production
+        conversion of the rows, not this one."""
         from persistence.conversation.messages import HeldCoverage, Watermark
 
+        if (
+            model_config_patch is None
+            and watermark is None
+            and lock_holder is None
+            and not tail_count
+            and covered_ids is None
+        ):
+            return self.engine_db.archive_and_compact(session_id, compacted_messages)
         result = self.store.messages.compact(
             session_id,
             _rows(compacted_messages),

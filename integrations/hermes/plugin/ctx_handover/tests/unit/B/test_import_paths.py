@@ -163,6 +163,57 @@ def test_path_a_and_b_prime_agree(make_session, session_db, target_db, store, so
         other.close()
 
 
+@pytest.mark.parametrize("path", ["A", "B'"])
+def test_import_takes_display_metadata_as_json_text(
+    make_session, session_db, target_db, store, source_paths, target_cwd, path
+):
+    """A capsule row may carry ``display_metadata`` as JSON text instead of the object (``session_hash.JSON_FIELDS``:
+    the core decodes it on some read paths and not on others, and the session hashes read both alike). Both import
+    paths store the object, an archived row (``append_messages_batch`` on B′) and a live one (``archive_and_compact``)
+    alike, as the old ``SessionDB`` writers decoded the text — on a storage-interface host too, whose repository
+    takes only a mapping from ``NewMessage.from_live``.
+
+    Mutant: ``hostcompat._new_messages`` passes the JSON text through → B′ raises ``ValueError`` and the import
+    fails."""
+    import json
+    from dataclasses import replace
+
+    tip = rich_lineage(make_session)
+    make_session.append(
+        tip,
+        [
+            make_session.message("user", "one more", display_metadata={"note": "kept", "n": [1, 2]}),
+            make_session.message("assistant", "noted"),
+        ],
+    )
+    info, cap = export(session_db, store, tip, source_paths)
+    capsule = session_export.read_capsule(store, cap.capsule_id, max_json_bytes=64 * 1024**2)
+    as_text = {"archived": 0, "live": 0}
+
+    def to_text(data: bytes) -> bytes:
+        rows = json.loads(data)
+        for row in rows:
+            if isinstance(row.get("display_metadata"), dict):
+                row["display_metadata"] = json.dumps(row["display_metadata"])
+                as_text["live" if row.get("active") else "archived"] += 1
+        return json.dumps(rows).encode()
+
+    forged = cap.capsule_id
+    for segment in capsule["segments"]:
+        for page in segment["pages"]:
+            forged = store.forge_capsule(forged, page, to_text)
+    assert as_text["archived"] >= 1 and as_text["live"] >= 1, as_text
+    forged_doc = session_export.read_capsule(store, forged, max_json_bytes=64 * 1024**2)
+    p = plan(target_db, forged_doc, target_cwd)
+    p = replace(p, segments=tuple(replace(s, path=path) for s in p.segments))
+    prepared = session_import.import_hidden(target_db, store, forged, p)
+    assert prepared.import_path == ("A" if path == "A" else "B'")
+    assert (prepared.h_all, prepared.h_rows, prepared.h_model) == (cap.h_all, cap.h_rows, cap.h_model)
+    assert_lineage_equal(session_db, target_db, list(info.lineage_ids), [s.new_id for s in p.segments])
+    stored = [r.get("display_metadata") for s in p.segments for r in stored_rows(target_db, s.new_id)]
+    assert {"note": "kept", "n": [1, 2]} in stored and {"k": 1} in stored
+
+
 def test_unhide_requires_existing_cwd(make_session, session_db, target_db, store, source_paths, tmp_path):
     """The lineage only becomes visible when its recorded cwd exists on this host [LAB L3, R11]."""
     from ctx_handover.engine.errors import ImportFailed

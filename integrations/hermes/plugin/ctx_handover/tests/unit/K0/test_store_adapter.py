@@ -89,6 +89,37 @@ def test_rows_the_engine_writes_are_fresh_inserts(session_db, make_session):
     assert len(session_db.get_messages(sid, include_inactive=True)) == before + 1
 
 
+@pytest.mark.parametrize(
+    ("given", "stored"),
+    [
+        ({"note": "kept"}, {"note": "kept"}),
+        ('{"note": "kept"}', {"note": "kept"}),
+        ("[1, 2]", None),
+        ("not json", None),
+        ("", None),
+    ],
+)
+@pytest.mark.parametrize("writer", ["append_messages_batch", "archive_and_compact"])
+def test_batch_writers_take_display_metadata_as_object_or_json_text(session_db, make_session, writer, given, stored):
+    """Both batch writers the import calls store ``display_metadata`` given as an object or as its JSON text as that
+    object, and any other text as none — what the old ``SessionDB`` writers store, so the check runs on both hosts.
+    The other JSON fields of a row (``tool_calls``, the uid maps, the reasoning sidecars) and structured ``content``
+    in its column form are stored alike on both hosts already (probe of issue GottZ/ctx#570, finding 2).
+
+    Mutant: ``hostcompat._new_messages`` passes the text through → the storage-interface host raises ``ValueError``
+    for every non-empty text."""
+    db = getattr(session_db, "engine_db", session_db)
+    sid = make_session.create()
+    rows = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a", "display_metadata": given}]
+    if writer == "append_messages_batch":
+        db.append_messages_batch(sid, rows, chunk_rows=500)
+    else:
+        db.archive_and_compact(sid, rows)
+    last = db.get_messages(sid)[-1]
+    assert last["role"] == "assistant"
+    assert last.get("display_metadata") == stored
+
+
 def test_a_busy_store_in_a_lease_call_is_not_acquired(session_db, make_session, ledger, monkeypatch):
     """The store's ``StoreContention`` in a lease call reaches ``lock`` as the ``sqlite3.OperationalError`` it
     treats as "not acquired": ``acquire`` refuses (``SessionBusy``) and ``refresh`` reports a lost lease — never an

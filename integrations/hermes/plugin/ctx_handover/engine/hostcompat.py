@@ -256,11 +256,34 @@ _ADDRESSING_KEYS = frozenset({"_row_id", "_db_row_snapshot", "_restored_from_sto
 adopt instead of inserting (``NewMessage``): a row the engine writes is always a new row."""
 
 
+def _display_metadata(value: str) -> dict | None:
+    """``display_metadata`` given as text, as the old ``SessionDB`` writers stored it: JSON text of an object as that
+    object, any other text (empty, not JSON, JSON of something else) as none, with a warning for a non-empty one as the
+    core logged it. A capsule row may carry the text (``session_hash.JSON_FIELDS``); ``NewMessage.from_live`` passes
+    the field through and the interface's repository takes only a mapping (``dict()`` of the text raises)."""
+    try:
+        decoded = json.loads(value) if value else None
+    except ValueError:
+        decoded = None
+    if isinstance(decoded, dict):
+        return decoded
+    if value:
+        log.warning("ignoring display metadata that is not a JSON object on write")
+    return None
+
+
 def _new_messages(messages: list[dict]) -> list:
-    """The engine's message dicts as the interface's ``NewMessage`` rows, each a fresh insert."""
+    """The engine's message dicts as the interface's ``NewMessage`` rows, each a fresh insert; ``display_metadata``
+    given as text decoded first (``_display_metadata``), a mapping kept as it is."""
     from persistence.conversation.messages import NewMessage
 
-    return [NewMessage.from_live({k: v for k, v in m.items() if k not in _ADDRESSING_KEYS}) for m in messages]
+    rows = []
+    for m in messages:
+        message = {k: v for k, v in m.items() if k not in _ADDRESSING_KEYS}
+        if isinstance(message.get("display_metadata"), str):
+            message["display_metadata"] = _display_metadata(message["display_metadata"])
+        rows.append(NewMessage.from_live(message))
+    return rows
 
 
 def _media_root() -> str:
