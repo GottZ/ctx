@@ -113,6 +113,17 @@ test.describe('recordings entry links (#575)', () => {
   })
 })
 
+test.describe('recordings seeds (#575)', () => {
+  test('recordings: the legacy empty:true seed is the empty state, like state:empty', async ({ page }) => {
+    for (const seed of [{ state: 'empty' as const }, { empty: true }]) {
+      const p = await page.context().newPage()
+      await seedSession(p, { role: 'server-admin', theme: 'dark', capabilities: CAPS, ...seed })
+      await open(p, '/gateway/recordings')
+      await expect(p.locator('main.content').getByText('No recordings', { exact: true }), JSON.stringify(seed)).toBeVisible()
+    }
+  })
+})
+
 test.describe('recordings list (#575)', () => {
   test('recordings: a rare filter stops at the scan bound, names the rows searched and Continue goes on', async ({ page }) => {
     const session = await seedSession(page, { role: 'server-admin', theme: 'dark', capabilities: CAPS, state: '10k' })

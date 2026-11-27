@@ -1834,7 +1834,7 @@ export async function seedSession(page: Page, opts: SeedOptions): Promise<Seeded
       }
       // #575 recordings: the five server-admin-only model-recording-* actions (recordings-fixtures.ts)
       {
-        const r = recordingsManage(action, data, opts.role, state)
+        const r = recordingsManage(action, data, opts.role, empty ? 'empty' : state)
         if (r !== null) return route.fulfill({ status: r.status, json: r.json })
       }
       // Model API consumer list (W05-05): role/state-aware, so it is served
