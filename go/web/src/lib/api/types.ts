@@ -1524,6 +1524,8 @@ export interface ConsumerView {
   /** null = any source address. */
   allowed_cidrs: string[] | null
   allow_plaintext: boolean
+  /** Recording (migration 197): every gateway row of the consumer keeps its request and answer in full in the LLM log — set by a server-admin, readable by server-admins only. */
+  record_bodies: boolean
   active: boolean
   status: ConsumerStatus
   /** max over the keys, 60 s precision. */

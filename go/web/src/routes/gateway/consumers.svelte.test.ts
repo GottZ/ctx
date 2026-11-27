@@ -38,6 +38,7 @@ function consumer(label: string, p: Partial<ConsumerView> = {}): ConsumerView {
     admission_lane: 'bulk',
     allowed_cidrs: null,
     allow_plaintext: false,
+    record_bodies: false,
     active: true,
     status: 'active',
     last_used_at: null,
