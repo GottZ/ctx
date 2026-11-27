@@ -1321,10 +1321,10 @@ func (c *chatCall) success(plan Plan, st *walkState) chatOutcome {
 	if c.recording != nil {
 		// The commit took its time: a request that stopped being served
 		// meanwhile does not get the answer it held (record.go).
-		if err := c.d.heldStillServes(c.ctx, c.target); err != nil {
+		if err := c.d.heldStillServes(c.ctx, c.client, c.target); err != nil {
 			c.recording.withhold()
 			c.cancel(err)
-			_, code := c.verdict()
+			code := refuseHeld(err, c.rec, c.w, c.r)
 			return chatOutcome{finish: llmlog.FinishAborted, redacted: &llmlog.RedactedErr{Class: backends.ClassCanceled.String(), Code: code}}
 		}
 	}

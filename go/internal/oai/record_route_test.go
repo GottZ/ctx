@@ -929,21 +929,21 @@ func postVia(t *testing.T, srv *httptest.Server, path, body string) chatAnswer {
 // are the request; answered tells the route's answer from a refusal.
 var recRoutes = []struct {
 	name, path string
-	rig        func(t *testing.T, store *recStore) *chatRig
+	rig        func(t *testing.T, store *recStore, opts ...rigOption) *chatRig
 	body       string
 	answered   func(b []byte) bool
 }{
-	{"chat", "/v1/chat/completions", func(t *testing.T, store *recStore) *chatRig {
+	{"chat", "/v1/chat/completions", func(t *testing.T, store *recStore, opts ...rigOption) *chatRig {
 		u := newUpstream(t, recChatAnswer)
-		return newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withRecordings(store))
+		return newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, append(opts, withRecordings(store))...)
 	}, chatBody("pub"), func(b []byte) bool { return strings.Contains(string(b), "the answer") }},
-	{"embeddings", "/v1/embeddings", func(t *testing.T, store *recStore) *chatRig {
+	{"embeddings", "/v1/embeddings", func(t *testing.T, store *recStore, opts ...rigOption) *chatRig {
 		e := newEmbedEngine(t, 8)
-		return newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, withRecordings(store))
+		return newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, append(opts, withRecordings(store))...)
 	}, embedBody("emb1", []string{"a"}), func(b []byte) bool { return strings.Contains(string(b), `"embedding"`) }},
-	{"rerank", "/v1/rerank", func(t *testing.T, store *recStore) *chatRig {
+	{"rerank", "/v1/rerank", func(t *testing.T, store *recStore, opts ...rigOption) *chatRig {
 		e := newRerankEngine(t)
-		return newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 4, 1, withRecordings(store))
+		return newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 4, 1, append(opts, withRecordings(store))...)
 	}, rerankBody("rrpub", "q", []string{"d1", "d2"}), func(b []byte) bool { return strings.Contains(string(b), "relevance_score") }},
 }
 
@@ -1043,5 +1043,132 @@ func TestRecordingRefusalGoesOutWhenItsRowFails(t *testing.T) {
 	}
 	if got := statsOf(ca.ConsumerID); got.Unrecordable != 1 || got.Recorded != 0 {
 		t.Errorf("counts %+v — want unrecordable 1, recorded 0", got)
+	}
+}
+
+// TestRecordingHeldAnswerChecksPastTheDeadline: the request deadline may
+// pass while an answer's commit waits (the commit is not cut by it); a
+// request that stopped being served during that time — the model API
+// switched off, the key revoked after the deadline or before it, the
+// shutdown — still gets its refusal, never the answer and never an empty
+// 200, and its row says what the client got. Chat, embeddings and rerank.
+func TestRecordingHeldAnswerChecksPastTheDeadline(t *testing.T) {
+	want := map[string]struct {
+		status int
+		code   string
+	}{
+		"gateway_off":             {http.StatusNotFound, oai.CodeNotFound},
+		"revoked":                 {http.StatusUnauthorized, oai.CodeInvalidAPIKey},
+		"revoked_before_deadline": {http.StatusUnauthorized, oai.CodeInvalidAPIKey},
+		"shutdown":                {http.StatusServiceUnavailable, oai.CodeInternalError},
+	}
+	for _, rt := range recRoutes {
+		for _, mode := range []string{"gateway_off", "revoked", "revoked_before_deadline", "shutdown"} {
+			t.Run(rt.name+"/"+mode, func(t *testing.T) {
+				store := newRecStore(nil)
+				gate := make(chan struct{})
+				var once sync.Once
+				defer once.Do(func() { close(gate) })
+				store.set(func(s *recStore) { s.finishGate = gate })
+				life, shutdown := context.WithCancel(context.Background())
+				defer shutdown()
+				rig := rt.rig(t, store, func(r *chatRig) { r.deps.Lifecycle = life })
+				rig.ca.Store(recordingConsumer(true))
+				const deadline = 800 * time.Millisecond
+				rig.setSettings(func(s *oai.Settings) { s.RequestDeadline = deadline })
+				rv := newRevoker()
+				srv := serveHTTP(t, rv.wrap(rig.router))
+				done := make(chan chatAnswer, 1)
+				start := time.Now()
+				go func() { done <- postVia(t, srv, rt.path, rt.body) }()
+				if !waitFor(5*time.Second, func() bool { return store.inFinish.Load() == 1 }) {
+					t.Fatal("the answer's commit did not start")
+				}
+				if mode == "revoked_before_deadline" {
+					rv.revoke()
+				}
+				time.Sleep(time.Until(start.Add(deadline + 400*time.Millisecond)))
+				switch mode {
+				case "gateway_off":
+					rig.setSettings(func(s *oai.Settings) { s.Enabled = false })
+				case "revoked":
+					if n := rv.revoke(); n != 1 {
+						t.Fatalf("revoked %d running requests, want 1", n)
+					}
+				case "shutdown":
+					shutdown()
+				}
+				once.Do(func() { close(gate) })
+				var a chatAnswer
+				select {
+				case a = <-done:
+				case <-time.After(10 * time.Second):
+					t.Fatal("no answer")
+				}
+				w := want[mode]
+				if code, _, _ := a.envelope(t); a.status != w.status || code != w.code || rt.answered(a.body) {
+					t.Errorf("client %d %q (%d bytes) — want %d %q without the answer", a.status, code, len(a.body), w.status, w.code)
+				}
+				r := store.only(t)
+				if r.state != llmlog.RecordingDone || r.out.Status != a.status || r.out.Code != w.code || string(r.response) != string(a.body) {
+					t.Errorf("row: state %q status %d code %q answer %d bytes — want done %d %q with the client's %d bytes",
+						r.state, r.out.Status, r.out.Code, len(r.response), a.status, w.code, len(a.body))
+				}
+			})
+		}
+	}
+}
+
+// TestRecordingHeldErrorLostAcknowledgement: an error answer held for its
+// row whose commit went through but reported an error goes out as 503
+// recording_unavailable — and the row then says that, not the error answer
+// the client never got.
+func TestRecordingHeldErrorLostAcknowledgement(t *testing.T) {
+	u := newUpstream(t, recChatAnswer)
+	u.setRespond(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"` + recRejection + `","type":"invalid_request_error"}}`))
+	})
+	store := newRecStore(nil)
+	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withRecordings(store))
+	rig.setSettings(func(s *oai.Settings) { s.RelayUpstream4xxMessages = true })
+	ca := recordingConsumer(true)
+	ca.ConsumerID = uuid.NewString()
+	rig.ca.Store(ca)
+	store.set(func(s *recStore) { s.finishLost = 1 })
+	a := rig.post(t, chatBody("pub"))
+	checkRecordingRefusal(t, a.status, a.header, a.body)
+	r := store.only(t)
+	if r.state != llmlog.RecordingDone || r.out.Status != http.StatusServiceUnavailable || r.out.Code != oai.CodeRecordingUnavailable ||
+		strings.Contains(string(r.response), "marker-571-rejected") {
+		t.Errorf("row: state %q status %d code %q answer %q — want done 503 recording_unavailable, not the error the client did not get",
+			r.state, r.out.Status, r.out.Code, r.response)
+	}
+	if got := statsOf(ca.ConsumerID); got.Unfinished != 0 || got.Recorded != 1 {
+		t.Errorf("counts %+v — want recorded 1, unfinished 0", got)
+	}
+}
+
+// TestRecordingPanicAfterAHeldAnswer: a route that wrote an error answer —
+// held for its row — and then panics: the client gets oai.Recover's 503,
+// and the row says 503 internal_error, not the held answer.
+func TestRecordingPanicAfterAHeldAnswer(t *testing.T) {
+	store := newRecStore(nil)
+	stage := oai.NewRecordingStage(store, func(context.Context) *auth.ConsumerAuth { return recordingConsumer(true) },
+		func() oai.Settings { return chatSettings() }, func() time.Duration { return time.Second })
+	rt := chi.NewRouter()
+	rt.Use(oai.Recover, stage.Handler)
+	rt.Post("/v1/chat/completions", func(w http.ResponseWriter, _ *http.Request) {
+		oai.WriteCode(w, oai.CodeUpstreamRejected, "a held answer", false)
+		panic("boom")
+	})
+	w := httptest.NewRecorder()
+	rt.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}")))
+	r := store.only(t)
+	if w.Code != 503 || strings.Contains(w.Body.String(), "a held answer") || r.out.Status != 503 || r.out.Code != oai.CodeInternalError ||
+		strings.Contains(string(r.response), "a held answer") {
+		t.Errorf("client %d %q, row status %d code %q answer %q — want 503 internal_error both, without the held answer",
+			w.Code, w.Body.String(), r.out.Status, r.out.Code, r.response)
 	}
 }

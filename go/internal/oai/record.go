@@ -41,8 +41,9 @@ import (
 //     Every answer that is not a 2xx — a refusal, an error, a backend's
 //     rejection whose text the gateway relays — is held from the client by
 //     the stage's writer until the request's outcome is committed with its
-//     bytes (release); one whose row cannot take it after a backend was
-//     asked is 503 recording_unavailable in its place. A request that
+//     bytes (release); one whose row cannot take it once the row was opened
+//     (the request reached its walk) is 503 recording_unavailable in its
+//     place, and that 503 supersedes the row. A request that
 //     stops being served while its answer is committed (a revoked key, the
 //     model API switched off — heldStillServes) gets that refusal, never the
 //     answer, and its outcome supersedes the committed answer in the row;
@@ -438,22 +439,48 @@ func (rr *requestRecording) withhold() {
 // (D8 for the time the commit took; stillServes ran before it): the model
 // API switched off, the alias gone (in memory; the grant is read again only
 // when the alias registry moved since the entry, as a watcher tick does),
-// the key revoked or its consumer deactivated (the door's registry ended
-// the request with auth.ErrCredentialRevoked), the shutdown. A cause: the
-// answer does not go out — the route answers the cause and withholds it. A
-// request deadline that passed during the commit is none: the answer is
-// ready (answer).
-func (d Deps) heldStillServes(ctx context.Context, t watchTarget) error {
+// the shutdown, the key revoked or its consumer deactivated — read on the
+// request's own context client, which the door's registry ends with
+// auth.ErrCredentialRevoked: the run's context ctx may have passed its
+// deadline during the commit, and a context that ended keeps its first
+// cause. A cause: the answer does not go out — the route answers it
+// (refuseHeld) and withholds the answer. A deadline that passed during the
+// commit is none: the answer is ready (answer).
+func (d Deps) heldStillServes(ctx, client context.Context, t watchTarget) error {
 	if _, err := d.recheck(ctx, t, t.gen, false); err != nil {
 		return err
 	}
 	if d.Lifecycle != nil && d.Lifecycle.Err() != nil {
 		return errShutdown
 	}
-	if cause := context.Cause(ctx); errors.Is(cause, auth.ErrCredentialRevoked) {
+	if cause := context.Cause(client); errors.Is(cause, auth.ErrCredentialRevoked) {
 		return cause
 	}
 	return nil
+}
+
+// refuseHeld answers a request whose held answer heldStillServes stopped
+// with the refusal the route's verdict gives that cause — written here, not
+// through the verdict, which reads the run's context: past its deadline that
+// context's cause is the deadline whatever ended the request since. It
+// returns the refusal's code.
+func refuseHeld(cause error, rec *AccessRecord, w http.ResponseWriter, r *http.Request) string {
+	switch {
+	case errors.Is(cause, errGatewayOff):
+		rec.Reason = CodeNotFound
+		NotFound(w, r)
+		return CodeNotFound
+	case errors.Is(cause, errModelGone):
+		refuseModelNotFound(w, r)
+		return CodeModelNotFound
+	case errors.Is(cause, errShutdown):
+		rec.Reason = CodeInternalError
+		WriteCode(w, CodeInternalError, shutdownMessage, true)
+		return CodeInternalError
+	}
+	rec.Reason = CodeInvalidAPIKey // auth.ErrCredentialRevoked
+	WriteInvalidAPIKey(w)
+	return CodeInvalidAPIKey
 }
 
 // finish commits o on the open row. The statement's copies of o.Response
@@ -579,12 +606,9 @@ func (rr *requestRecording) end(code string) {
 		rr.req.Body = nil // in the row since the open
 		if err := rr.finish(ctx, o); err != nil {
 			rr.unfinished = true
-			// answer_withheld: the row may hold an answer the client did not
-			// get (its commit went through before the request stopped being
-			// served, or its acknowledgement was lost) instead of staying open.
-			slog.Error("gateway: the outcome of a recorded request could not be recorded — its row stays open",
-				"consumer_id", rr.req.ConsumerID, "recording_id", rr.req.ID, "stream_answer_lost", rr.streamed,
-				"answer_withheld", rr.withheld, "error", err)
+			if !rr.holdingAnswer() {
+				rr.logUnfinished(err)
+			} // a held answer: release answers 503 in its place and supersedes the row (endStage)
 			return
 		}
 		rr.settled = true
@@ -602,6 +626,30 @@ func (rr *requestRecording) end(code string) {
 		return
 	}
 	rr.row, rr.ended, rr.settled = true, true, true
+}
+
+// logUnfinished is the ERROR of a request whose outcome could not be
+// recorded: its row stays open — or, answer_withheld, it may keep an answer
+// the client did not get (its commit went through before the request
+// stopped being served, or its acknowledgement was lost).
+func (rr *requestRecording) logUnfinished(err error) {
+	slog.Error("gateway: the outcome of a recorded request could not be recorded — its row stays open",
+		"consumer_id", rr.req.ConsumerID, "recording_id", rr.req.ID, "stream_answer_lost", rr.streamed,
+		"answer_withheld", rr.withheld, "error", err)
+}
+
+// supersedeReplaced writes the outcome of a held answer that release
+// replaced with 503 recording_unavailable — its row's commit failed, and it
+// may have gone through all the same: that 503 supersedes whatever the row
+// holds. A failure stays counted as unfinished.
+func (rr *requestRecording) supersedeReplaced() {
+	rr.withheld = true
+	o := llmlog.RecordedOutcome{Status: http.StatusServiceUnavailable, Code: CodeRecordingUnavailable, Supersedes: true}
+	if err := rr.finish(context.Background(), o); err != nil {
+		rr.logUnfinished(err)
+		return
+	}
+	rr.unfinished, rr.settled = false, true
 }
 
 // dropCapture gives the captured answer back to the account.
@@ -630,8 +678,8 @@ func (rr *requestRecording) endStage(p any, w http.ResponseWriter) {
 		_ = http.NewResponseController(w).Flush()
 	}
 	rr.end(code)
-	if p == nil {
-		rr.release(w)
+	if p == nil && rr.release(w) {
+		rr.supersedeReplaced()
 	}
 	recStats.done(rr.stats, rr.row, rr.unfinished, rr.unfinished && rr.streamed)
 }
@@ -710,16 +758,18 @@ func (rr *requestRecording) dropHeld(status int) {
 
 // release writes the held answer once the request's outcome is decided:
 // as held when the row holds it (settled) or when the request never reached
-// a backend (no open row: a refusal in the gateway's own words); otherwise —
-// a backend was asked and the row could not take what the client would get —
-// 503 recording_unavailable in its place, from the headers at the stage.
-func (rr *requestRecording) release(w http.ResponseWriter) {
+// its walk (no open row: a refusal in the gateway's own words, nothing a
+// backend sent); otherwise — the row was opened and could not take what the
+// client would get — 503 recording_unavailable in its place, from the
+// headers at the stage, flushed before the row's superseding attempt;
+// replaced reports that.
+func (rr *requestRecording) release(w http.ResponseWriter) (replaced bool) {
 	rr.statusMu.Lock()
 	holding, code, body := rr.holding, rr.heldCode, rr.heldBody
 	rr.holding, rr.heldBody, rr.passed = false, nil, true
 	rr.statusMu.Unlock()
 	if !holding {
-		return
+		return false
 	}
 	if !rr.settled && rr.opened {
 		h := w.Header()
@@ -728,12 +778,14 @@ func (rr *requestRecording) release(w http.ResponseWriter) {
 			h[k] = v
 		}
 		refuseRecording(rr.access, w)
-		return
+		_ = http.NewResponseController(w).Flush()
+		return true
 	}
 	w.WriteHeader(code)
 	if _, err := w.Write(body); err != nil { //nolint:gosec // G705: body is the route's own error envelope (WriteCode, refuseParam — encoding/json's escape), held and written unchanged: the bytes the unrecorded path writes
 		slog.Warn("gateway: failed to write a held answer", "error", err, "recording_id", rr.req.ID)
 	}
+	return false
 }
 
 // refuseRecording answers a request whose recording failed: 503
