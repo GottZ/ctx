@@ -977,3 +977,44 @@ func TestRecordingViewTranslateBackendErrorKeepsNothing(t *testing.T) {
 		t.Errorf("a process log line carries the backend's answer")
 	}
 }
+
+// TestRecordingViewTranslateQuotaBeforeTheAudit: a translation the tenant
+// quota refuses — its daily call budget spent, a gate that binds this
+// instance's own backends too — is refused before anything is sent and
+// leaves no audit row, like every refusal before the wire.
+func TestRecordingViewTranslateQuotaBeforeTheAudit(t *testing.T) {
+	w := newRecViewWorld(t, localFullTrust)
+	ctx := context.Background()
+	if a := w.v1(recViewChat(recViewSecret)); a.status != http.StatusOK {
+		t.Fatalf("recorded chat: %d %s", a.status, a.body)
+	}
+	id := w.newest(t)
+	// The server-admin key's home scope belongs to the default tenant.
+	if _, err := w.f.seed.Exec(ctx, `INSERT INTO context_tenant_quota (scope, daily_calls) VALUES ('private', 0)`); err != nil {
+		t.Fatalf("quota: %v", err)
+	}
+	// The router's accountant reads the quota through a cache it refreshes in
+	// the background and passes while it is cold: translate until the gate
+	// refuses — that refusal is the call under test.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		hits, audits := w.e.hits.Load(), w.audits(t)
+		status, body, resp := w.adminCall(t, "model-recording-translate", map[string]any{"id": id, "address": "request/messages/1", "language": "de"})
+		if status == http.StatusTooManyRequests && resp["code"] == "quota_exceeded" {
+			if n := w.e.hits.Load() - hits; n != 0 {
+				t.Errorf("the refused translation made %d model calls, want none", n)
+			}
+			if n := w.audits(t) - audits; n != 0 {
+				t.Errorf("the refused translation wrote %d audit rows, want none — nothing was sent", n)
+			}
+			return
+		}
+		if status != http.StatusOK {
+			t.Fatalf("translate while the quota cache is cold: %d %s", status, body)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the tenant quota never refused the translation")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

@@ -281,19 +281,28 @@ func checkRecordingWindow(chain []backends.Backend, fallback int, system, user s
 	return nil
 }
 
-// CheckRecordingTranslate answers before anything is sent whether the call
-// can go out: the chain (ErrNoEligibleBackend) and the window check
-// (ErrRecordingWindow) for this chunk's prompt — the caller audits a
-// translation only once it will be sent.
-func CheckRecordingTranslate(pool *backends.Pool, windowFallback int, in RecordingTranslateInput) error {
+// CheckRecordingTranslate answers before anything is sent whether the call c
+// can go out: the chain (ErrNoEligibleBackend), the tenant quota of
+// c.QuotaScope (*backends.ErrQuotaExceeded — its call budget binds this
+// instance's own backends too) and the window check (ErrRecordingWindow) for
+// this chunk's prompt — the caller audits a translation only once it will be
+// sent. The quota gate is the one ChainCall.Do applies and reads only, so
+// asking it twice spends nothing; a call that takes the budget's last unit
+// between the two gates leaves the audit row of a translation the second
+// gate refuses — an audit that over-reports by one, never one that misses a
+// sent chunk.
+func CheckRecordingTranslate(c RecordingTranslateCall, in RecordingTranslateInput) error {
 	if _, ok := RecordingLanguages[in.Language]; !ok {
 		return ErrRecordingLanguage
 	}
-	chain, err := RecordingTranslateChain(pool)
+	chain, err := RecordingTranslateChain(c.Pool)
 	if err != nil {
 		return err
 	}
-	return checkRecordingWindow(chain, windowFallback, recordingTranslateSystem(recordingZeroNonce),
+	if _, err := GateQuota(c.Quota, c.QuotaScope, chain, backends.RoleChat, recordingTranslateRequired); err != nil {
+		return err
+	}
+	return checkRecordingWindow(chain, c.WindowFallback, recordingTranslateSystem(recordingZeroNonce),
 		recordingTranslatePrompt(in, recordingZeroNonce))
 }
 

@@ -105,9 +105,15 @@ func (h *ManageHandler) handleModelRecordingTranslate(w http.ResponseWriter, r *
 		Address: d.Address, Kind: b.Kind, Role: b.Role, Text: chunks[d.Chunk], Chunk: d.Chunk, Chunks: len(chunks), Language: d.Language,
 	}
 	cfg := h.cfg.SnapshotForRequest(r.Context())
-	// Nothing is audited that will not be sent: the chain and the window are
-	// checked first (no row for a refusal before the wire).
-	if err := llm.CheckRecordingTranslate(h.backendPool, cfg.Pool.ExternalNumCtxFallback, tin); err != nil {
+	call := llm.RecordingTranslateCall{
+		DB: h.pool, Pool: h.backendPool, Quota: h.quota, QuotaScope: ar.HomeScope, APIKeyID: ar.ApiKeyID,
+		WindowFallback: cfg.Pool.ExternalNumCtxFallback,
+		Admission:      llm.Admission{Admitter: h.admitter, Class: dispatch.ClassInteractive},
+	}
+	// Nothing is audited that will not be sent: the chain, the tenant quota
+	// and the window are checked first, with the call that is then sent (no
+	// row for a refusal before the wire).
+	if err := llm.CheckRecordingTranslate(call, tin); err != nil {
 		writeRecordingTranslateError(w, r, err)
 		return
 	}
@@ -121,11 +127,7 @@ func (h *ManageHandler) handleModelRecordingTranslate(w http.ResponseWriter, r *
 		return
 	}
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(llm.RecordingTranslateDeadline(chain) + recordingWriteMargin))
-	out, err := llm.TranslateRecordingBlock(r.Context(), llm.RecordingTranslateCall{
-		DB: h.pool, Pool: h.backendPool, Quota: h.quota, QuotaScope: ar.HomeScope, APIKeyID: ar.ApiKeyID,
-		WindowFallback: cfg.Pool.ExternalNumCtxFallback,
-		Admission:      llm.Admission{Admitter: h.admitter, Class: dispatch.ClassInteractive},
-	}, tin)
+	out, err := llm.TranslateRecordingBlock(r.Context(), call, tin)
 	if err != nil {
 		writeRecordingTranslateError(w, r, err)
 		return
