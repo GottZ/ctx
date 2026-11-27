@@ -3,6 +3,7 @@ package oai
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -48,14 +49,19 @@ import (
 //     with what was read of the body. A request for which no row could be
 //     written at all is counted (unrecordable); it was refused, never served.
 //
-// The writes are synchronous and never queued. What they copy — pgx encodes a
-// parameter into its own buffer and that into the connection's write buffer
-// — and what a stream or a rerank answer keeps is held against ONE
-// process-wide account (recordingAccount), not against the request's
-// in-flight reservation: the switch changes no booking of the request, so a
-// recorded request meets the same refusals as any other plus the one of its
-// own. A write waits for room in the account (backpressure); it never drops
-// what it was given.
+// The writes are synchronous and never queued; at most
+// maxRecordingStatements of them run at once (a slot), so a hanging
+// database binds that many connections of the process pool, never all of
+// them. What they copy — pgx encodes a parameter into its own buffer and that
+// into the connection's write buffer — and what a stream or a rerank answer
+// keeps is held against ONE process-wide account (recordingAccount), not
+// against the request's in-flight reservation: the switch changes no booking
+// of the request, so a recorded request meets the same refusals as any other
+// plus the one of its own. A write waits for a slot and for room in the
+// account (backpressure); it never drops what it was given. The final
+// statement of a captured answer takes its copies even past the account's
+// bound (at most maxRecordingStatements at once): it already holds its
+// capture, and waiting for room the other captures hold could wait on itself.
 
 // recordingMessage is its text.
 const recordingMessage = "The request could not be recorded; retry shortly."
@@ -72,19 +78,27 @@ const recordWriteTimeout = 5 * time.Second
 // (recordAccountLimit) so that the largest request always fits.
 const recordAccountFloor = 128 << 20
 
+// maxRecordingStatements bounds the recording statements that run at once,
+// process-wide — fixed in the code like llmlog's maxConcurrentInserts: it
+// bounds the process's own use of its pool, it is no policy of anybody's.
+const maxRecordingStatements = 4
+
+// recordSlots are the statement slots.
+var recordSlots = make(chan struct{}, maxRecordingStatements)
+
 // recordCopyFactor is what one recording statement allocates per byte it
 // carries: pgx encodes the parameter into its argument buffer, the Bind
 // message copies it into the connection's write buffer, which grows by
-// append once more on the next field (TestRecordingInsertAllocates measures
-// it). Garbage after the statement, held against the account until it
-// returns.
+// append once more on the next field (llmlog's TestRecordingStatementCost
+// measured 2.0–2.3 × for bodies of 64 KiB to 8 MiB). Garbage after the
+// statement, held against the account until it returns.
 const recordCopyFactor = 3
 
-// recordAccountLimit is the account's size under s: the floor, or what one
-// request's body or one answer at the caps costs a statement, whichever is
-// larger.
+// recordAccountLimit is the account's size under s: the floor, or what the
+// row of a refused request at the caps holds while it is written — its body
+// and the statement's copies —, whichever is larger.
 func recordAccountLimit(s Settings) int64 {
-	return max(int64(recordAccountFloor), recordCopyFactor*int64(max(s.MaxRequestBytes, s.MaxResponseBytes)))
+	return max(int64(recordAccountFloor), (1+recordCopyFactor)*int64(max(s.MaxRequestBytes, s.MaxResponseBytes)))
 }
 
 // errRecordingUnavailable is the cause of a run whose recording failed (a
@@ -146,6 +160,16 @@ func (a *recordingAccount) acquire(ctx context.Context, n, limit int64) error {
 	}
 }
 
+// take adds n bytes whatever the bound (a captured answer's final copies).
+func (a *recordingAccount) take(n int64) {
+	if n <= 0 {
+		return
+	}
+	a.mu.Lock()
+	a.held += n
+	a.mu.Unlock()
+}
+
 // release gives n bytes back and wakes the waiters.
 func (a *recordingAccount) release(n int64) {
 	if n <= 0 {
@@ -198,7 +222,7 @@ func (s *RecordingStage) Handler(next http.Handler) http.Handler {
 		rr := s.begin(ca, r)
 		defer func() {
 			p := recover()
-			rr.endStage(p)
+			rr.endStage(p, w)
 			if p != nil {
 				panic(p)
 			}
@@ -220,7 +244,7 @@ func (s *RecordingStage) begin(ca *auth.ConsumerAuth, r *http.Request) *requestR
 	if r.ContentLength < 0 {
 		rr.req.Declared = -1
 	}
-	rr.stats = recStats.admit(ca.ConsumerID, ca.TenantID)
+	rr.stats = recStats.admit(ca.ConsumerID)
 	return rr
 }
 
@@ -305,8 +329,8 @@ func (rr *requestRecording) ready() bool { return rr == nil || rr.opened }
 
 // open commits the request's row before the walk; false when it cannot —
 // the caller refuses the request (refuseRecording) and serves nothing. The
-// wait for room in the account is the dispatcher's external wait budget,
-// the statement recordWriteTimeout.
+// wait for room and a slot is the dispatcher's external wait budget, the
+// statement recordWriteTimeout.
 func (rr *requestRecording) open(ctx context.Context) bool {
 	if rr == nil || rr.opened {
 		return true
@@ -315,29 +339,46 @@ func (rr *requestRecording) open(ctx context.Context) bool {
 		slog.Error("gateway: a recording consumer's request without a recording store (wiring defect) — refused")
 		return false
 	}
-	n := recordCopyFactor * int64(len(rr.req.Body))
-	wctx, cancel := context.WithTimeout(ctx, rr.stage.maxWait())
-	err := rr.acct.acquire(wctx, n, recordAccountLimit(rr.stage.settings()))
-	cancel()
+	err := rr.statement(ctx, rr.stage.maxWait(), recordCopyFactor*int64(len(rr.req.Body)), false,
+		func(sctx context.Context) error { return rr.stage.store.Open(sctx, rr.req) })
 	if err != nil {
-		slog.Warn("gateway: no room to record a request — refused", "consumer_id", rr.req.ConsumerID, "bytes", len(rr.req.Body), "error", err)
-		return false
-	}
-	defer rr.acct.release(n)
-	sctx, cancel := context.WithTimeout(ctx, recordWriteTimeout)
-	defer cancel()
-	if err := rr.stage.store.Open(sctx, rr.req); err != nil {
-		slog.Warn("gateway: a request could not be recorded — refused", "consumer_id", rr.req.ConsumerID, "error", err)
+		slog.Warn("gateway: a request could not be recorded — refused", "consumer_id", rr.req.ConsumerID, "bytes", len(rr.req.Body), "error", err)
 		return false
 	}
 	rr.row, rr.opened = true, true
 	return true
 }
 
+// statement runs one recording statement: n bytes of the account first
+// (waiting for room until wait ends; force: taken past the bound), then a
+// slot (waiting until wait ends), then fn under recordWriteTimeout. In this
+// order nobody waits while holding a slot — a slot holder only waits for the
+// database.
+func (rr *requestRecording) statement(ctx context.Context, wait time.Duration, n int64, force bool, fn func(context.Context) error) error {
+	wctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	if force {
+		rr.acct.take(n)
+	} else if err := rr.acct.acquire(wctx, n, recordAccountLimit(rr.stage.settings())); err != nil {
+		return fmt.Errorf("oai: no room to record: %w", err)
+	}
+	defer rr.acct.release(n)
+	select {
+	case recordSlots <- struct{}{}:
+	case <-wctx.Done():
+		return fmt.Errorf("oai: no recording slot: %w", wctx.Err())
+	}
+	defer func() { <-recordSlots }()
+	sctx, scancel := context.WithTimeout(ctx, recordWriteTimeout)
+	defer scancel()
+	return fn(sctx)
+}
+
 // answer commits the outcome of a non-streamed answer — status 200 and body
 // as the client will get it (nil: an answer not kept, the embedding
 // vectors) — before it is written; false when it cannot: the caller answers
-// refuseRecording instead.
+// refuseRecording instead. The answer is ready: the request's own deadline
+// does not cut its commit short (only recordWriteTimeout does).
 func (rr *requestRecording) answer(ctx context.Context, body []byte) bool {
 	if rr == nil {
 		return true
@@ -345,28 +386,22 @@ func (rr *requestRecording) answer(ctx context.Context, body []byte) bool {
 	if !rr.opened || rr.ended {
 		return false // the walk ran on an open row (ready); anything else is a defect
 	}
-	if err := rr.finish(ctx, llmlog.RecordedOutcome{Status: http.StatusOK, Response: body}); err != nil {
+	if err := rr.finish(context.WithoutCancel(ctx), llmlog.RecordedOutcome{Status: http.StatusOK, Response: body}); err != nil {
 		slog.Warn("gateway: an answer could not be recorded — refused", "consumer_id", rr.req.ConsumerID, "error", err)
 		return false
 	}
 	return true
 }
 
-// finish commits o on the open row, the statement's copies of o.Response
-// against the account — booked here for an answer of the request's own
-// (a chat answer), with the capture for a captured one (addCapture).
+// finish commits o on the open row. The statement's copies of o.Response
+// wait for room for an answer of the request's own (a chat answer); for a
+// captured one (a stream's lines, a rerank answer) they are taken past the
+// bound — the capture is held already.
 func (rr *requestRecording) finish(ctx context.Context, o llmlog.RecordedOutcome) error {
-	n := recordCopyFactor * int64(len(o.Response))
-	if len(o.Response) > 0 && len(rr.capture) > 0 && &o.Response[0] == &rr.capture[0] {
-		n = 0 // booked with the capture
-	}
-	wctx, cancel := context.WithTimeout(ctx, recordWriteTimeout)
-	defer cancel()
-	if err := rr.acct.acquire(wctx, n, recordAccountLimit(rr.stage.settings())); err != nil {
-		return err
-	}
-	defer rr.acct.release(n)
-	if err := rr.stage.store.Finish(wctx, rr.req.ID, o); err != nil {
+	captured := len(o.Response) > 0 && len(rr.capture) > 0 && &o.Response[0] == &rr.capture[0]
+	err := rr.statement(ctx, recordWriteTimeout, recordCopyFactor*int64(len(o.Response)), captured,
+		func(sctx context.Context) error { return rr.stage.store.Finish(sctx, rr.req.ID, o) })
+	if err != nil {
 		return err
 	}
 	rr.ended = true
@@ -384,10 +419,7 @@ func (rr *requestRecording) addCapture(p []byte) bool {
 	}
 	if need := len(rr.capture) + len(p); need > cap(rr.capture) {
 		grown := max(2*cap(rr.capture), need)
-		// The buffer and, booked with it, the copies of the statement that
-		// will carry it (finish takes nothing more for a captured answer:
-		// nobody holds account bytes while waiting for more).
-		booked := int64(grown) * (1 + recordCopyFactor)
+		booked := int64(grown) // the buffer; its final statement's copies come at finish
 		if !rr.acct.tryAcquire(booked, recordAccountLimit(rr.stage.settings())) {
 			return false
 		}
@@ -491,14 +523,8 @@ func (rr *requestRecording) end(code string) {
 		return
 	}
 	n := (1+recordCopyFactor)*int64(len(rr.req.Body)) + recordCopyFactor*int64(len(o.Response))
-	wctx, cancel := context.WithTimeout(ctx, recordWriteTimeout)
-	defer cancel()
-	if err := rr.acct.acquire(wctx, n, recordAccountLimit(rr.stage.settings())); err != nil {
-		slog.Error("gateway: a refused request of a recording consumer could not be recorded", "consumer_id", rr.req.ConsumerID, "error", err)
-		return
-	}
-	defer rr.acct.release(n)
-	if err := rr.stage.store.Insert(wctx, rr.req, o); err != nil {
+	if err := rr.statement(ctx, recordWriteTimeout, n, false,
+		func(sctx context.Context) error { return rr.stage.store.Insert(sctx, rr.req, o) }); err != nil {
 		slog.Error("gateway: a refused request of a recording consumer could not be recorded", "consumer_id", rr.req.ConsumerID, "error", err)
 		return
 	}
@@ -515,7 +541,7 @@ func (rr *requestRecording) dropCapture() {
 // panicked: the outcome with the access record's code — a recovered panic as
 // the 503 internal_error oai.Recover answers, unless the response had begun
 // —, then the request's count.
-func (rr *requestRecording) endStage(p any) {
+func (rr *requestRecording) endStage(p any, w http.ResponseWriter) {
 	code := ""
 	if rr.access != nil {
 		code = rr.access.Reason
@@ -523,6 +549,11 @@ func (rr *requestRecording) endStage(p any) {
 	if p != nil && rr.writeStatus() == 0 {
 		rr.noteStatus(http.StatusServiceUnavailable)
 		code = CodeInternalError
+	}
+	if p == nil && code == CodeRecordingUnavailable {
+		// The database is in trouble: the client gets its 503 now, not after
+		// the row's own attempt below (up to recordWriteTimeout more).
+		_ = http.NewResponseController(w).Flush()
 	}
 	rr.end(code)
 	recStats.done(rr.stats, rr.row, rr.unfinished, rr.unfinished && rr.streamed)
@@ -573,7 +604,6 @@ func (w recordingWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 // process (GET /api/status, docs/operations.md "Recording a consumer"):
 // admitted = in_flight + recorded + unrecordable at every moment.
 type recordingConsumerStats struct {
-	tenant                                     string
 	admitted, inFlight, recorded, unrecordable int64
 	unfinished, streamAnswersUnrecorded        int64
 }
@@ -588,7 +618,7 @@ type recordingStats struct {
 
 var recStats = &recordingStats{by: map[string]*recordingConsumerStats{}, from: time.Now().UTC()}
 
-func (s *recordingStats) admit(consumer, tenant string) *recordingConsumerStats {
+func (s *recordingStats) admit(consumer string) *recordingConsumerStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.by[consumer]
@@ -596,7 +626,6 @@ func (s *recordingStats) admit(consumer, tenant string) *recordingConsumerStats 
 		c = &recordingConsumerStats{}
 		s.by[consumer] = c
 	}
-	c.tenant = tenant
 	c.admitted++
 	c.inFlight++
 	return c
@@ -623,11 +652,10 @@ func (s *recordingStats) done(c *recordingConsumerStats, row, unfinished, stream
 // (gateway.recording.consumers).
 type RecordingConsumer struct {
 	ConsumerID string `json:"consumer_id"`
-	TenantID   string `json:"-"`
 	// Admitted requests passed the door as this consumer; each is in
 	// flight, recorded (its row is in context_llm_recordings) or
-	// unrecordable (no row could be written; the request was refused, not
-	// served).
+	// unrecordable (no row could be written: an inference request was
+	// refused, not served; a model list may have been answered).
 	Admitted     int64 `json:"admitted"`
 	InFlight     int64 `json:"in_flight"`
 	Recorded     int64 `json:"recorded"`
@@ -657,7 +685,7 @@ func RecordingStats() RecordingSnapshot {
 	recStats.mu.Lock()
 	snap.Since = recStats.from
 	for id, c := range recStats.by {
-		snap.Consumers = append(snap.Consumers, RecordingConsumer{ConsumerID: id, TenantID: c.tenant,
+		snap.Consumers = append(snap.Consumers, RecordingConsumer{ConsumerID: id,
 			Admitted: c.admitted, InFlight: c.inFlight, Recorded: c.recorded, Unrecordable: c.unrecordable,
 			Unfinished: c.unfinished, StreamAnswersUnrecorded: c.streamAnswersUnrecorded})
 	}

@@ -972,6 +972,7 @@ func (c *rerankCall) success(st *rerankState) embedOutcome {
 		// gets the same bytes in one write. One that cannot be kept or held
 		// is refused instead.
 		if err := writeRerank(captureWriter{c.recording}, a); err != nil || !c.recording.answer(c.ctx, c.recording.capture) {
+			c.recording.dropCapture() // not the client's answer: the row ends with the refusal only
 			refuseRecording(c.rec, c.w)
 			return embedOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeRecordingUnavailable}}
 		}

@@ -79,9 +79,12 @@
 -- adds 2.6 M recording rows a day: three index entries per insert (the
 -- primary key, the consumer's time line, the janitor's partial index), one
 -- update of the same row by its primary key that changes no indexed column
--- and no index predicate (it can stay on its page, HOT), and the janitor's
--- UPDATE over the rows that left the retention since its last run — its
--- partial index holds only rows that still carry a body.
+-- and no index predicate (HOT where its page has room: measured 25 % of the
+-- updates for small chat rows and 78 % for 20 KB requests, before a vacuum),
+-- and the janitor's UPDATE over the rows that left the retention since its
+-- last run — its partial index holds only rows that still carry a body. The
+-- janitor NULLs the bodies, it deletes no row: a row's skeleton (a few
+-- hundred bytes) stays.
 --
 -- Idempotent: ADD COLUMN IF NOT EXISTS, CREATE OR REPLACE FUNCTION, DROP
 -- TRIGGER IF EXISTS + CREATE, DROP FUNCTION IF EXISTS + CREATE, CREATE TABLE

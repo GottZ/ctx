@@ -283,6 +283,10 @@ func TestV1RecordedConsumer(t *testing.T) {
 		}
 	})
 	t.Run("insert_hangs_not_served", func(t *testing.T) {
+		// Over a real server: the client gets its 503 when the hold gives up
+		// (the 5 s statement deadline), not after the row's second attempt.
+		srv := httptest.NewTLSServer(f.router)
+		defer srv.Close()
 		tx, err := f.seed.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -291,15 +295,25 @@ func TestV1RecordedConsumer(t *testing.T) {
 			t.Fatal(err)
 		}
 		hits := e.hits.Load()
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(chat))
+		req.Header.Set("Authorization", "Bearer "+recKey)
+		req.Header.Set("Content-Type", "application/json")
 		start := time.Now()
-		a := f.post(t, recKey, chat)
+		resp, err := srv.Client().Do(req)
 		took := time.Since(start)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatalf("request: %v", err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
 		_ = tx.Rollback(ctx)
+		a := v1Answer{status: resp.StatusCode, header: resp.Header, body: raw}
 		if a.status != 503 || v1RecCode(a) != "recording_unavailable" || e.hits.Load() != hits {
 			t.Errorf("answer %d %q after %v, %d engine calls — want 503 recording_unavailable, none", a.status, v1RecCode(a), took, e.hits.Load()-hits)
 		}
-		if took < 5*time.Second {
-			t.Errorf("answered after %v — the statement deadline is 5 s", took)
+		if took < 5*time.Second || took > 8*time.Second {
+			t.Errorf("the client had its answer after %v — the statement deadline is 5 s", took)
 		}
 	})
 	t.Run("answer_not_held_not_written", func(t *testing.T) {

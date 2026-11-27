@@ -70,6 +70,8 @@ type recStore struct {
 
 	openErr, finishErr, insertErr error
 	openHang                      bool
+	// finishFailures refuses that many Finish calls before it takes one.
+	finishFailures int
 }
 
 func newRecStore(hits func() int64) *recStore {
@@ -105,6 +107,10 @@ func (s *recStore) Finish(_ context.Context, id string, o llmlog.RecordedOutcome
 	defer s.mu.Unlock()
 	if s.finishErr != nil {
 		return s.finishErr
+	}
+	if s.finishFailures > 0 {
+		s.finishFailures--
+		return errors.New("finish refused once")
 	}
 	r := s.rows[id]
 	if r == nil || r.state != llmlog.RecordingOpen {
@@ -605,5 +611,63 @@ func TestRecordingAccountGivesBack(t *testing.T) {
 	_ = rr.postRerank(t, "/v1/rerank", rerankBody("rrpub", "q", []string{"d1", "d2"}))
 	if after := oai.RecordingHeld(); after != held {
 		t.Errorf("the recording account holds %d bytes after the requests ended, %d before", after, held)
+	}
+}
+
+// TestRecordingWithoutStageIsRefused: a recording consumer's request that
+// reaches a route without the recording stage (a wiring defect) is refused
+// with recording_unavailable — never served unrecorded.
+func TestRecordingWithoutStageIsRefused(t *testing.T) {
+	u := newUpstream(t, recChatAnswer)
+	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1)
+	rig.ca.Store(recordingConsumer(true))
+	a := rig.post(t, chatBody("pub"))
+	checkRecordingRefusal(t, a.status, a.header, a.body)
+	if n := u.hits.Load(); n != 0 {
+		t.Errorf("the backend was called %d times for a recording consumer without the stage", n)
+	}
+}
+
+// TestRecordingStreamBooksItsBuffer: a stream's capture holds its buffer of
+// the account, not a multiple of it — a stream whose lines fit twice into
+// the room left is served whole and kept.
+func TestRecordingStreamBooksItsBuffer(t *testing.T) {
+	sh := streamShapes[0]
+	u := newUpstream(t, "")
+	u.setRespond(sseRespond(sh.steps(), nil, nil))
+	store := newRecStore(nil)
+	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings, withRecordings(store))
+	srv := serveHTTP(t, rig.router)
+	rig.ca.Store(recordingConsumer(true))
+	first := postStream(context.Background(), t, srv, streamBody("chat"))
+	lines := len(store.only(t).response)
+	if lines == 0 {
+		t.Fatalf("the first stream kept nothing: %q", first.raw)
+	}
+	store.set(func(s *recStore) { s.rows = map[string]*recRow{} })
+	limit := oai.RecordingAccountLimit(chatSettings())
+	release := oai.FillRecordingAccount(limit - int64(oai.RecordCopyFactor*len(streamBody("chat"))) - int64(2*lines) - 64)
+	on := postStream(context.Background(), t, srv, streamBody("chat"))
+	release()
+	checkRelay(t, on)
+	if r := store.only(t); string(r.response)+"data: [DONE]\n\n" != on.raw || strings.Contains(on.raw, oai.CodeRecordingUnavailable) {
+		t.Errorf("a stream of %d bytes with room for twice its lines: kept %d bytes, client %q", lines, len(r.response), on.raw)
+	}
+}
+
+// TestRecordingRefusedRerankKeepsNoAnswer: a rerank answer whose commit
+// fails is refused, and the row it ends with carries the refusal, not the
+// answer the client never got.
+func TestRecordingRefusedRerankKeepsNoAnswer(t *testing.T) {
+	e := newRerankEngine(t)
+	store := newRecStore(nil)
+	rig := newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 4, 1, withRecordings(store))
+	rig.ca.Store(recordingConsumer(true))
+	store.set(func(s *recStore) { s.finishFailures = 1 })
+	a := rig.postRerank(t, "/v1/rerank", rerankBody("rrpub", "q", []string{"d1", "d2"}))
+	checkRecordingRefusal(t, a.status, a.header, a.body)
+	r := store.only(t)
+	if r.state != llmlog.RecordingDone || r.out.Status != 503 || r.out.Code != oai.CodeRecordingUnavailable || len(r.response) != 0 {
+		t.Errorf("row %q status %d code %q answer %d bytes — want done 503 recording_unavailable without an answer", r.state, r.out.Status, r.out.Code, len(r.response))
 	}
 }
