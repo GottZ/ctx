@@ -2,7 +2,10 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,9 +14,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GottZ/ctx/internal/backends"
 	"github.com/GottZ/ctx/internal/dispatch"
+	"github.com/GottZ/ctx/internal/httpx"
 )
 
 // sealLogBuffer captures the process's log lines for the test's duration.
@@ -105,5 +110,31 @@ func TestRecordingTranslateSealsBackendAnswers(t *testing.T) {
 		if !strings.Contains(out, class) {
 			t.Errorf("the walk's log has no attempt of %s:\n%s", class, out)
 		}
+	}
+}
+
+// TestSealedErrorKeepsWhatTheWalkReads: a sealed attempt error keeps what
+// the walk and the caller read of it — the class, the status, the
+// Retry-After that sets the row's cooldown, a context error — and nothing of
+// the backend's body.
+func TestSealedErrorKeepsWhatTheWalkReads(t *testing.T) {
+	orig := fmt.Errorf("llm: %w", &httpx.StatusError{Code: http.StatusTooManyRequests, Body: "slow down: password=Tr0ub4dor", RetryAfter: 240 * time.Second})
+	err := sealWireError(orig, "")
+	if got := retryAfterOf(err); got != 240*time.Second {
+		t.Errorf("Retry-After of the sealed 429: %s, want 4m0s (the cooldown reads it)", got)
+	}
+	if got := backends.Classify(err, ""); got != backends.ClassRateLimit {
+		t.Errorf("class: %s, want rate_limit", got)
+	}
+	if err.Error() != "rate_limit 429 sealed" {
+		t.Errorf("text: %q", err.Error())
+	}
+	var se *httpx.StatusError
+	if !errors.As(err, &se) || se.Body != "" || se.Code != http.StatusTooManyRequests {
+		t.Errorf("the status error the sealed one reaches: %+v, want status 429 and no body", se)
+	}
+	deadline := sealWireError(fmt.Errorf("llm: request failed: %w", context.DeadlineExceeded), "")
+	if !errors.Is(deadline, context.DeadlineExceeded) || backends.Classify(deadline, "") != backends.ClassTimeout {
+		t.Errorf("a sealed deadline: %v (%s), want a timeout that is still context.DeadlineExceeded", deadline, backends.Classify(deadline, ""))
 	}
 }
