@@ -375,8 +375,9 @@ type GatewayRow struct {
 	// (auth.ConsumerAuth.RecordBodies, migration 197), RecordingID the
 	// request's row in context_llm_recordings (recordings.go), which holds
 	// its request and answer whole. The row here is the row of every other
-	// consumer — the body policy, the cap and the seal apply as always —
-	// plus metadata.gw.recorded and recording_id.
+	// consumer without its bodies — none under any body policy: the
+	// recording is their one place — plus metadata.gw.recorded and
+	// recording_id.
 	Recorded    bool
 	RecordingID string
 }
@@ -427,7 +428,10 @@ func GatewayEntry(r GatewayRow) Entry {
 	case BodyLoggingErrors:
 		store = r.Err != nil
 	}
-	if store && bodiesAllowed(e.RequiredSensitivity, e.Pipeline) {
+	// A recording consumer's request and answer are in context_llm_recordings
+	// alone (recordings.go): its row here carries no bodies under any policy,
+	// so no reader of the LLM log — its detail, its export — has them.
+	if store && !r.Recorded && bodiesAllowed(e.RequiredSensitivity, e.Pipeline) {
 		e.RequestUser, e.ResponseContent = capBody(r.Request), capBody(r.Response)
 	}
 	return e.Slimmed(false)

@@ -17,7 +17,8 @@
 -- consumer's prompt_sensitivity, the body scan or Ctx-Sensitivity say: no
 -- cut, no seal — a row can carry credentials in clear text, and no ctx
 -- surface reads its bodies (internal/llmlog/recordings.go). The gateway's
--- context_llm_log row of such a request is the row every consumer gets, with
+-- context_llm_log row of such a request is the row every consumer gets
+-- without its bodies (none under any gateway.body_logging value), with
 -- metadata.gw.recorded and recording_id. Who may set the switch is the
 -- handler's rule (model-consumer-create/-update: switching on is
 -- server-admin only, also with self-service, and needs

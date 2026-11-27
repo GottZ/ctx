@@ -227,21 +227,19 @@ func TestV1RecordedConsumer(t *testing.T) {
 		if n := len(v1RecRows(t, f, plainID)); n != 0 {
 			t.Errorf("the consumer without the switch has %d recordings, want none", n)
 		}
-		// Its llmlog row is the row of every consumer, plus the marker.
+		// Its llmlog row is the row of every consumer without bodies, plus
+		// the marker.
 		f.settle(t)
-		var recUser, plainUser, sens, recorded, recordingID string
-		if err := f.seed.QueryRow(ctx, `SELECT COALESCE(request_user, ''), COALESCE(required_sensitivity, ''), COALESCE(metadata->'gw'->>'recorded', ''),
-			       COALESCE(metadata->'gw'->>'recording_id', '') FROM context_llm_log WHERE consumer_id = $1::uuid ORDER BY created_at DESC LIMIT 1`, recID).
-			Scan(&recUser, &sens, &recorded, &recordingID); err != nil {
+		var recUser, recAnswer, sens, recorded, recordingID string
+		if err := f.seed.QueryRow(ctx, `SELECT COALESCE(request_user, ''), COALESCE(response_content, ''), COALESCE(required_sensitivity, ''),
+			       COALESCE(metadata->'gw'->>'recorded', ''), COALESCE(metadata->'gw'->>'recording_id', '')
+			  FROM context_llm_log WHERE consumer_id = $1::uuid ORDER BY created_at DESC LIMIT 1`, recID).
+			Scan(&recUser, &recAnswer, &sens, &recorded, &recordingID); err != nil {
 			t.Fatalf("llmlog row: %v", err)
 		}
-		if err := f.seed.QueryRow(ctx, `SELECT COALESCE(request_user, '') FROM context_llm_log WHERE consumer_id = $1::uuid ORDER BY created_at DESC LIMIT 1`, plainID).
-			Scan(&plainUser); err != nil {
-			t.Fatalf("plain llmlog row: %v", err)
-		}
-		if recorded != "true" || recordingID != r.id || recUser != plainUser || sens != string(backends.SensCredentials) {
-			t.Errorf("llmlog row: recorded %q recording_id %q (want %q), bodies as the plain consumer's %v, class %q",
-				recorded, recordingID, r.id, recUser == plainUser, sens)
+		if recorded != "true" || recordingID != r.id || recUser != "" || recAnswer != "" || sens != string(backends.SensCredentials) {
+			t.Errorf("llmlog row: recorded %q recording_id %q (want %q), bodies %d/%d bytes (want none), class %q",
+				recorded, recordingID, r.id, len(recUser), len(recAnswer), sens)
 		}
 	})
 	t.Run("open_while_the_engine_holds_it", func(t *testing.T) {

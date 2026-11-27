@@ -211,8 +211,9 @@ const recChatAnswer = `{"id":"gen-1","object":"chat.completion","created":170000
 // recording consumer's request is in the store — the exact bytes sent, a
 // credentials pattern past 64 KiB included — before the backend saw it; the
 // row ends done with the answer the client got (embeddings: none); the
-// answer, the upstream body and the llmlog row's bodies are those of the
-// same request without the switch; the llmlog row names the recording.
+// answer, the upstream body and the required class are those of the same
+// request without the switch; the llmlog row names the recording and
+// carries no bodies (TestRecordedLLMLogRowCarriesNoBodies).
 func TestRecordingHoldsTheRequestBeforeAnyBackend(t *testing.T) {
 	long := strings.Repeat("abcdefgh", 12<<10) // 96 KiB, past the 64 KiB cap
 	t.Run("chat", func(t *testing.T) {
@@ -252,9 +253,9 @@ func TestRecordingHoldsTheRequestBeforeAnyBackend(t *testing.T) {
 			t.Fatalf("llmlog rows %d: recorded %v/%v, recording id %q (want %q)", len(rows), rows[0].Recorded, rows[1].Recorded, rows[1].RecordingID, r.req.ID)
 		}
 		eo, en := llmlog.GatewayEntry(rows[0]), llmlog.GatewayEntry(rows[1])
-		if eo.RequestUser != en.RequestUser || eo.ResponseContent != en.ResponseContent || en.RequiredSensitivity != eo.RequiredSensitivity {
-			t.Errorf("the llmlog row's bodies or class differ with the switch: %d/%d vs %d/%d bytes, %q vs %q",
-				len(eo.RequestUser), len(eo.ResponseContent), len(en.RequestUser), len(en.ResponseContent), eo.RequiredSensitivity, en.RequiredSensitivity)
+		if en.RequestUser != "" || en.ResponseContent != "" || en.RequiredSensitivity != eo.RequiredSensitivity {
+			t.Errorf("the recorded llmlog row: %d/%d body bytes (want none), class %q vs %q without the switch",
+				len(en.RequestUser), len(en.ResponseContent), en.RequiredSensitivity, eo.RequiredSensitivity)
 		}
 	})
 	t.Run("stream", func(t *testing.T) {
@@ -714,4 +715,90 @@ func TestRecordingStatementSlots(t *testing.T) {
 	if running != 4 || store.maxInOpen.Load() != 4 {
 		t.Errorf("%d Opens ran at once while the database held them (at most %d over the run) — want exactly 4", running, store.maxInOpen.Load())
 	}
+}
+
+// TestRecordedLLMLogRowCarriesNoBodies: under gateway.body_logging=full, the
+// context_llm_log row of a recording consumer's request carries no bodies —
+// its request and answer are in context_llm_recordings alone — while the row
+// of the same request without the switch carries both; the recorded row is
+// marked with its recording id. Chat, a stream, embeddings and rerank.
+func TestRecordedLLMLogRowCarriesNoBodies(t *testing.T) {
+	check := func(t *testing.T, rig *chatRig, store *recStore) {
+		t.Helper()
+		rows := rig.rows.all()
+		if len(rows) != 2 {
+			t.Fatalf("%d llmlog rows, want 2 (off, on)", len(rows))
+		}
+		off, on := llmlog.GatewayEntry(rows[0]), llmlog.GatewayEntry(rows[1])
+		if off.RequestUser == "" {
+			t.Fatalf("the unrecorded row carries no request under body_logging=full (handed %d bytes, sensitivity %q) — the test does not reach the body policy",
+				len(rows[0].Request), off.RequiredSensitivity)
+		}
+		if on.RequestSystem != "" || on.RequestUser != "" || on.ResponseContent != "" {
+			t.Errorf("the recorded llmlog row carries bodies (request %d, response %d bytes) — want none, the recording holds them",
+				len(on.RequestUser), len(on.ResponseContent))
+		}
+		if r := store.only(t); !rows[1].Recorded || rows[1].RecordingID != r.req.ID {
+			t.Errorf("recorded row: recorded %v recording_id %q, want true %q", rows[1].Recorded, rows[1].RecordingID, r.req.ID)
+		}
+	}
+	full := func(s *oai.Settings) { s.BodyLogging = llmlog.BodyLoggingFull }
+	t.Run("chat", func(t *testing.T) {
+		u := newUpstream(t, recChatAnswer)
+		store := newRecStore(nil)
+		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withRecordings(store))
+		rig.setSettings(full)
+		for _, on := range []bool{false, true} {
+			rig.ca.Store(recordingConsumer(on))
+			if a := rig.post(t, chatBody("pub")); a.status != 200 {
+				t.Fatalf("switch %v: %d %s", on, a.status, a.body)
+			}
+		}
+		check(t, rig, store)
+	})
+	t.Run("stream", func(t *testing.T) {
+		u := newUpstream(t, "")
+		u.setRespond(sseRespond(streamShapes[0].steps(), nil, nil))
+		store := newRecStore(nil)
+		rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withStreamSettings, withRecordings(store))
+		rig.setSettings(full)
+		srv := serveHTTP(t, rig.router)
+		for _, on := range []bool{false, true} {
+			rig.ca.Store(recordingConsumer(on))
+			if a := postStream(context.Background(), t, srv, streamBody("pub")); a.status != 200 || !strings.Contains(a.raw, "data: [DONE]") {
+				t.Fatalf("switch %v: stream %d %q", on, a.status, a.raw)
+			}
+		}
+		check(t, rig, store)
+	})
+	t.Run("embeddings", func(t *testing.T) {
+		e := newEmbedEngine(t, 8)
+		store := newRecStore(nil)
+		rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, withRecordings(store))
+		rig.setSettings(full)
+		// A public embedding alias: the body policy stores bodies only below
+		// credentials.
+		rig.reg.reload(t, append(embedAliases(), chatAlias{"00000000-0000-4000-8000-0000000e0571", backends.GlobalScope, "embpub",
+			"embedding", "embed", backends.SensPublic, `{"embedding.native_dims":8,"embedding.max_inputs":8}`, true}))
+		for _, on := range []bool{false, true} {
+			rig.ca.Store(recordingConsumer(on))
+			if a := rig.postEmbed(t, embedBody("embpub", []string{"first", "second"})); a.status != 200 {
+				t.Fatalf("switch %v: %d %s", on, a.status, a.body)
+			}
+		}
+		check(t, rig, store)
+	})
+	t.Run("rerank", func(t *testing.T) {
+		e := newRerankEngine(t)
+		store := newRecStore(nil)
+		rig := newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 4, 1, withRecordings(store))
+		rig.setSettings(full)
+		for _, on := range []bool{false, true} {
+			rig.ca.Store(recordingConsumer(on))
+			if a := rig.postRerank(t, "/v1/rerank", rerankBody("rrpub", "which?", []string{"d1", "d2"})); a.status != 200 {
+				t.Fatalf("switch %v: %d %s", on, a.status, a.body)
+			}
+		}
+		check(t, rig, store)
+	})
 }

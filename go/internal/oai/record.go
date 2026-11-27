@@ -461,7 +461,8 @@ func (rr *requestRecording) id() string {
 }
 
 // mark puts the recording on the request's llmlog row: metadata.gw.recorded
-// and recording_id; the row's bodies stay the body policy's. Nil-safe.
+// and recording_id — and the row carries no bodies (llmlog.GatewayEntry):
+// the recording is their one place. Nil-safe.
 func (rr *requestRecording) mark(row *llmlog.GatewayRow) {
 	if rr == nil {
 		return

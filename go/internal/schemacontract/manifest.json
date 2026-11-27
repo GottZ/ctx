@@ -3,7 +3,7 @@
   "generated_against": {
     "migration_max": 197,
     "migration_count": 85,
-    "migration_chain_sha256": "967937ebdbc2d3a32349c38bea877590899ff089bc25da34a13c2e06f1490264",
+    "migration_chain_sha256": "2eba65c81991bb709597a4ac27591a014897f1c4e7ea1416347af4af115fbdf3",
     "pg_major": 18,
     "image": "pgvector-timescaledb:pg18"
   },
