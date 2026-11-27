@@ -601,8 +601,10 @@ func TestRecordingPanicLeavesTheRow(t *testing.T) {
 	w := httptest.NewRecorder()
 	rt.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}")))
 	r := store.only(t)
-	if w.Code != 503 || r.out.Status != 503 || r.out.Code != oai.CodeInternalError {
-		t.Errorf("client %d, row status %d code %q — want 503 internal_error both", w.Code, r.out.Status, r.out.Code)
+	if w.Code != 503 || r.out.Status != 503 || r.out.Code != oai.CodeInternalError || string(r.response) != w.Body.String() ||
+		!strings.Contains(w.Body.String(), `"code":"internal_error"`) {
+		t.Errorf("client %d %q, row status %d code %q answer %q — want 503 internal_error both, the row with the client's bytes",
+			w.Code, w.Body.String(), r.out.Status, r.out.Code, r.response)
 	}
 }
 
@@ -1174,9 +1176,9 @@ func TestRecordingPanicAfterAHeldAnswer(t *testing.T) {
 	w := httptest.NewRecorder()
 	rt.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}")))
 	r := store.only(t)
-	if w.Code != 503 || strings.Contains(w.Body.String(), "a held answer") || r.out.Status != 503 || r.out.Code != oai.CodeInternalError ||
-		strings.Contains(string(r.response), "a held answer") {
-		t.Errorf("client %d %q, row status %d code %q answer %q — want 503 internal_error both, without the held answer",
+	if w.Code != 503 || strings.Contains(w.Body.String(), "a held answer") || !strings.Contains(w.Body.String(), `"code":"internal_error"`) ||
+		r.out.Status != 503 || r.out.Code != oai.CodeInternalError || string(r.response) != w.Body.String() {
+		t.Errorf("client %d %q, row status %d code %q answer %q — want 503 internal_error both, the row with the client's bytes, not the held answer",
 			w.Code, w.Body.String(), r.out.Status, r.out.Code, r.response)
 	}
 }

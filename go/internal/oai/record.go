@@ -1,6 +1,7 @@
 package oai
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -719,8 +720,9 @@ func (rr *requestRecording) endStage(p any, w http.ResponseWriter) {
 		code = rr.access.Reason
 	}
 	if p != nil && !rr.answerPassed() {
-		// oai.Recover answers the panic: nothing of the route's went out.
-		rr.dropHeld(http.StatusServiceUnavailable)
+		// oai.Recover answers the panic: nothing of the route's went out, and
+		// its answer — the fixed bytes of WriteInternal — is the row's.
+		rr.holdInstead(renderAnswer(WriteInternal))
 		code = CodeInternalError
 	}
 	if p == nil && code == CodeRecordingUnavailable {
@@ -798,13 +800,48 @@ func (rr *requestRecording) answerPassed() bool {
 	return rr.passed
 }
 
-// dropHeld forgets a held answer; the client gets status from elsewhere
-// (oai.Recover's 503).
-func (rr *requestRecording) dropHeld(status int) {
+// holdInstead replaces a held answer — or nothing written — by a, the answer
+// the client gets from elsewhere (oai.Recover's 503 after a panic): the row
+// records a's status and bytes, and nothing of a goes out from here (release
+// does not run on a panic).
+func (rr *requestRecording) holdInstead(a *renderedAnswer) {
 	rr.statusMu.Lock()
-	rr.holding, rr.heldCode, rr.heldBody = false, 0, nil
-	rr.status = status
+	rr.holding, rr.heldCode, rr.heldBody = true, a.code, a.body.Bytes()
+	rr.status = a.code
 	rr.statusMu.Unlock()
+}
+
+// renderedAnswer is an answer written into memory: the status, headers and
+// bytes a writer function produces (WriteInternal for oai.Recover's answer).
+type renderedAnswer struct {
+	header http.Header
+	code   int
+	body   bytes.Buffer
+}
+
+// renderAnswer is what write writes.
+func renderAnswer(write func(http.ResponseWriter)) *renderedAnswer {
+	a := &renderedAnswer{header: http.Header{}}
+	write(a)
+	if a.code == 0 {
+		a.code = http.StatusOK
+	}
+	return a
+}
+
+func (a *renderedAnswer) Header() http.Header { return a.header }
+
+func (a *renderedAnswer) WriteHeader(code int) {
+	if a.code == 0 {
+		a.code = code
+	}
+}
+
+func (a *renderedAnswer) Write(p []byte) (int, error) {
+	if a.code == 0 {
+		a.code = http.StatusOK
+	}
+	return a.body.Write(p)
 }
 
 // release writes the held answer once the request's outcome is decided:
