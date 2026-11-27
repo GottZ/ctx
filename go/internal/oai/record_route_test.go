@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/GottZ/ctx/internal/auth"
 	"github.com/GottZ/ctx/internal/backends"
@@ -581,7 +582,7 @@ func TestRecordingCountsBalance(t *testing.T) {
 	store := newRecStore(nil)
 	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withRecordings(store))
 	ca := recordingConsumer(true)
-	ca.ConsumerID = "0195a6f0-0000-7000-8000-0000000c0571"
+	ca.ConsumerID = uuid.NewString() // its own counts: the stats are process-wide (-count=N runs again)
 	rig.ca.Store(ca)
 	held := oai.RecordingHeld()
 	rig.post(t, chatBody("pub"))  // served
