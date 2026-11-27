@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -91,5 +93,47 @@ func TestDoRetryOnceSkipsRetryOnContextDeadline(t *testing.T) {
 	}
 	if hits.Load() != 1 {
 		t.Errorf("server hits = %d, want 1 (deadline must not retry)", hits.Load())
+	}
+}
+
+// TestDoRetryOnceLogsNoServerText: a response that breaks the HTTP parse
+// is a transient error when its text matches a transient phrase — and that
+// text quotes what the server sent (here a malformed header line), which can
+// echo the request. The retry's log line names the kind of error, never its
+// text; the retry itself is unchanged.
+func TestDoRetryOnceLogsNoServerText(t *testing.T) {
+	const secret = "password=Tr0ub4dor-retry-575"
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			panic(err)
+		}
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nconnection reset by peer " + secret + "\r\n\r\n")
+		_ = buf.Flush()
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+	c := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+
+	body := []byte(`{}`)
+	_, err := DoRetryOnce(c, newReq(t, context.Background(), srv.URL, body), body) //nolint:bodyclose // error path, no body
+	if err == nil || !strings.Contains(err.Error(), "connection reset by peer") {
+		t.Fatalf("want the broken response's error, got %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("server hits = %d, want 2 (the retry stays)", hits.Load())
+	}
+	out := logs.String()
+	if !strings.Contains(out, "retrying once") {
+		t.Fatalf("no retry line: %s", out)
+	}
+	if strings.Contains(out, "Tr0ub4dor") {
+		t.Errorf("the retry line carries the server's text: %s", out)
 	}
 }
