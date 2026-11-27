@@ -12,8 +12,8 @@
 -- context_llm_recordings (4): the request body as the gateway read it, byte
 -- for byte, committed BEFORE the first backend attempt; a request that
 -- cannot be held is not served (503 recording_unavailable). A non-streamed
--- answer is committed before it is written to the client; a stream's relayed
--- lines when it ends. Whatever gateway.body_logging, the alias, the
+-- answer is committed before it is written to the client (an answer that is
+-- not a 2xx with its error body); a stream's relayed lines when it ends. Whatever gateway.body_logging, the alias, the
 -- consumer's prompt_sensitivity, the body scan or Ctx-Sensitivity say: no
 -- cut, no seal — a row can carry credentials in clear text, and no ctx
 -- surface reads its bodies (internal/llmlog/recordings.go). The gateway's

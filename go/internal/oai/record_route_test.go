@@ -488,7 +488,8 @@ func TestRecordingStreamWithoutRoomEnds(t *testing.T) {
 // TestRecordingRefusedRequestsLeaveTheirRow: a request the gateway refuses
 // after the door — a body that does not parse, a body cut short, an unknown
 // model, the meter's refusal — leaves one row, never opened, with what was
-// read of the body and the status and code the client got.
+// read of the body and the status, code and body of the refusal the client
+// got.
 func TestRecordingRefusedRequestsLeaveTheirRow(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
@@ -523,6 +524,9 @@ func TestRecordingRefusedRequestsLeaveTheirRow(t *testing.T) {
 			}
 			if string(r.body) != tc.body || r.req.Complete != tc.complete {
 				t.Errorf("row body %q complete %v, want %q complete %v", r.body, r.req.Complete, tc.body, tc.complete)
+			}
+			if string(r.response) != w.Body.String() {
+				t.Errorf("row answer %q — want the refusal the client got %q", r.response, w.Body.String())
 			}
 			if u.hits.Load() != 0 {
 				t.Errorf("a refused request reached the backend")
@@ -801,4 +805,81 @@ func TestRecordedLLMLogRowCarriesNoBodies(t *testing.T) {
 		}
 		check(t, rig, store)
 	})
+}
+
+// recRejection is a backend's own refusal text: with
+// gateway.relay_upstream_4xx_messages on, the client's 400 carries it.
+const recRejection = "the engine refuses this prompt: marker-571-rejected"
+
+// TestRecordingErrorAnswerHeldBeforeItIsWritten: an error answer the client
+// gets after the walk — here a backend's 400 whose text the gateway relays —
+// is in the recording's row with its status and code, byte for byte the body
+// the client got, and it is held before it is written: when its row cannot
+// take it the client gets 503 recording_unavailable, never the backend's
+// text. Chat (non-streamed), embeddings and rerank.
+func TestRecordingErrorAnswerHeldBeforeItIsWritten(t *testing.T) {
+	reject := func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"` + recRejection + `","type":"invalid_request_error"}}`))
+	}
+	relay := func(s *oai.Settings) { s.RelayUpstream4xxMessages = true }
+	routes := []struct {
+		name string
+		rig  func(t *testing.T, store *recStore) (post func() chatAnswer)
+	}{
+		{"chat", func(t *testing.T, store *recStore) func() chatAnswer {
+			u := newUpstream(t, recChatAnswer)
+			u.setRespond(func(w http.ResponseWriter, _ *http.Request) { reject(w) })
+			rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withRecordings(store))
+			rig.setSettings(relay)
+			rig.ca.Store(recordingConsumer(true))
+			return func() chatAnswer { return rig.post(t, chatBody("pub")) }
+		}},
+		{"embeddings", func(t *testing.T, store *recStore) func() chatAnswer {
+			e := newEmbedEngine(t, 8)
+			e.setRespond(func(w http.ResponseWriter, _ *http.Request, _ int64, _ []string) bool { reject(w); return true })
+			rig := newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, withRecordings(store))
+			rig.setSettings(relay)
+			rig.ca.Store(recordingConsumer(true))
+			return func() chatAnswer { return rig.postEmbed(t, embedBody("emb1", []string{"a"})) }
+		}},
+		{"rerank", func(t *testing.T, store *recStore) func() chatAnswer {
+			e := newRerankEngine(t)
+			e.setRespond(func(w http.ResponseWriter, _ *http.Request, _ int64, _ rerankCall) bool { reject(w); return true })
+			rig := newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 4, 1, withRecordings(store))
+			rig.setSettings(relay)
+			rig.ca.Store(recordingConsumer(true))
+			return func() chatAnswer { return rig.postRerank(t, "/v1/rerank", rerankBody("rrpub", "q", []string{"d1", "d2"})) }
+		}},
+	}
+	for _, rt := range routes {
+		t.Run(rt.name+"/held", func(t *testing.T) {
+			store := newRecStore(nil)
+			a := rt.rig(t, store)()
+			if a.status != http.StatusBadRequest || !strings.Contains(string(a.body), "marker-571-rejected") {
+				t.Fatalf("client: %d %s — want the backend's 400 relayed (the test does not reach the relayed text)", a.status, a.body)
+			}
+			r := store.only(t)
+			if r.state != llmlog.RecordingDone || r.out.Status != http.StatusBadRequest || r.out.Code != oai.CodeUpstreamRejected {
+				t.Errorf("row: state %q status %d code %q — want done 400 upstream_rejected", r.state, r.out.Status, r.out.Code)
+			}
+			if string(r.response) != string(a.body) {
+				t.Errorf("row answer %q — want the body the client got %q", r.response, a.body)
+			}
+		})
+		t.Run(rt.name+"/not_held", func(t *testing.T) {
+			store := newRecStore(nil)
+			post := rt.rig(t, store)
+			store.set(func(s *recStore) { s.finishErr = errors.New("database down") })
+			a := post()
+			checkRecordingRefusal(t, a.status, a.header, a.body)
+			if strings.Contains(string(a.body), "marker-571-rejected") {
+				t.Errorf("the client got the backend's text that was not held: %s", a.body)
+			}
+			if r := store.only(t); r.state != llmlog.RecordingOpen {
+				t.Errorf("row state %q, want open (its outcome could not be held)", r.state)
+			}
+		})
+	}
 }

@@ -37,7 +37,12 @@ import (
 //     walk checks the commit again (ready).
 //   - A non-streamed answer (chat, rerank; embeddings without the vectors)
 //     is committed with the outcome before its first byte is written; a
-//     failure there answers the request 503 recording_unavailable instead. A
+//     failure there answers the request 503 recording_unavailable instead.
+//     Every answer that is not a 2xx — a refusal, an error, a backend's
+//     rejection whose text the gateway relays — is held from the client by
+//     the stage's writer until the request's outcome is committed with its
+//     bytes (release); one whose row cannot take it after a backend was
+//     asked is 503 recording_unavailable in its place. A
 //     stream keeps every line it relays (captured before the relay takes it)
 //     and commits them when it ends; what a stream already sent cannot be
 //     taken back, so a stream whose end cannot be committed leaves its row
@@ -220,6 +225,7 @@ func (s *RecordingStage) Handler(next http.Handler) http.Handler {
 			return
 		}
 		rr := s.begin(ca, r)
+		rr.entry = w.Header().Clone() // what a replaced answer starts from (release)
 		defer func() {
 			p := recover()
 			rr.endStage(p, w)
@@ -260,11 +266,21 @@ type requestRecording struct {
 
 	statusMu sync.Mutex
 	status   int
+	// The answer held from the client (hold, keep, release; under
+	// statusMu): a non-2xx answer the route wrote — its status heldCode and
+	// its bytes heldBody — is kept until its outcome is committed. passed:
+	// something went to the client unheld. entry: the response headers at
+	// the stage, which a replaced answer starts from.
+	holding, passed bool
+	heldCode        int
+	heldBody        []byte
+	entry           http.Header
 
 	// row: a row of the request is committed (open, or inserted at the
 	// end); opened: it was opened before the walk; ended: its outcome is
-	// committed (or known to be there).
-	row, opened, ended bool
+	// committed (or known to be there); settled: the row holds the outcome
+	// the client gets (end).
+	row, opened, ended, settled bool
 	// unfinished: the outcome of an opened row could not be committed.
 	unfinished bool
 
@@ -500,13 +516,16 @@ func (rr *requestRecording) noteStatus(code int) {
 // failure is counted, never retried later.
 func (rr *requestRecording) end(code string) {
 	if rr.ended {
+		rr.settled = true
 		rr.dropCapture()
 		return
 	}
 	defer rr.dropCapture()
 	ctx := context.Background()
 	o := llmlog.RecordedOutcome{Status: rr.writeStatus(), Code: code}
-	if len(rr.capture) > 0 {
+	if held := rr.heldAnswer(); held != nil {
+		o.Response = held // what the client gets: the held answer, not a capture
+	} else if len(rr.capture) > 0 {
 		o.Response = rr.capture
 	}
 	if rr.opened {
@@ -515,7 +534,9 @@ func (rr *requestRecording) end(code string) {
 			rr.unfinished = true
 			slog.Error("gateway: the outcome of a recorded request could not be recorded — its row stays open",
 				"consumer_id", rr.req.ConsumerID, "recording_id", rr.req.ID, "stream_answer_lost", rr.streamed, "error", err)
+			return
 		}
+		rr.settled = true
 		return
 	}
 	if rr.stage.store == nil {
@@ -529,7 +550,7 @@ func (rr *requestRecording) end(code string) {
 		slog.Error("gateway: a refused request of a recording consumer could not be recorded", "consumer_id", rr.req.ConsumerID, "error", err)
 		return
 	}
-	rr.row, rr.ended = true, true
+	rr.row, rr.ended, rr.settled = true, true, true
 }
 
 // dropCapture gives the captured answer back to the account.
@@ -547,8 +568,9 @@ func (rr *requestRecording) endStage(p any, w http.ResponseWriter) {
 	if rr.access != nil {
 		code = rr.access.Reason
 	}
-	if p != nil && rr.writeStatus() == 0 {
-		rr.noteStatus(http.StatusServiceUnavailable)
+	if p != nil && !rr.answerPassed() {
+		// oai.Recover answers the panic: nothing of the route's went out.
+		rr.dropHeld(http.StatusServiceUnavailable)
 		code = CodeInternalError
 	}
 	if p == nil && code == CodeRecordingUnavailable {
@@ -557,7 +579,110 @@ func (rr *requestRecording) endStage(p any, w http.ResponseWriter) {
 		_ = http.NewResponseController(w).Flush()
 	}
 	rr.end(code)
+	if p == nil {
+		rr.release(w)
+	}
 	recStats.done(rr.stats, rr.row, rr.unfinished, rr.unfinished && rr.streamed)
+}
+
+// hold reports whether the answer that starts with status code is held from
+// the client until the request's outcome is committed (release): every
+// answer that is not a 2xx, except the 503 recording_unavailable — that one
+// goes out at once (the database is in trouble; endStage flushes it before
+// the row's own attempt). A second status of a held answer is dropped, as
+// net/http drops a superfluous WriteHeader.
+func (rr *requestRecording) hold(code int) bool {
+	rr.statusMu.Lock()
+	defer rr.statusMu.Unlock()
+	switch {
+	case rr.holding:
+		return true
+	case rr.passed || code < http.StatusMultipleChoices || (rr.access != nil && rr.access.Reason == CodeRecordingUnavailable):
+		rr.passed = true
+		return false
+	}
+	rr.holding, rr.heldCode = true, code
+	return true
+}
+
+// keep takes p into the held answer; false when nothing is held — p goes
+// to the client. A held answer is an error envelope of the gateway's
+// (WriteCode, refuseParam: a message of at most relayTextMax runes), bounded
+// like the bytes the client gets.
+func (rr *requestRecording) keep(p []byte) bool {
+	rr.statusMu.Lock()
+	defer rr.statusMu.Unlock()
+	if !rr.holding {
+		rr.passed = true
+		return false
+	}
+	rr.heldBody = append(rr.heldBody, p...)
+	return true
+}
+
+// holdingAnswer reports a held answer.
+func (rr *requestRecording) holdingAnswer() bool {
+	rr.statusMu.Lock()
+	defer rr.statusMu.Unlock()
+	return rr.holding
+}
+
+// heldAnswer is the held answer's bytes (nil: none held).
+func (rr *requestRecording) heldAnswer() []byte {
+	rr.statusMu.Lock()
+	defer rr.statusMu.Unlock()
+	if !rr.holding {
+		return nil
+	}
+	if rr.heldBody == nil {
+		return []byte{}
+	}
+	return rr.heldBody
+}
+
+// answerPassed reports that something of the route's answer went to the
+// client.
+func (rr *requestRecording) answerPassed() bool {
+	rr.statusMu.Lock()
+	defer rr.statusMu.Unlock()
+	return rr.passed
+}
+
+// dropHeld forgets a held answer; the client gets status from elsewhere
+// (oai.Recover's 503).
+func (rr *requestRecording) dropHeld(status int) {
+	rr.statusMu.Lock()
+	rr.holding, rr.heldCode, rr.heldBody = false, 0, nil
+	rr.status = status
+	rr.statusMu.Unlock()
+}
+
+// release writes the held answer once the request's outcome is decided:
+// as held when the row holds it (settled) or when the request never reached
+// a backend (no open row: a refusal in the gateway's own words); otherwise —
+// a backend was asked and the row could not take what the client would get —
+// 503 recording_unavailable in its place, from the headers at the stage.
+func (rr *requestRecording) release(w http.ResponseWriter) {
+	rr.statusMu.Lock()
+	holding, code, body := rr.holding, rr.heldCode, rr.heldBody
+	rr.holding, rr.heldBody, rr.passed = false, nil, true
+	rr.statusMu.Unlock()
+	if !holding {
+		return
+	}
+	if !rr.settled && rr.opened {
+		h := w.Header()
+		clear(h)
+		for k, v := range rr.entry {
+			h[k] = v
+		}
+		refuseRecording(rr.access, w)
+		return
+	}
+	w.WriteHeader(code)
+	if _, err := w.Write(body); err != nil { //nolint:gosec // G705: body is the route's own error envelope (WriteCode, refuseParam — encoding/json's escape), held and written unchanged: the bytes the unrecorded path writes
+		slog.Warn("gateway: failed to write a held answer", "error", err, "recording_id", rr.req.ID)
+	}
 }
 
 // refuseRecording answers a request whose recording failed: 503
@@ -573,8 +698,9 @@ func refuseRecording(rec *AccessRecord, w http.ResponseWriter) {
 }
 
 // recordingWriter notes the status the client gets on the request's
-// recording. Unwrap lets http.ResponseController reach the connection
-// (flush, write deadlines).
+// recording and holds a non-2xx answer until its outcome is committed
+// (hold). Unwrap lets http.ResponseController reach the connection (flush,
+// write deadlines).
 type recordingWriter struct {
 	http.ResponseWriter
 	rr *requestRecording
@@ -583,17 +709,26 @@ type recordingWriter struct {
 func (w recordingWriter) WriteHeader(code int) {
 	if code >= http.StatusOK {
 		w.rr.noteStatus(code)
+		if w.rr.hold(code) {
+			return // held until the outcome is committed (release)
+		}
 	}
 	w.ResponseWriter.WriteHeader(code)
 }
 
 func (w recordingWriter) Write(p []byte) (int, error) {
 	w.rr.noteStatus(http.StatusOK)
+	if w.rr.keep(p) {
+		return len(p), nil
+	}
 	return w.ResponseWriter.Write(p)
 }
 
 func (w recordingWriter) FlushError() error {
 	w.rr.noteStatus(http.StatusOK)
+	if w.rr.holdingAnswer() {
+		return nil // nothing of a held answer goes out before release
+	}
 	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
