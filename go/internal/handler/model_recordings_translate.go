@@ -136,8 +136,9 @@ func (h *ManageHandler) handleModelRecordingTranslate(w http.ResponseWriter, r *
 	})
 }
 
-// writeRecordingTranslateError maps the call's error. The error's text goes
-// to the log only — a backend's error text may echo what it was sent.
+// writeRecordingTranslateError maps the call's error to the view's own codes
+// and texts. The log line names the error's class, never its text (the call
+// seals a backend's answer out of its errors besides: ChainCall.SealErrors).
 func writeRecordingTranslateError(w http.ResponseWriter, r *http.Request, err error) {
 	var noBackend *backends.ErrNoEligibleBackend
 	var quota *backends.ErrQuotaExceeded

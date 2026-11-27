@@ -32,6 +32,9 @@ import (
 //   - no second copy: the call is an llm.ChainCall, whose context_llm_log row
 //     is the slim one — no prompt, no answer (newChainEntry sets neither) —
 //     and nothing here writes the answer anywhere; it goes back to the caller.
+//     Its errors are sealed (ChainCall.SealErrors): a backend's error answer
+//     that quotes the chunk reaches neither the row's error column nor a log
+//     line of the walk nor the caller — only class, status and "sealed".
 //   - the block is foreign text (often a prompt itself): it stands in one
 //     promptguard block (Wrap: markers carrying this call's nonce, control
 //     tokens neutralised), the system prompt names it data and carries the
@@ -296,7 +299,8 @@ func CheckRecordingTranslate(pool *backends.Pool, windowFallback int, in Recordi
 
 // TranslateRecordingBlock sends one chunk of a block to the chat role of this
 // instance and returns the rendering. Nothing of the chunk or the answer is
-// written anywhere: the llmlog row is the slim one.
+// written anywhere: the llmlog row is the slim one, and an error carries no
+// byte of a backend's answer (sealed).
 func TranslateRecordingBlock(ctx context.Context, c RecordingTranslateCall, in RecordingTranslateInput) (*RecordingTranslateResult, error) {
 	if _, ok := RecordingLanguages[in.Language]; !ok {
 		return nil, ErrRecordingLanguage
@@ -323,6 +327,7 @@ func TranslateRecordingBlock(ctx context.Context, c RecordingTranslateCall, in R
 		DefTimeout:   RecordingTranslateTimeout,
 		LocalOnly:    recordingTranslateLocalOnly,
 		InstanceOnly: recordingTranslateLocalOnly,
+		SealErrors:   true,
 		APIKeyID:     c.APIKeyID,
 		Quota:        c.Quota,
 		QuotaScope:   c.QuotaScope,

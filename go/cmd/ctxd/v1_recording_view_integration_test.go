@@ -76,6 +76,10 @@ type recViewEngine struct {
 	// gateV1 holds the gateway's own requests (not the translations).
 	gateV1 atomic.Pointer[chan struct{}]
 	v1Hits atomic.Int64
+	// fail, when not 0, answers a translation with this status and an error
+	// body that quotes the call's user message (a validation error echoing
+	// its input).
+	fail atomic.Int64
 }
 
 func newRecViewEngine(t *testing.T) *recViewEngine {
@@ -112,6 +116,19 @@ func newRecViewEngine(t *testing.T) *recViewEngine {
 				e.canceled.Add(1)
 				return
 			}
+		}
+		if status := e.fail.Load(); status != 0 {
+			var req struct {
+				Messages []struct{ Content string } `json:"messages"`
+			}
+			_ = json.Unmarshal(raw, &req)
+			var user string
+			if len(req.Messages) == 2 {
+				user = req.Messages[1].Content
+			}
+			w.WriteHeader(int(status))
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "rejected input: " + user}})
+			return
 		}
 		out, _ := json.Marshal(map[string]any{
 			"id": "gen-tr", "object": "chat.completion", "created": 1700000000, "model": "engine-model",
@@ -912,5 +929,51 @@ func TestRecordingViewTranslateRefusedBeforeTheWire(t *testing.T) {
 	}
 	if n := w.audits(t) - audits; n != 0 {
 		t.Errorf("%d audit rows for translations that were not sent, want none", n)
+	}
+}
+
+// TestRecordingViewTranslateBackendErrorKeepsNothing: the model answers the
+// translation with an error that quotes its input — the block, a credential
+// in it. Nothing of that answer reaches the context_llm_log row (its error
+// column is the attempt's class, status and the code "sealed"), any other
+// row, a process log line or the answer to the server-admin, which gets the
+// view's own error text.
+func TestRecordingViewTranslateBackendErrorKeepsNothing(t *testing.T) {
+	w := newRecViewWorld(t, localFullTrust)
+	logs := recViewLog(t)
+	ctx := context.Background()
+	if a := w.v1(recViewChat(recViewSecret + " — bitte übersetzen")); a.status != http.StatusOK {
+		t.Fatalf("recorded chat: %d %s", a.status, a.body)
+	}
+	id := w.newest(t)
+	w.e.fail.Store(http.StatusBadRequest)
+	hits := w.e.hits.Load()
+	status, body, resp := w.adminCall(t, "model-recording-translate", map[string]any{"id": id, "address": "request/messages/1", "language": "de"})
+	if n := w.e.hits.Load() - hits; n != 1 {
+		t.Fatalf("translation calls: %d, want 1 (the echoing answer has to happen)", n)
+	}
+	if status != http.StatusBadGateway || resp["code"] != "translate_failed" || bytes.Contains(body, []byte("Tr0ub4dor")) || bytes.Contains(body, []byte("rejected input")) {
+		t.Errorf("answer to the server-admin: %d %s, want 502 translate_failed with the view's own text", status, body)
+	}
+	w.f.settle(t)
+	var errCol, row string
+	if err := w.f.seed.QueryRow(ctx, `SELECT COALESCE(error, ''), t::text FROM context_llm_log t
+		WHERE pipeline = 'recording-translate' ORDER BY created_at DESC LIMIT 1`).Scan(&errCol, &row); err != nil {
+		t.Fatalf("llmlog row: %v", err)
+	}
+	if errCol != "bad_request 400 sealed" || strings.Contains(row, "Tr0ub4dor") || strings.Contains(row, "rejected input") {
+		t.Errorf("llmlog row: error %q, row %s — want the error \"bad_request 400 sealed\" and nothing of the answer", errCol, row)
+	}
+	var kept int
+	if err := w.f.seed.QueryRow(ctx, `SELECT
+		  (SELECT count(*) FROM context_llm_log t WHERE strpos(t::text, 'rejected input') > 0)
+		+ (SELECT count(*) FROM context_settings_audit t WHERE strpos(t::text, 'rejected input') > 0 OR strpos(t::text, 'Tr0ub4dor') > 0)`).Scan(&kept); err != nil {
+		t.Fatal(err)
+	}
+	if kept != 0 {
+		t.Errorf("%d rows carry the backend's answer or the block", kept)
+	}
+	if bytes.Contains(logs.Bytes(), []byte("Tr0ub4dor")) || bytes.Contains(logs.Bytes(), []byte("rejected input")) {
+		t.Errorf("a process log line carries the backend's answer")
 	}
 }
