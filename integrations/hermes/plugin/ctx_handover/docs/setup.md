@@ -9,7 +9,8 @@ Pair your two machines once. After that, every handover is one command ([Use](us
 You need:
 
 - Hermes 0.22.6 or newer on both machines, and `git` 2.38 or newer if your project is a git repository
-  (`/handover doctor` checks the git version).
+  (`/handover doctor` checks the git version). Hermes before v0.23.3 and from v0.23.3 on (sessions behind Hermes'
+  storage interface) both work, also mixed on the two machines.
 - A web address under which your laptop reaches your server's Hermes dashboard (the web page of your server's Hermes) —
   the address you open the dashboard with in a browser, such as `https://server.example.net`. A plain `http://` address
   works too if only your own devices can reach it, through a private network that encrypts the traffic itself, such as

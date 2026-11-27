@@ -1008,12 +1008,17 @@ class JobRunner:
         sid = session_ref.id or calling_session
         if not sid:
             return None
+        db = None
         try:
             db = hostcompat.session_db(hostcompat.state_db_path())
             row = db.get_session(sid) or {}
             return row.get("title")
         except Exception:
             return None
+        finally:
+            if db is not None:
+                with contextlib.suppress(Exception):
+                    db.close()
 
     def _release(self, job_id: str) -> None:
         with self._lock:

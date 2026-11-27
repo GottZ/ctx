@@ -121,7 +121,9 @@ class SessionBuilder:
     ) -> None:
         if tick <= 0:
             raise ValueError("tick must be positive")
-        self.db = db
+        from ctx_handover.tests.fakes.hoststore import as_test_db
+
+        self.db = as_test_db(db)
         self.clock = clock
         self.tick = float(tick)
         self.templates = templates
@@ -167,7 +169,10 @@ class SessionBuilder:
         Core path: ``hermes_state_ids.new_session_id`` (``hermes_state_ids.py:55-59``), the function the CLI,
         the compressor (``agent/conversation_compression.py:45,3257``) and ``/branch`` mint with.
         """
-        from hermes_state_ids import new_session_id
+        try:
+            from hermes_state_ids import new_session_id
+        except ImportError:  # the storage interface host keeps it in session_rules
+            from session_rules.session_ids import new_session_id
 
         return new_session_id(datetime.fromtimestamp(self.now(), tz=timezone.utc))
 

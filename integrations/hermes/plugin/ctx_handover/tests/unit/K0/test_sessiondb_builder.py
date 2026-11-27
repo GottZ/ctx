@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from ctx_handover.tests.fakes import sessiondb as sessiondb_module
+from ctx_handover.tests.fakes.hoststore import is_store_host
 from ctx_handover.tests.fakes.sessiondb import BRANCH_COPY_KEYS, SessionBuilder, large_segment
 
 ID_RE = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{6}$")
@@ -68,7 +69,10 @@ def test_create_writes_the_row_through_the_core(make_session, session_db, clock)
     assert (row["source"], row["model"], row["title"], row["system_prompt"]) == ("cli", "m1", "Work", "SYS")
     assert (row["cwd"], row["git_repo_root"], row["git_branch"]) == ("/srv/work", "/srv/work", "main")
     route = json.loads(row["model_config"])["gateway_runtime"]
-    assert route == {"provider": "openrouter", "base_url": "https://peer.example/v1", "api_mode": "chat_completions"}
+    expected = {"provider": "openrouter", "base_url": "https://peer.example/v1", "api_mode": "chat_completions"}
+    if is_store_host():  # the storage interface stamps the nested route with its model (``sessions.update_model``)
+        expected["model"] = "m1"
+    assert route == expected
 
 
 def test_create_title_collision_is_the_cores_error(make_session):

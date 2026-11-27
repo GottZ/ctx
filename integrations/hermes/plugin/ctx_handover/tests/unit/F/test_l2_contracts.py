@@ -481,6 +481,31 @@ def test_doctor_uses_c_gate_warnings(fake_host, monkeypatch):
     assert [c[0].value for c in calls if c[0] is not None] == ["session_token"]
 
 
+def test_doctor_names_the_session_store_it_found(fake_host):
+    """``/handover doctor``: the session-store check says which store the host offers (issue GottZ/ctx#570), and
+    what is missing names the verbs or methods of that store."""
+    from ctx_handover.engine import hostcompat
+
+    def check(**overrides):
+        fake_host.feature_overrides = overrides
+        return {c["name"]: c for c in commands.local_checks(FakeCtx(host=fake_host), FakeBackend())}[
+            "Hermes session store"
+        ]
+
+    assert check()["detail"].endswith("(SessionDB)")
+    assert check(session_store=hostcompat.SESSION_STORE_PERSISTENCE)["detail"].endswith("(storage interface)")
+    lacking = check(
+        session_store=hostcompat.SESSION_STORE_PERSISTENCE,
+        session_db_ok=False,
+        missing=("persistence.messages.compact",),
+    )
+    assert lacking["ok"] is False and "persistence.messages.compact" in lacking["detail"]
+    assert lacking["remedy"] == "update Hermes to the newest release"
+    assert check(session_db_ok=False, missing=("SessionDB.rewind_to_message",))["remedy"] == (
+        "update Hermes to 0.22.6 or newer"
+    )
+
+
 # ---------------------------------------------------------------------------------------------------------
 # W065/W119 — identity rotation through Identity.create(rotate=True)
 # ---------------------------------------------------------------------------------------------------------

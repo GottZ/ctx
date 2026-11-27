@@ -316,6 +316,8 @@ HERMES_CREDENTIAL_PATHS: tuple[str, ...] = (
     ".ssh",
     "auth.json",
     "auth/google_oauth.json",
+    "backend_migration",
+    "backend_migration.json",
     "backups",
     "bot-desktop",
     "browser-profile",

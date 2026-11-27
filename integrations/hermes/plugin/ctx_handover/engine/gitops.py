@@ -182,8 +182,8 @@ GIT_ENV_WINDOWS: tuple[str, ...] = (
 (catalog review 2026-11-10): ``HOME`` (replaced by the pinned home when there is one) and ``XDG_CONFIG_HOME``
 locate the user's global configuration the source profile reads like the user's own git (W5); ``TMPDIR`` (Windows:
 ``TEMP``/``TMP``) is where git and git-lfs put temporary files; ``TZ`` keeps reflog times in the user's zone;
-``SUDO_UID`` lets git's ownership check accept the invoking user's repository when Hermes runs as root
-through sudo (``safe.directory``).
+``SUDO_UID`` lets git's ownership check accept the invoking user's repository when Hermes runs as root on behalf
+of that user (``safe.directory``).
 Windows only: git derives ``HOME`` from ``HOMEDRIVE``/``HOMEPATH``/``USERPROFILE`` when it is unset, and Git for
 Windows reads ``%PROGRAMDATA%/Git/config`` as part of its system configuration. Not passed, on purpose: provider
 keys, tokens and every other variable; ``SSH_AUTH_SOCK``, proxy and CA variables (no git call of the plugin talks

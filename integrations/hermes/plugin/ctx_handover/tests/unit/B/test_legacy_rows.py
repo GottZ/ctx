@@ -160,6 +160,8 @@ def test_legacy_backfill_between_export_and_delta_fails_safe(
     silently."""
     from hermes_state import SessionDB
 
+    from ctx_handover.tests.fakes.hoststore import is_store_host
+
     b = make_session
     sid = b.create()
     b.turns(sid, 2)
@@ -167,7 +169,12 @@ def test_legacy_backfill_between_export_and_delta_fails_safe(
     info, cap = export(session_db, store, sid, source_paths)
     capsule = session_export.read_capsule(store, cap.capsule_id, max_json_bytes=64 * 1024**2)
     prepared = session_import.import_hidden(target_db, store, cap.capsule_id, plan(target_db, capsule, target_cwd))
-    SessionDB(hermes_home / "state.db").close()  # an open runs one backfill slice (hermes_state_schema.py:1093)
+    if is_store_host():
+        from persistence_assembly import close_stores_under
+
+        close_stores_under(hermes_home)  # the next touch opens the store again, and an open runs one backfill slice
+    else:
+        SessionDB(hermes_home / "state.db").close()  # an open runs one backfill slice (hermes_state_schema.py:1093)
     assert all(r.get("message_uid") for r in session_db.get_messages(sid, include_inactive=True))
     b.user(sid, "late message")
     outcome, rows = session_export.check_revision(session_db, info, cap)
@@ -217,6 +224,9 @@ _UID_MAPS = [
 @pytest.mark.parametrize("value", _UID_MAPS, ids=[str(i) for i in range(len(_UID_MAPS))])
 def test_uid_map_mirror_matches_core(value):
     """The filter applied to stored call-uid maps equals the core's (``hermes_state_identity._uid_map``)."""
-    from hermes_state_identity import _uid_map
+    try:
+        from hermes_state_identity import _uid_map
+    except ImportError:  # the storage interface host: the SQLite backend's copy of the same filter
+        from persistence.sqlite.conversation._store.identity import _uid_map
 
     assert session_export.uid_map(value) == _uid_map(value)

@@ -129,7 +129,9 @@ class Home:
                     os.environ[k] = v
 
     def db(self):
-        return hostcompat.session_db(self.state_db)
+        from ctx_handover.tests.fakes.hoststore import as_test_db
+
+        return as_test_db(hostcompat.session_db(self.state_db))
 
     def ledger(self):
         with self.active():

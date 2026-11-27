@@ -151,6 +151,8 @@ def vetoed_turn(db, sid: str, provider_url: str, index: lock.VetoIndex, typed: s
     """One real agent turn on ``sid`` with the veto callback as the ``pre_llm_call`` dispatcher."""
     from run_agent import AIAgent
 
+    from ctx_handover.tests.fakes.hoststore import agent_store_kwargs, as_test_db
+
     agent = AIAgent(
         api_key="test-key",
         base_url=provider_url,
@@ -163,10 +165,10 @@ def vetoed_turn(db, sid: str, provider_url: str, index: lock.VetoIndex, typed: s
         skip_memory=True,
         save_trajectories=False,
         platform="cli",
-        session_db=db,
+        **agent_store_kwargs(db),
         session_id=sid,
     )
-    history = db.get_messages_as_conversation(sid)
+    history = as_test_db(db).get_messages_as_conversation(sid)
     with patch("hermes_cli.plugins.invoke_hook", side_effect=veto_callback(index)):
         return agent.run_conversation(typed, conversation_history=history, task_id="t")
 

@@ -324,6 +324,8 @@ def agent_turn(db, sid: str, provider_url: str, dispatcher: Callable[..., list],
 
     from run_agent import AIAgent
 
+    from ctx_handover.tests.fakes.hoststore import agent_store_kwargs, as_test_db
+
     agent = AIAgent(
         api_key="test-key",
         base_url=provider_url,
@@ -336,10 +338,10 @@ def agent_turn(db, sid: str, provider_url: str, dispatcher: Callable[..., list],
         skip_memory=True,
         save_trajectories=False,
         platform="cli",
-        session_db=db,
+        **agent_store_kwargs(db),
         session_id=sid,
     )
-    history = db.get_messages_as_conversation(sid)
+    history = as_test_db(db).get_messages_as_conversation(sid)
     with patch("hermes_cli.plugins.invoke_hook", side_effect=dispatcher):
         return agent.run_conversation(typed, conversation_history=history, task_id="t")
 

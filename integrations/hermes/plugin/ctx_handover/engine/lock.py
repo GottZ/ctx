@@ -138,19 +138,58 @@ def _in_list(ids: Sequence[str]) -> str:
     return ",".join("?" for _ in ids)
 
 
+def _busy_from_store(
+    db, lineage: Sequence[str], session_key: str | None, reasons: list[str], warnings: list[str]
+) -> list[dict]:
+    """``probe_busy`` through the store's own reads (``db.queued_prompt_count`` and ``db.inflight_delegations``, the
+    storage interface): the same queued prompts and running delegations, matched to the lineage as the SQL path
+    matches them. Each signal is read on its own, as the SQL path reads each table on its own: a read that fails is
+    a warning naming that signal, and the reason the other read confirmed stays."""
+    try:
+        queued = int(db.queued_prompt_count(list(lineage)))
+    except Exception as exc:  # best effort like the SQL path: an unreadable signal is a warning, never an abort
+        warnings.append(
+            f"could not fully check whether the session is in use: its queued prompts are not readable "
+            f"({exc.__class__.__name__}: {exc})"
+        )
+    else:
+        if queued > 0:
+            reasons.append(f"{queued} queued prompt(s) waiting for this session")
+    try:
+        running = db.inflight_delegations()
+    except Exception as exc:  # as above, for the second signal
+        warnings.append(
+            f"could not fully check whether the session is in use: its delegated tasks are not readable "
+            f"({exc.__class__.__name__}: {exc})"
+        )
+        return []
+    delegations = []
+    for d in running:
+        linked = {str(d.get(k) or "") for k in ("origin_session_id", "parent_session_id")}
+        if linked & set(lineage) or (session_key and d.get("origin_session") == session_key):
+            delegations.append({k: d.get(k) for k in ("delegation_id", "state", "dispatched_at", "parent_session_id")})
+    if delegations:
+        reasons.append(f"{len(delegations)} delegated task(s) still running")
+    return delegations
+
+
 def probe_busy(db, state_db: Path, info: SessionInfo, hermes_home: Path, session_key: str | None) -> BusyReport:
     """Queued prompts and live delegations make the session busy; background processes and attached cron jobs
-    are reported. Reads ``state.db`` over its own read-only connection; ``db`` is accepted for symmetry."""
-    del db
+    are reported. A ``db`` with ``queued_prompt_count`` (the storage interface, ``hostcompat.StoreSessionDB``)
+    answers the first two through the store; otherwise ``state.db`` is read over its own read-only connection."""
     lineage = [str(s) for s in info.lineage_ids] or [info.tip_id]
     reasons: list[str] = []
     warnings: list[str] = []
     delegations: list[dict] = []
-    try:
-        conn = _ro_connect(state_db)
-    except sqlite3.Error as exc:
-        warnings.append(f"could not fully check whether the session is in use: state.db is not readable ({exc})")
+    if callable(getattr(db, "queued_prompt_count", None)):
+        delegations = _busy_from_store(db, lineage, session_key, reasons, warnings)
         conn = None
+    else:
+        try:
+            conn = _ro_connect(state_db)
+        except sqlite3.Error as exc:
+            warnings.append(f"could not fully check whether the session is in use: state.db is not readable ({exc})")
+            conn = None
     if conn is not None:
         try:
             try:
@@ -921,6 +960,7 @@ def _rewind_placeholders(
             tip_live = [r for r in rows if r.get("active", 1)]
     target, run = _placeholder_run(tip_live, texts)
     rewound = 0
+    refused = False
     if target is not None:
         for attempt in range(_REWIND_ATTEMPTS):
             try:
@@ -928,6 +968,7 @@ def _rewind_placeholders(
                 break
             except ValueError as exc:
                 warnings.append(f"the blocked messages could not be removed from the session history: {exc}")
+                refused = True
                 break
             except Exception as exc:
                 if attempt + 1 == _REWIND_ATTEMPTS:
@@ -935,6 +976,7 @@ def _rewind_placeholders(
                         "the blocked messages could not be removed from the session history: "
                         f"{exc.__class__.__name__}: {exc}"
                     )
+                    refused = True
                     break
                 sleep(_REWIND_PAUSE_S)
     gone = {_copy_key(r) for r in run} if rewound else set()
@@ -949,7 +991,12 @@ def _rewind_placeholders(
         withheld.append(str(_withheld(row)))
         if key not in gone:
             kept += 1
-    if kept:
+    if kept and refused:
+        # the reason is the refusal warned about above, not a compaction
+        warnings.append(
+            f"{kept} blocked message(s) stay in this session's history; their typed text is listed as withheld"
+        )
+    elif kept:
         warnings.append(
             f"{kept} blocked message(s) stay in this session's history: Hermes compacted the session after the "
             "handover, and that part of the history can no longer be changed; their typed text is listed as withheld"

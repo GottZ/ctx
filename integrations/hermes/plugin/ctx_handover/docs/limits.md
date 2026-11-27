@@ -32,6 +32,18 @@ Everything this version does not do, or does only partly. Words such as *dialer*
 - Images attached before the handover replay only when their absolute path is identical on the other machine.
 - `git` 2.38 or newer is needed on both sides for repositories (`/handover doctor` checks it).
 - Hermes 0.22.6 or newer. Tested on Linux; the macOS and Windows code paths exist but have no end-to-end runs yet.
+- On Hermes v0.23.3 and later the plugin reaches sessions through Hermes' storage interface (before that, through the
+  `SessionDB` class); suites run in CI against one Hermes commit of each kind. Two things differ there, because the
+  interface offers no public way to do them as before:
+  - A `/handover reclaim` removes the blocked attempts from the session history by Hermes' own turn rule. When the
+    first blocked attempt came right after a message of yours that never got an answer, Hermes counts both as one
+    turn, and removing the attempt would remove your message too: the attempts then stay in the history, the
+    `reclaim` output says so and lists their typed text as withheld, as it does for attempts a compaction moved
+    out of reach.
+  - An import that fails or is cancelled removes the sessions it created through the store's delete; Hermes'
+    `on_session_delete` hook for other plugins and its transcript-file clean-up do not run for them (they sit in
+    Hermes' private session-retention module). Those sessions were hidden and never resumed, so no transcript file
+    or plugin state refers to them.
 - A message typed into the paused source while a long transfer runs is not answered there: its turn waits at most
   30 minutes for the session (then Hermes reports it as not processed) and otherwise meets the lock. When the chat
   stored the message on submit (TUI and Desktop do), it travels along as the session's last message, and the note
