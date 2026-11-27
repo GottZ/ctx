@@ -19,6 +19,23 @@ import { expect } from '@playwright/test'
 import type { PageContract } from './contract'
 import { KEY, REVEAL_MARKER, SENTINEL, modelApiCapabilities, sseRoute, type RecordedCall, type SseFrame } from '../fixtures'
 import { PANEL_CALL_ID, PANEL_CONSUMER_A } from '../gateway-panels-fixtures'
+import { REC_CONSUMER, REC_CONSUMER_GONE, REC_ID, REC_LONG_ADDRESS, REC_USER_TEXT } from '../recordings-fixtures'
+
+/** The five server-admin-only recordings actions (#575) — none may fire for a lower role. */
+const RECORDING_CALLS = [
+  'model-recording-consumers',
+  'model-recording-list',
+  'model-recording-get',
+  'model-recording-read',
+  'model-recording-translate',
+] as const
+
+/** The data payload of the session's model-recording-list calls, in wire order (#575). */
+function recordingListBodies(calls: RecordedCall[]): Array<Record<string, unknown>> {
+  return calls
+    .filter((x) => x.action === 'model-recording-list')
+    .map((x) => ((x.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}))
+}
 
 /**
  * Mobile opt-out for the five PV4-Erstbelegung areas: their mobile BASELINES
@@ -1267,6 +1284,202 @@ export const contracts: PageContract[] = [
       const set = session.calls.filter((c) => c.action === 'gateway-limits-set').at(-1)
       expect(set, 'the write reached the server (it decides)').toBeDefined()
       expect(JSON.stringify(set?.body ?? {}), 'gate W05-12: no tier on the wire').not.toMatch(/"tier"/)
+    },
+  },
+  // ---------------------------------------------------------------------------
+  // Recordings of the recording consumers (issue #575): three server-admin-only
+  // pages over the five model-recording-* actions (e2e/recordings-fixtures.ts).
+  // role 'server-admin' with the gateway ON: the generated deny test seeds a
+  // tenant-admin who may enter /gateway and proves the stricter
+  // /gateway/recordings guard (⇒ /status) and that no model-recording-* call
+  // fires. Not tenantScoped: the view is cross-tenant by design (server-admin).
+  // Full mobile dimension (a new page freezes its own baselines, PV7 rule).
+  // ---------------------------------------------------------------------------
+  {
+    route: '/gateway/recordings',
+    name: 'recordings',
+    role: 'server-admin',
+    mode: 'reading',
+    capabilities: modelApiCapabilities(true, true),
+    adminCalls: [...RECORDING_CALLS],
+    states: [
+      { name: 'default', seed: {} },
+      // no consumer records and none has rows left
+      { name: 'empty', seed: { state: 'empty' } },
+      // the overview read fails: error band with Retry
+      { name: 'error', seed: { faults: [{ action: 'model-recording-consumers', status: 500 }] } },
+    ],
+    scale: {
+      exempt:
+        'Eine Zeile je aufzeichnendem Konsumenten (record_bodies setzt nur ein Server-Admin, je Instanz eine Handvoll) — der 10k-Pfad ist die Aufzeichnungsliste eines Konsumenten (Kontrakt recordings-list).',
+    },
+    flowDoc:
+      'Server-Admin öffnet „Recordings": je aufzeichnendem (oder abgeschaltetem, gelöschtem) Konsumenten Schalter, Tenant, letzte Aufzeichnung und die Zähler dieses Prozesses; die Übersicht liest keinen Inhalt; ein Klick auf den Konsumenten öffnet seine Aufzeichnungsliste (#575).',
+    primaryFlow: async (page, session) => {
+      const content = page.locator('main.content')
+      await expect(content.getByRole('heading', { level: 1, name: 'Recordings' })).toBeVisible()
+      const rows = content.locator('tr[data-recording-consumer]')
+      await expect(rows).toHaveCount(3)
+      const rec = content.locator(`tr[data-recording-consumer="${REC_CONSUMER}"]`)
+      await expect(rec).toContainText('acme')
+      await expect(rec.locator('.switch')).toHaveText('on')
+      await expect(rec.locator('td.num').first(), 'this process: recorded').toHaveText('10')
+      await expect(content.locator(`tr[data-recording-consumer="${REC_CONSUMER_GONE}"]`)).toContainText('deleted')
+      expect(
+        session.calls.filter((c) => c.action !== undefined && c.action.startsWith('model-recording-')).map((c) => c.action),
+        'the overview reads the consumers only — no content',
+      ).toEqual(['model-recording-consumers'])
+      await rec.getByRole('link', { name: 'rec-app' }).click()
+      await expect(page).toHaveURL(new RegExp(`/gateway/recordings/${REC_CONSUMER}$`))
+      await expect(content.getByRole('heading', { level: 1, name: 'rec-app' })).toBeVisible()
+    },
+  },
+  {
+    route: '/gateway/recordings/:consumer',
+    name: 'recordings-list',
+    role: 'server-admin',
+    mode: 'reading',
+    path: `/gateway/recordings/${REC_CONSUMER}`,
+    capabilities: modelApiCapabilities(true, true),
+    adminCalls: [...RECORDING_CALLS],
+    states: [
+      { name: 'default', seed: {} },
+      // the consumer has no recording (or the filter matches none)
+      { name: 'empty', seed: { state: 'empty' } },
+      // the list read fails: error band with Retry
+      { name: 'error', seed: { faults: [{ action: 'model-recording-list', status: 500 }] } },
+    ],
+    scale: {
+      name: '10k',
+      seed: { state: '10k' },
+      // One keyset page of the server default (50, the client sends no limit);
+      // Load more appends exactly one more — 100 ≪ 10 000. A list without
+      // paging would render all 10 000 (a consumer's line can hold 10^8 rows).
+      domCap: { selector: 'main.content tr[data-recording-row]', max: 100 },
+      flow: async (page, session) => {
+        const rows = page.locator('main.content tr[data-recording-row]')
+        await expect(rows).toHaveCount(50)
+        await page.getByRole('button', { name: 'Load more' }).click()
+        await expect(rows).toHaveCount(100)
+        await expect(rows.nth(50)).toContainText('chat-00050')
+        const bodies = recordingListBodies(session.calls)
+        expect(bodies[0]?.cursor, 'page 1 carries no cursor').toBeUndefined()
+        expect(bodies.at(-1)?.cursor, 'Load more re-issues the list WITH the opaque cursor').toBe('walk:50')
+      },
+    },
+    flowDoc:
+      'Server-Admin öffnet die Aufzeichnungen eines Konsumenten: neueste zuerst mit Zeit, Operation, Modell, Stream, Zustand, Status/Code und Größen (ohne Body), geräumte Bodies markiert; der Filter „embed" engt serverseitig ein, „from" geht als RFC-3339-Grenze auf den Draht, Reset zeigt wieder alle; ein Klick auf die Zeit öffnet die Aufzeichnung (#575).',
+    primaryFlow: async (page, session) => {
+      const content = page.locator('main.content')
+      await expect(content.getByRole('heading', { level: 1, name: 'rec-app' })).toBeVisible()
+      const rows = content.locator('tr[data-recording-row]')
+      await expect(rows).toHaveCount(7)
+      await expect(rows.first()).toContainText('502 backend_error')
+      await expect(rows.nth(1)).toContainText('open')
+      await expect(content.locator('[data-cleared="request"]'), 'the retention-cleared request is marked').toHaveCount(1)
+      expect(recordingListBodies(session.calls)[0], 'no filter ⇒ the consumer id only').toEqual({ consumer_id: REC_CONSUMER })
+      await content.getByRole('checkbox', { name: 'embed' }).check()
+      await content.getByRole('button', { name: 'Apply' }).click()
+      await expect(rows).toHaveCount(1)
+      await expect(rows.first()).toContainText('embed')
+      expect(recordingListBodies(session.calls).at(-1)?.op).toEqual(['embed'])
+      await content.getByRole('button', { name: 'Reset' }).click()
+      await expect(rows).toHaveCount(7)
+      await content.getByLabel('from (local time)').fill('2026-06-29 11:45')
+      await content.getByRole('button', { name: 'Apply' }).click()
+      await expect(rows).toHaveCount(3)
+      expect(recordingListBodies(session.calls).at(-1)?.since, 'the browser zone (UTC here) to RFC 3339').toBe('2026-06-29T11:45:00.000Z')
+      await rows.first().getByRole('link').click()
+      await expect(page).toHaveURL(new RegExp(`/gateway/recordings/${REC_CONSUMER}/${REC_ID}$`))
+      await expect(content.getByRole('heading', { level: 1, name: /Recording/ })).toBeVisible()
+    },
+  },
+  {
+    route: '/gateway/recordings/:consumer/:id',
+    name: 'recordings-detail',
+    role: 'server-admin',
+    mode: 'reading',
+    path: `/gateway/recordings/${REC_CONSUMER}/${REC_ID}`,
+    capabilities: modelApiCapabilities(true, true),
+    adminCalls: [...RECORDING_CALLS],
+    states: [
+      // data: the user message translated (Markdown through the one sanitizing
+      // renderer, next to the original as text) and the not-UTF-8 answer as hex
+      {
+        name: 'default',
+        seed: {},
+        prepare: async (page) => {
+          const user = page.locator('[data-block="request/messages/1"]')
+          await user.getByRole('button', { name: 'Translate' }).click()
+          await expect(user.getByRole('status')).toHaveText('translated in 2 parts')
+          const resp = page.locator('[data-block="response"]')
+          await resp.getByRole('button', { name: 'Load bytes' }).click()
+          await expect(resp.locator('pre[data-raw]')).toContainText('00000000  ff fe 00 41')
+          await user.scrollIntoViewIfNeeded()
+        },
+      },
+      // the retention cleared both bodies: sizes stay, no block
+      { name: 'empty', seed: { state: 'empty' } },
+      // the read fails (no audit row ⇒ nothing served, or any 5xx): error band with Retry
+      { name: 'error', seed: { faults: [{ action: 'model-recording-get', status: 500 }] } },
+    ],
+    scale: {
+      exempt:
+        'Eine Aufzeichnung: die Blöcke kommen mit Vorschau ≤ 4 KiB je Block und ≤ 256 KiB je Antwort, der Rest nur auf Klick in 64-KiB-Fenstern — keine unbeschränkte Liste auf dieser Seite; die 10k-Dimension trägt recordings-list.',
+    },
+    flowDoc:
+      'Server-Admin öffnet eine Aufzeichnung: Metadaten, Zustand beider Seiten, die Blöcke der Anfrage und Antwort in Reihenfolge; das Original steht als reiner Text (ein <script>, <img onerror>, javascript:-Link und Fernbild darin bleiben Text), „Translate" holt Teil 0 und 1 nacheinander und zeigt die Übersetzung als Markdown durch den einen bereinigenden Renderer daneben — markiert als modellgeneriert, ohne Skript, ohne Fernbild (Platzhalter, Laden nur auf Klick), fremde Links mit noopener/noreferrer; „Load more" liest das nächste 64-KiB-Fenster und ein über die Fenstergrenze geteiltes Zeichen bleibt ganz; die nicht-UTF-8-Antwort steht verlustfrei als Hex (#575).',
+    primaryFlow: async (page, session) => {
+      const content = page.locator('main.content')
+      await expect(content.getByRole('heading', { level: 1, name: /Recording/ })).toBeVisible()
+      await expect(content.locator('section[data-side="request"] [data-side-state]')).toHaveText(/present · json/)
+      await expect(content.locator('section[data-side="response"] [data-side-state]')).toHaveText(/present · not_utf8/)
+      // the original: the hostile lines are TEXT of the <pre>, no element
+      const user = content.locator('[data-block="request/messages/1"]')
+      const original = user.locator('pre[data-original]')
+      expect(await original.evaluate((el) => el.textContent)).toBe(REC_USER_TEXT)
+      expect(await original.evaluate((el) => el.children.length), 'the original holds no element').toBe(0)
+      // the translation (prepared): two chunks in turn, Markdown through the sanitizer
+      const tr = user.locator('[data-translation]')
+      await expect(tr).toContainText('Generated by a model — the original is the reference.')
+      await expect(tr).toContainText('qwen38-27b')
+      await expect(tr.locator('h2')).toHaveText('Request')
+      await expect(tr.locator('script')).toHaveCount(0)
+      await expect(tr.locator('img')).toHaveCount(0)
+      await expect(tr.locator('span.md-img-blocked[data-camo-src="https://tracker.example/p.png"]'), 'remote image only as a placeholder').toHaveCount(1)
+      await expect(tr.locator('a[href^="javascript:"]')).toHaveCount(0)
+      expect(await tr.evaluate((el) => [...el.querySelectorAll('*')].some((n) => [...n.attributes].some((a) => a.name.startsWith('on'))))).toBe(false)
+      const foreign = tr.locator('a[href="https://example.org/vertrag"]')
+      await expect(foreign).toHaveAttribute('rel', /noopener/)
+      await expect(foreign).toHaveAttribute('rel', /noreferrer/)
+      const tbodies = session.calls.filter((c) => c.action === 'model-recording-translate').map((c) => (c.body as { data?: Record<string, unknown> }).data)
+      expect(tbodies, 'chunk 0, then 1 — the address and language, never text').toEqual([
+        { id: REC_ID, address: 'request/messages/1', language: 'en', chunk: 0 },
+        { id: REC_ID, address: 'request/messages/1', language: 'en', chunk: 1 },
+      ])
+      expect(session.calls.some((c) => c.path.startsWith('/api/img')), 'no remote image was fetched or signed').toBe(false)
+      // the not-UTF-8 answer: lossless hex
+      await expect(content.locator('[data-block="response"] pre[data-raw]')).toContainText('00000000  ff fe 00 41 0a 80 7f 20  c3 28 a0 a1 e2 28 a1 00')
+      // images: the payload names its media type and size, the remote one is text — never an <img>
+      await expect(content.locator('[data-block="request/messages/4/content/1"] [data-payload]')).toContainText('image/png')
+      await expect(content.locator('[data-block="request/messages/4/content/0"] pre[data-original]')).toHaveText('https://tracker.example/cat.png')
+      await expect(content.locator('img')).toHaveCount(0)
+      // Load more: the second 64 KiB window, the "€" across the boundary stays whole
+      const long = content.locator(`[data-block="${REC_LONG_ADDRESS}"]`)
+      await long.getByRole('button', { name: 'Load more' }).click()
+      await expect(long.getByRole('button', { name: 'Load more' })).toBeVisible()
+      await long.getByRole('button', { name: 'Load more' }).click()
+      await expect(long.getByRole('button', { name: 'Load more' })).toHaveCount(0)
+      const text = await long.locator('pre[data-original]').evaluate((el) => el.textContent ?? '')
+      expect(text.length).toBe(70_000 - 2)
+      expect(text).toContain('...€...')
+      expect(text).not.toContain('�')
+      await expect(long.locator('pre[data-original]'), 'focus moves to the text once all is loaded').toBeFocused()
+      const reads = session.calls.filter((c) => c.action === 'model-recording-read').map((c) => (c.body as { data?: Record<string, unknown> }).data)
+      expect(reads.filter((d) => d?.address === REC_LONG_ADDRESS)).toEqual([
+        { id: REC_ID, address: REC_LONG_ADDRESS, offset: 0, limit: 65536 },
+        { id: REC_ID, address: REC_LONG_ADDRESS, offset: 65536, limit: 65536 },
+      ])
     },
   },
   {

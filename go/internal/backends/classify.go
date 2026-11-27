@@ -151,7 +151,24 @@ type providerErrorTyper interface {
 	ProviderErrorType() string
 }
 
+// classCarrier is an error that names its own failover class: the sealed
+// wire error of internal/llm, classified once from the original error.
+type classCarrier interface {
+	FailoverClass() ErrClass
+}
+
 func Classify(err error, providerClass string) ErrClass {
+	// A sealed error (llm.ChainCall.SealErrors) keeps nothing of the
+	// backend's answer that the rules of classify read; it carries the class
+	// classify gave its original (context errors first included).
+	var cc classCarrier
+	if errors.As(err, &cc) {
+		return cc.FailoverClass()
+	}
+	return classify(err, providerClass)
+}
+
+func classify(err error, providerClass string) ErrClass {
 	if err == nil {
 		return ClassOK
 	}

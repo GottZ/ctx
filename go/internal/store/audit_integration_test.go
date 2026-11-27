@@ -207,7 +207,7 @@ func TestAuditListEntities(t *testing.T) {
 	auSeed(ctx, t, pool, "instance", "peer-1", tA, t0)
 	auSeed(ctx, t, pool, "setting", "dream.enabled", tA, t0)
 
-	want := []string{"api_key", "consumer_usage", "forge_sync", "gateway_limits", "instance", "model_alias", "model_consumer", "model_grant", "model_key", "scope_purge", "tenant_quota"}
+	want := []string{"api_key", "consumer_usage", "forge_sync", "gateway_limits", "instance", "model_alias", "model_consumer", "model_grant", "model_key", "model_recording", "scope_purge", "tenant_quota"}
 	if got := store.AuditEntities(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("AuditEntities() = %v, want %v", got, want)
 	}

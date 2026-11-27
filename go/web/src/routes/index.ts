@@ -119,6 +119,14 @@ export const areaRoutes = {
   // /gateway prefix guard (viewModelApi). Head, policy, key chain, usage
   // panel (W05-10), limits (W05-12), last calls, audit trail.
   '/gateway/consumers/:id': () => import('./gateway/ConsumerDetail.svelte'),
+  // Recordings of the recording consumers (issue #575): overview, one
+  // consumer's list, one recording as blocks with translate-on-click. Server-
+  // admin only — the stricter /gateway/recordings prefix-guard (guard.ts,
+  // viewTenants) stands before /gateway's; no nav item (entry links on
+  // /gateway and the consumer page). areaMode is unmapped → 'reading'.
+  '/gateway/recordings': () => import('./gateway/RecordingsPage.svelte'),
+  '/gateway/recordings/:consumer': () => import('./gateway/RecordingListPage.svelte'),
+  '/gateway/recordings/:consumer/:id': () => import('./gateway/RecordingDetailPage.svelte'),
   '*': () => import('./NotFound.svelte'),
 } satisfies Routes
 

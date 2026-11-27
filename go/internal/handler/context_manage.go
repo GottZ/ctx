@@ -73,6 +73,9 @@ type ManageHandler struct {
 	// (server.go, same rationale as SetForgeController); nil ⇒ the probe
 	// reports an admission error instead of making an unadmitted wire call.
 	admitter dispatch.Admitter
+	// recBrake holds model-recording-translate to one call per person at a
+	// time (issue #575, model_recordings.go); its zero value is ready.
+	recBrake recordingBrake
 	// openBox builds the sealbox for oauth-provider-create's client_secret
 	// sealing (OAuth L3, 04-W4). A field so tests can inject keys without
 	// mutating process env (SecretsHandler pattern); nil falls back to

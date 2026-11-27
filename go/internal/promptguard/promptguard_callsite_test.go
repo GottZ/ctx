@@ -83,12 +83,14 @@ var pipelineMarkers = []string{"Pipeline:", "newChainEntry(", "newDreamEntry("}
 // 19 since W02-10: gateway-rerank, the one llmlog row of POST /v1/rerank
 // and POST /v2/rerank (internal/oai/rerank.go, value the llmlog constant).
 //
+// 23 since #575: the recordings view's translation (recording-translate, a
+// package constant in internal/llm, guarded with Wrap/Rule in its file).
 // 22 since W06-13: each of the three gateway routes gained a second site of
 // its own pipeline in its own file — the row the shutdown's forced settle
 // writes instead of the route's (registerForcedRow at the admission: no
 // body, the meter's estimate in the token columns). Same pipelines, same
 // files, same reason in noPromptGuard: ctx builds no prompt there either.
-const wantPipelineSites = 22
+const wantPipelineSites = 23
 
 // noPromptGuard is the CLOSED list of pipelines whose site carries no guard
 // and needs none. One justification line each; a reason that does not survive
@@ -171,6 +173,9 @@ var constPipelineSites = map[string]constPipelineSite{
 	"internal/oai:embedPipeline": {"gateway-embeddings", "internal/oai/embeddings.go"},
 	// W02-10: the rerank routes, the same shape.
 	"internal/oai:rerankPipeline": {"gateway-rerank", "internal/oai/rerank.go"},
+	// #575: the recordings view's translation names its pipeline by its
+	// own constant.
+	"internal/llm:RecordingTranslatePipeline": {"recording-translate", "internal/llm/recording_translate.go"},
 }
 
 // passthroughPipelineIdents is the counter-list: Pipeline: values that name NO

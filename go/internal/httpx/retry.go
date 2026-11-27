@@ -77,9 +77,34 @@ func DoRetryOnce(c *http.Client, req *http.Request, body []byte) (*http.Response
 		return resp, err
 	}
 	slog.Warn("httpx: transient transport error, retrying once",
-		"url", req.URL.String(), "error", err)
+		"url", req.URL.String(), "error", transientKind(err))
 	retry := req.Clone(req.Context())
 	retry.Body = io.NopCloser(bytes.NewReader(body))
 	retry.ContentLength = int64(len(body))
 	return c.Do(retry) //nolint:gosec // G704: siehe oben — Pool-URL (context_backends), admin-gated.
+}
+
+// transientKind names a transient error for the log without its text: the
+// text of a broken response quotes what the server sent (a malformed status
+// or header line), and a server may echo the request — a caller's prompt —
+// into it. The names are IsTransientNetErr's, a phrase matched in the text
+// marked as such.
+func transientKind(err error) string {
+	switch {
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "unexpected EOF"
+	case errors.Is(err, io.EOF):
+		return "EOF"
+	case errors.Is(err, syscall.ECONNRESET):
+		return "connection reset by peer"
+	case errors.Is(err, syscall.EPIPE):
+		return "broken pipe"
+	}
+	s := err.Error()
+	for _, k := range []string{"connection reset by peer", "broken pipe", "server closed idle connection"} {
+		if strings.Contains(s, k) {
+			return k + " (in the error text, which is withheld)"
+		}
+	}
+	return "transport error"
 }

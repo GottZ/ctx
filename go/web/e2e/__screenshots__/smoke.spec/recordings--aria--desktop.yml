@@ -1,0 +1,114 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+      - listitem:
+        - link "Backends":
+          - /url: /tenant/backends
+      - listitem:
+        - link "Guard Review":
+          - /url: /guard
+      - listitem:
+        - link "Model API":
+          - /url: /gateway
+  - group "Server":
+    - paragraph: Server
+    - list:
+      - listitem:
+        - link "Tenants":
+          - /url: /admin
+      - listitem:
+        - link "Settings":
+          - /url: /settings
+      - listitem:
+        - link "Status":
+          - /url: /status
+      - listitem:
+        - link "Backends":
+          - /url: /settings/backends
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - paragraph:
+    - link "← Model API":
+      - /url: /gateway
+  - heading "Recordings" [level=1]
+  - paragraph: Requests of the consumers a server-admin set to record, held whole with the answer they got — credentials in a prompt included. Every view of a recording's content is written to the audit trail.
+  - region "recording consumers":
+    - heading "consumers" [level=2]
+    - text: "3"
+    - table "recording consumers":
+      - rowgroup:
+        - 'row "consumer tenant recording status last recorded this process: recorded in flight unrecordable unfinished"':
+          - columnheader "consumer"
+          - columnheader "tenant"
+          - columnheader "recording"
+          - columnheader "status"
+          - columnheader "last recorded"
+          - 'columnheader "this process: recorded"'
+          - columnheader "in flight"
+          - columnheader "unrecordable"
+          - columnheader "unfinished"
+      - rowgroup:
+        - row /rec-app acme on active \d+\/\d+\/\d+, \d+:\d+:\d+ AM \d+ 1 1 0/:
+          - cell "rec-app":
+            - link "rec-app":
+              - /url: /gateway/recordings/01900000-0000-7000-8000-00000000c575
+          - cell "acme"
+          - cell "on"
+          - cell "active"
+          - cell /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/
+          - cell /\d+/
+          - cell "1"
+          - cell "1"
+          - cell "0"
+        - row /old-bot globex off inactive \d+\/\d+\/\d+, \d+:\d+:\d+ AM — — — —/:
+          - cell "old-bot":
+            - link "old-bot":
+              - /url: /gateway/recordings/01900000-0000-7000-8000-00000000c576
+          - cell "globex"
+          - cell "off"
+          - cell "inactive"
+          - cell /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/
+          - cell "—"
+          - cell "—"
+          - cell "—"
+          - cell "—"
+        - row /[0-9a-fA-F-]+ — off deleted \d+\/\d+\/\d+, \d+:\d+:\d+ AM — — — —/:
+          - cell /[0-9a-fA-F-]+/:
+            - link /[0-9a-fA-F-]+/:
+              - /url: /gateway/recordings/01900000-0000-7000-8000-00000000c577
+          - cell "—"
+          - cell "off"
+          - cell "deleted"
+          - cell /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/
+          - cell "—"
+          - cell "—"
+          - cell "—"
+          - cell "—"
+    - paragraph:
+      - text: /Counts of this ctxd process since \d+\/\d+\/\d+, \d+:\d+:\d+ AM \(process/
+      - code: 7a1c5e00
+      - text: ); “—” = it admitted none of the consumer's requests. The recordings themselves are in the database.

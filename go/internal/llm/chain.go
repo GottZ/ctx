@@ -652,6 +652,19 @@ func dropExternal(chain []backends.Backend, role string) []backends.Backend {
 	return kept
 }
 
+// instanceOwn keeps the rows of chain that are this instance's own (see
+// ChainCall.InstanceOnly), in order, in a fresh slice.
+func instanceOwn(chain []backends.Backend) []backends.Backend {
+	kept := chain[:0:0]
+	for i := range chain {
+		b := &chain[i]
+		if (b.Locality == backends.LocalityLocal || b.Locality == backends.LocalityLAN) && b.ProviderClass != backends.ProviderCtx {
+			kept = append(kept, *b)
+		}
+	}
+	return kept
+}
+
 // PoolReporter wires ChatChain attempt outcomes back into the pool's health
 // state (the same closure every chained call site needs — extracted in P3).
 func PoolReporter(bpool *backends.Pool) ReportFunc {
@@ -700,6 +713,20 @@ type ChainCall struct {
 	// holds even against a full-trust external row a psql edit smuggled past
 	// the 422 validation).
 	LocalOnly bool
+	// InstanceOnly keeps this instance's own backends only, after the trust
+	// gate and LocalOnly: a row whose locality is local or lan (an allowlist,
+	// not "not external") and that is no ctx peer — a ProviderCtx row is
+	// another ctx instance, which serves what it gets under its own policy
+	// (issue #575: a recording's chunk carries credentials in clear text).
+	InstanceOnly bool
+	// SealErrors keeps every byte of a backend's answer out of the call's
+	// errors: a failed attempt's error is reduced to its failover class and
+	// HTTP status (sealedError) before the walk logs or returns it, and the
+	// llmlog row's error column holds llmlog.RedactedErr's "<class> <status>
+	// sealed". For a call whose prompt carries content no log may hold
+	// (issue #575: a recording's chunk) — a backend's error answer can quote
+	// the prompt (httpx.StatusError carries up to 1 KiB of it).
+	SealErrors bool
 	// APIKeyID is the caller attribution for the slim llmlog row (04-W3/T35b,
 	// design/04 §4.3). Foreground callers (query translate/temporal/rerank)
 	// pass ar.ApiKeyID; background callers (sensitivity-audit classify) leave
@@ -772,14 +799,23 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 			}
 		}
 	}
+	if c.InstanceOnly {
+		chain = instanceOwn(chain)
+		if len(chain) == 0 {
+			return nil, &backends.ErrNoEligibleBackend{
+				Role: c.Role, Required: c.Required,
+				Excluded: []backends.ExclusionReason{{Backend: "*", Reason: "instance-only call, no local or lan backend of this instance"}},
+			}
+		}
+	}
 	if c.Quota != nil {
 		if chain, err = GateQuota(c.Quota, c.QuotaScope, chain, c.Role, c.Required); err != nil {
 			return nil, err
 		}
 	}
 
-	resp, served, attempts, err := ChatChain(ctx, chain, c.Role,
-		c.System, c.User, c.Opts, c.Format, c.DefTimeout, PoolReporter(c.Pool), adm)
+	resp, served, attempts, err := ChatChainVia(ctx, c.chatFunc(), chain, c.Role,
+		c.System, c.User, c.Opts, c.DefTimeout, PoolReporter(c.Pool), adm)
 
 	if err != nil && len(attempts) == 0 && IsAdmissionError(err) {
 		// Never admitted, no wire contact: no regular llmlog row
@@ -790,6 +826,9 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 	}
 
 	entry := newChainEntry(c.Pipeline, err, c.BlockIDs, c.Required, attempts, c.APIKeyID)
+	if c.SealErrors {
+		entry.Err = sealedRowError(err)
+	}
 	entry.Metadata = map[string]any{"chain": attempts}
 	// AFTER the never-admitted early return above: a call that never reached
 	// the wire sent no prompt, and the K9 rejection line must not claim one.
@@ -811,6 +850,81 @@ func (c ChainCall) Do(ctx context.Context, db *pgxpool.Pool, adm Admission) (*Ch
 	llmlog.Record(db, entry)
 
 	return resp, err
+}
+
+// chatFunc is the walk's wire call: ChatChain's chatWithFormat, its error
+// sealed when the call asks for it (SealErrors).
+func (c ChainCall) chatFunc() ChatFunc {
+	format := c.Format
+	call := func(ctx context.Context, b backends.Backend, sys, usr string, opts Options, timeout time.Duration) (*ChatResponse, error) {
+		return chatWithFormat(ctx, b, sys, usr, opts, format, timeout)
+	}
+	if !c.SealErrors {
+		return call
+	}
+	return func(ctx context.Context, b backends.Backend, sys, usr string, opts Options, timeout time.Duration) (*ChatResponse, error) {
+		resp, err := call(ctx, b, sys, usr, opts, timeout)
+		if err != nil {
+			return resp, sealWireError(err, b.ProviderClass)
+		}
+		return resp, nil
+	}
+}
+
+// sealedErrorCode is the code of a sealed error (llmlog.RedactedErr): the
+// backend's own text was withheld on purpose.
+const sealedErrorCode = "sealed"
+
+// sealedError is a failed wire attempt of a ChainCall with SealErrors: the
+// failover class the original error got and its HTTP status — nothing of
+// the backend's answer, whose text (an error body, a malformed status line,
+// a decoder's quoted byte) can quote the prompt. Classify takes the class it
+// carries (FailoverClass), so the walk fails over exactly as on the original;
+// Unwrap reaches only body-free parts: a context error, or a StatusError
+// without its body (its Retry-After feeds the cooldown).
+type sealedError struct {
+	class  backends.ErrClass
+	status int
+	cause  error
+}
+
+func (e *sealedError) Error() string { return e.redacted().Error() }
+
+func (e *sealedError) Unwrap() error { return e.cause }
+
+// FailoverClass is the class backends.Classify takes for the error.
+func (e *sealedError) FailoverClass() backends.ErrClass { return e.class }
+
+func (e *sealedError) redacted() *llmlog.RedactedErr {
+	return &llmlog.RedactedErr{Class: e.class.String(), Status: e.status, Code: sealedErrorCode}
+}
+
+// sealWireError seals one attempt's error (see sealedError).
+func sealWireError(err error, providerClass string) error {
+	s := &sealedError{class: backends.Classify(err, providerClass)}
+	var se *httpx.StatusError
+	switch {
+	case errors.Is(err, context.Canceled):
+		s.cause = context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		s.cause = context.DeadlineExceeded
+	case errors.As(err, &se):
+		s.status = se.Code
+		s.cause = &httpx.StatusError{Code: se.Code, RetryAfter: se.RetryAfter}
+	}
+	return s
+}
+
+// sealedRowError is the llmlog error of a sealed call: a wire failure as
+// "<class> <status> sealed" alone (the walk's own prefix dropped, as the
+// gateway's rows hold it); an error of ctx's own (an admission refusal) is
+// kept — it carries no backend text.
+func sealedRowError(err error) error {
+	var s *sealedError
+	if errors.As(err, &s) {
+		return s.redacted()
+	}
+	return err
 }
 
 // ApplyProviderTelemetry copies the OpenRouter provenance of a response into
