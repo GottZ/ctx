@@ -2,7 +2,7 @@
 
 // The latency the recording of issue #571 adds to a request (opt-in probe,
 // CTX_RECORD_PROBE=1): the production router over a throwaway database,
-// a small chat request and a large embeddings request (1.5 MiB, below the
+// a small chat request and a large embeddings request (32 inputs, 1.4 MiB, below the
 // scan cap), each sent alternately by the same consumer with the recording
 // switch off and on — the switch flipped in the consumer row between the
 // two (the door reads it on every request) — and the end-to-end time of the
@@ -37,18 +37,20 @@ func TestV1RecordingLatency(t *testing.T) {
 	}
 	const n = 200
 	ctx := context.Background()
-	measure := func(t *testing.T, name string, flip func(on bool), send func() int) {
+	measure := func(t *testing.T, name string, flip func(on bool), send func() (int, []byte)) {
 		t.Helper()
 		var off, on []time.Duration
 		for i := 0; i < 10; i++ { // warm both paths
 			flip(i%2 == 1)
-			send()
+			if st, b := send(); st != http.StatusOK {
+				t.Fatalf("%s warm-up: status %d: %.300s", name, st, b)
+			}
 		}
 		for i := 0; i < 2*n; i++ {
 			rec := i%2 == 1
 			flip(rec)
 			start := time.Now()
-			if st := send(); st != http.StatusOK {
+			if st, _ := send(); st != http.StatusOK {
 				t.Fatalf("%s request %d (recording %v): status %d", name, i, rec, st)
 			}
 			d := time.Since(start)
@@ -72,14 +74,14 @@ func TestV1RecordingLatency(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		measure(t, fmt.Sprintf("chat, %d-byte body", len(body)), flip, func() int { return f.post(t, f.urgentKey, body).status })
+		measure(t, fmt.Sprintf("chat, %d-byte body", len(body)), flip, func() (int, []byte) { a := f.post(t, f.urgentKey, body); return a.status, a.body })
 	})
 	t.Run("embeddings_large", func(t *testing.T) {
 		eng := newV1EmbedEngine(t)
 		f := newV1EmbedFixture(t, eng)
-		inputs := make([]string, 48)
+		inputs := make([]string, 32)
 		for i := range inputs {
-			inputs[i] = `"` + strings.Repeat(fmt.Sprintf("chunk %02d of a corpus document ", i), 1000) + `"`
+			inputs[i] = `"` + strings.Repeat(fmt.Sprintf("chunk %02d of a corpus document ", i), 1500) + `"`
 		}
 		body := `{"model":"` + v1EmbedAlias + `","input":[` + strings.Join(inputs, ",") + `]}`
 		flip := func(on bool) {
@@ -87,6 +89,6 @@ func TestV1RecordingLatency(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		measure(t, fmt.Sprintf("embeddings, %d-byte body", len(body)), flip, func() int { return f.post(t, f.urgentKey, body).status })
+		measure(t, fmt.Sprintf("embeddings, %d-byte body", len(body)), flip, func() (int, []byte) { a := f.post(t, f.urgentKey, body); return a.status, a.body })
 	})
 }
