@@ -70,6 +70,10 @@ type recStore struct {
 
 	openErr, finishErr, insertErr error
 	openHang                      bool
+	// openGate, when set, holds every Open until it is closed; inOpen and
+	// maxInOpen count the Opens running at once.
+	openGate          chan struct{}
+	inOpen, maxInOpen atomic.Int64
 	// finishFailures refuses that many Finish calls before it takes one.
 	finishFailures int
 }
@@ -80,9 +84,20 @@ func newRecStore(hits func() int64) *recStore {
 
 func (s *recStore) Open(ctx context.Context, q llmlog.RecordedRequest) error {
 	s.calls.Add(1)
+	n := s.inOpen.Add(1)
+	defer s.inOpen.Add(-1)
+	for m := s.maxInOpen.Load(); n > m && !s.maxInOpen.CompareAndSwap(m, n); m = s.maxInOpen.Load() {
+	}
 	s.mu.Lock()
-	hang, err := s.openHang, s.openErr
+	hang, err, gate := s.openHang, s.openErr, s.openGate
 	s.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if hang {
 		<-ctx.Done()
 		return ctx.Err()
@@ -669,5 +684,33 @@ func TestRecordingRefusedRerankKeepsNoAnswer(t *testing.T) {
 	r := store.only(t)
 	if r.state != llmlog.RecordingDone || r.out.Status != 503 || r.out.Code != oai.CodeRecordingUnavailable || len(r.response) != 0 {
 		t.Errorf("row %q status %d code %q answer %d bytes — want done 503 recording_unavailable without an answer", r.state, r.out.Status, r.out.Code, len(r.response))
+	}
+}
+
+// TestRecordingStatementSlots: however many recording consumers' requests
+// arrive while the database holds their statements, at most four statements
+// run at once — the rest wait for a slot (and the pool keeps its other
+// connections).
+func TestRecordingStatementSlots(t *testing.T) {
+	u := newUpstream(t, recChatAnswer)
+	store := newRecStore(nil)
+	gate := make(chan struct{})
+	store.set(func(s *recStore) { s.openGate = gate })
+	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 16, 1, withoutCensus, withRecordings(store))
+	rig.ca.Store(recordingConsumer(true))
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Go(func() { rig.post(t, chatBody("pub")) })
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for store.inOpen.Load() < 4 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond) // room for a fifth, should one get in
+	running := store.inOpen.Load()
+	close(gate)
+	wg.Wait()
+	if running != 4 || store.maxInOpen.Load() != 4 {
+		t.Errorf("%d Opens ran at once while the database held them (at most %d over the run) — want exactly 4", running, store.maxInOpen.Load())
 	}
 }
