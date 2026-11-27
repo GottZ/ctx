@@ -116,6 +116,11 @@ func recordAccountLimit(s Settings) int64 {
 // stream's capture without room): verdict answers it.
 var errRecordingUnavailable = errors.New("oai: the request could not be recorded")
 
+// errHeldPastDeadline is heldStillServes' cause for an answer whose commit
+// ended after the request's deadline: refuseHeld answers it 503
+// recording_unavailable — the hold took the request past its time.
+var errHeldPastDeadline = errors.New("oai: the answer's commit ended past the request's deadline")
+
 // recordingAccount is the process-wide account of recorded bytes held
 // (statement copies, captured answers). acquire waits for room; release
 // wakes every waiter.
@@ -450,9 +455,10 @@ func (rr *requestRecording) withhold() {
 // request's own context client, which the door's registry ends with
 // auth.ErrCredentialRevoked: the run's context ctx may have passed its
 // deadline during the commit, and a context that ended keeps its first
-// cause. A cause: the answer does not go out — the route answers it
-// (refuseHeld) and withholds the answer. A deadline that passed during the
-// commit is none: the answer is ready (answer).
+// cause —, and last the request's deadline itself: the commit is not cut by
+// it (answer), but an answer whose commit ended past it is refused
+// (errHeldPastDeadline), never sent. A cause: the answer does not go out —
+// the route answers it (refuseHeld) and withholds the answer.
 func (d Deps) heldStillServes(ctx, client context.Context, t watchTarget) error {
 	if _, err := d.recheck(ctx, t, t.gen, false); err != nil {
 		return err
@@ -462,6 +468,9 @@ func (d Deps) heldStillServes(ctx, client context.Context, t watchTarget) error 
 	}
 	if cause := context.Cause(client); errors.Is(cause, auth.ErrCredentialRevoked) {
 		return cause
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return errHeldPastDeadline
 	}
 	return nil
 }
@@ -484,6 +493,9 @@ func refuseHeld(cause error, rec *AccessRecord, w http.ResponseWriter, r *http.R
 		rec.Reason = CodeInternalError
 		WriteCode(w, CodeInternalError, shutdownMessage, true)
 		return CodeInternalError
+	case errors.Is(cause, errHeldPastDeadline):
+		refuseRecording(rec, w)
+		return CodeRecordingUnavailable
 	}
 	rec.Reason = CodeInvalidAPIKey // auth.ErrCredentialRevoked
 	WriteInvalidAPIKey(w)

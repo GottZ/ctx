@@ -1052,8 +1052,9 @@ func TestRecordingRefusalGoesOutWhenItsRowFails(t *testing.T) {
 // pass while an answer's commit waits (the commit is not cut by it); a
 // request that stopped being served during that time — the model API
 // switched off, the key revoked after the deadline or before it, the
-// shutdown — still gets its refusal, never the answer and never an empty
-// 200, and its row says what the client got. Chat, embeddings and rerank.
+// shutdown — still gets its refusal, and one whose deadline alone passed
+// gets 503 recording_unavailable: never the answer and never an empty 200,
+// and its row says what the client got. Chat, embeddings and rerank.
 func TestRecordingHeldAnswerChecksPastTheDeadline(t *testing.T) {
 	want := map[string]struct {
 		status int
@@ -1063,9 +1064,10 @@ func TestRecordingHeldAnswerChecksPastTheDeadline(t *testing.T) {
 		"revoked":                 {http.StatusUnauthorized, oai.CodeInvalidAPIKey},
 		"revoked_before_deadline": {http.StatusUnauthorized, oai.CodeInvalidAPIKey},
 		"shutdown":                {http.StatusServiceUnavailable, oai.CodeInternalError},
+		"deadline":                {http.StatusServiceUnavailable, oai.CodeRecordingUnavailable},
 	}
 	for _, rt := range recRoutes {
-		for _, mode := range []string{"gateway_off", "revoked", "revoked_before_deadline", "shutdown"} {
+		for _, mode := range []string{"gateway_off", "revoked", "revoked_before_deadline", "shutdown", "deadline"} {
 			t.Run(rt.name+"/"+mode, func(t *testing.T) {
 				store := newRecStore(nil)
 				gate := make(chan struct{})
@@ -1112,7 +1114,11 @@ func TestRecordingHeldAnswerChecksPastTheDeadline(t *testing.T) {
 					t.Errorf("client %d %q (%d bytes) — want %d %q without the answer", a.status, code, len(a.body), w.status, w.code)
 				}
 				r := store.only(t)
-				if r.state != llmlog.RecordingDone || r.out.Status != a.status || r.out.Code != w.code || string(r.response) != string(a.body) {
+				answer := string(a.body)
+				if w.code == oai.CodeRecordingUnavailable {
+					answer = "" // its bytes are fixed and go out unheld: the row keeps status and code (docs/operations.md)
+				}
+				if r.state != llmlog.RecordingDone || r.out.Status != a.status || r.out.Code != w.code || string(r.response) != answer {
 					t.Errorf("row: state %q status %d code %q answer %d bytes — want done %d %q with the client's %d bytes",
 						r.state, r.out.Status, r.out.Code, len(r.response), a.status, w.code, len(a.body))
 				}
