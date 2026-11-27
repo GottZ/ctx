@@ -230,6 +230,14 @@ func RecordingTranslateDeadline(chain []backends.Backend) time.Duration {
 	return d
 }
 
+// recordingNoPipelineCap is the pipeline ceiling handed to
+// promptguard.ChainRuneBudget: none of its own — the chunk size bounds the
+// prompt, the chain's smallest window is the only limit checked.
+const recordingNoPipelineCap = 1 << 30
+
+// recordingTagLen is the length of a call's marker tag (16 random bytes, hex).
+const recordingTagLen = 32
+
 // checkRecordingWindow refuses a chunk whose prompt and output bound do not
 // fit the smallest window of chain.
 func checkRecordingWindow(chain []backends.Backend, fallback int, system, user string) error {
@@ -237,7 +245,7 @@ func checkRecordingWindow(chain []backends.Backend, fallback int, system, user s
 	for i := range chain {
 		windows[i] = chain[i].NumCtx
 	}
-	budget, err := promptguard.ChainRuneBudget(windows, fallback, 1<<30)
+	budget, err := promptguard.ChainRuneBudget(windows, fallback, recordingNoPipelineCap)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrRecordingWindow, err)
 	}
@@ -246,6 +254,22 @@ func checkRecordingWindow(chain []backends.Backend, fallback int, system, user s
 		return fmt.Errorf("%w: needs %d runes, the smallest window holds %d", ErrRecordingWindow, need, budget)
 	}
 	return nil
+}
+
+// CheckRecordingTranslate answers before anything is sent whether the call
+// can go out: the chain (ErrNoEligibleBackend) and the window check
+// (ErrRecordingWindow) for this chunk's prompt — the caller audits a
+// translation only once it will be sent.
+func CheckRecordingTranslate(pool *backends.Pool, windowFallback int, in RecordingTranslateInput) error {
+	if _, ok := RecordingLanguages[in.Language]; !ok {
+		return ErrRecordingLanguage
+	}
+	chain, err := RecordingTranslateChain(pool)
+	if err != nil {
+		return err
+	}
+	return checkRecordingWindow(chain, windowFallback, recordingTranslateSystemPrompt,
+		recordingTranslatePrompt(in, strings.Repeat("0", recordingTagLen)))
 }
 
 // TranslateRecordingBlock sends one chunk of a block to the chat role of this
@@ -259,7 +283,7 @@ func TranslateRecordingBlock(ctx context.Context, c RecordingTranslateCall, in R
 	if err != nil {
 		return nil, err
 	}
-	var raw [16]byte
+	var raw [recordingTagLen / 2]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return nil, fmt.Errorf("llm: recording translate: tag: %w", err)
 	}

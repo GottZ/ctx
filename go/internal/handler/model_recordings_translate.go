@@ -85,6 +85,10 @@ func (h *ManageHandler) handleModelRecordingTranslate(w http.ResponseWriter, r *
 		writeRecordingError(w, http.StatusUnprocessableEntity, "not_translatable", "this block holds no text to translate")
 		return
 	}
+	if len(b.Content()) == 0 {
+		writeRecordingError(w, http.StatusUnprocessableEntity, "not_translatable", "this block is empty")
+		return
+	}
 	chunks := llm.RecordingChunks(string(b.Content()))
 	if len(chunks) > llm.RecordingTranslateMaxChunks {
 		writeRecordingError(w, http.StatusRequestEntityTooLarge, "block_too_large", "the block is larger than one translation takes; read it in the raw view",
@@ -95,9 +99,19 @@ func (h *ManageHandler) handleModelRecordingTranslate(w http.ResponseWriter, r *
 		writeRecordingError(w, http.StatusBadRequest, "invalid_body", "chunk is out of range", "chunks", len(chunks))
 		return
 	}
+	tin := llm.RecordingTranslateInput{
+		Address: d.Address, Kind: b.Kind, Role: b.Role, Text: chunks[d.Chunk], Chunk: d.Chunk, Chunks: len(chunks), Language: d.Language,
+	}
+	cfg := h.cfg.SnapshotForRequest(r.Context())
+	// Nothing is audited that will not be sent: the chain and the window are
+	// checked first (no row for a refusal before the wire).
+	if err := llm.CheckRecordingTranslate(h.backendPool, cfg.Pool.ExternalNumCtxFallback, tin); err != nil {
+		writeRecordingTranslateError(w, r, err)
+		return
+	}
 	chain, err := llm.RecordingTranslateChain(h.backendPool)
 	if err != nil {
-		writeRecordingError(w, http.StatusServiceUnavailable, "no_eligible_backend", "no backend of this instance may receive a recording (chat role, full trust, not external)")
+		writeRecordingTranslateError(w, r, err)
 		return
 	}
 	if !h.auditRecordingRead(w, r, ar, &row.RecordingMeta, store.RecordingAuditTranslate,
@@ -105,14 +119,11 @@ func (h *ManageHandler) handleModelRecordingTranslate(w http.ResponseWriter, r *
 		return
 	}
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(llm.RecordingTranslateDeadline(chain) + recordingWriteMargin))
-	cfg := h.cfg.SnapshotForRequest(r.Context())
 	out, err := llm.TranslateRecordingBlock(r.Context(), llm.RecordingTranslateCall{
 		DB: h.pool, Pool: h.backendPool, Quota: h.quota, QuotaScope: ar.HomeScope, APIKeyID: ar.ApiKeyID,
 		WindowFallback: cfg.Pool.ExternalNumCtxFallback,
 		Admission:      llm.Admission{Admitter: h.admitter, Class: dispatch.ClassInteractive},
-	}, llm.RecordingTranslateInput{
-		Address: d.Address, Kind: b.Kind, Role: b.Role, Text: chunks[d.Chunk], Chunk: d.Chunk, Chunks: len(chunks), Language: d.Language,
-	})
+	}, tin)
 	if err != nil {
 		writeRecordingTranslateError(w, r, err)
 		return

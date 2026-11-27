@@ -839,3 +839,34 @@ func TestRecordingViewTranslateTrust(t *testing.T) {
 		t.Errorf("%d translation calls reached a backend that may not receive credentials or is external", n)
 	}
 }
+
+// TestRecordingViewTranslateRefusedBeforeTheWire: a chunk the chain's window
+// cannot hold, and an empty block, are refused before anything is sent — no
+// model call, and no audit row, which would claim a translation went out.
+func TestRecordingViewTranslateRefusedBeforeTheWire(t *testing.T) {
+	w := newRecViewWorld(t, func(e *recViewEngine) []backends.Backend {
+		r := e.row("small", backends.TrustFull, "local")
+		r.NumCtx = 1024
+		return []backends.Backend{r}
+	})
+	w.v1(recViewChat(recViewSecret))
+	id := w.newest(t)
+	empty, _ := json.Marshal(map[string]any{"model": v1ChatAlias, "messages": []any{map[string]any{"role": "user", "content": ""}}})
+	w.v1(empty)
+	emptyID := w.newest(t)
+	hits, audits := w.e.hits.Load(), w.audits(t)
+	status, body, _ := w.adminCall(t, "model-recording-translate", map[string]any{"id": id, "address": "request/messages/1", "language": "de"})
+	if status != http.StatusServiceUnavailable || !bytes.Contains(body, []byte("window_too_small")) {
+		t.Errorf("a window of 1024 tokens: %d %s, want 503 window_too_small", status, body)
+	}
+	status, body, _ = w.adminCall(t, "model-recording-translate", map[string]any{"id": emptyID, "address": "request/messages/0", "language": "de"})
+	if status != http.StatusUnprocessableEntity || !bytes.Contains(body, []byte("not_translatable")) {
+		t.Errorf("an empty block: %d %s, want 422 not_translatable", status, body)
+	}
+	if n := w.e.hits.Load() - hits; n != 0 {
+		t.Errorf("%d model calls, want none", n)
+	}
+	if n := w.audits(t) - audits; n != 0 {
+		t.Errorf("%d audit rows for translations that were not sent, want none", n)
+	}
+}
