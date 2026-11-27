@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -77,6 +78,13 @@ type recStore struct {
 	inOpen, maxInOpen atomic.Int64
 	// finishFailures refuses that many Finish calls before it takes one.
 	finishFailures int
+	// finishLost commits that many Finish calls and still returns an error
+	// (a commit whose acknowledgement was lost on the way back).
+	finishLost int
+	// finishGate, when set, holds every Finish until it is closed; inFinish
+	// counts the Finish calls waiting there.
+	finishGate chan struct{}
+	inFinish   atomic.Int64
 }
 
 func newRecStore(hits func() int64) *recStore {
@@ -117,8 +125,21 @@ func (s *recStore) Open(ctx context.Context, q llmlog.RecordedRequest) error {
 	return nil
 }
 
-func (s *recStore) Finish(_ context.Context, id string, o llmlog.RecordedOutcome) error {
+func (s *recStore) Finish(ctx context.Context, id string, o llmlog.RecordedOutcome) error {
 	s.calls.Add(1)
+	s.mu.Lock()
+	gate := s.finishGate
+	s.mu.Unlock()
+	if gate != nil {
+		s.inFinish.Add(1)
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			s.inFinish.Add(-1)
+			return ctx.Err()
+		}
+		s.inFinish.Add(-1)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.finishErr != nil {
@@ -129,11 +150,15 @@ func (s *recStore) Finish(_ context.Context, id string, o llmlog.RecordedOutcome
 		return errors.New("finish refused once")
 	}
 	r := s.rows[id]
-	if r == nil || r.state != llmlog.RecordingOpen {
+	if r == nil || (r.state != llmlog.RecordingOpen && !o.Supersedes) {
 		return errors.New("no open row")
 	}
 	r.state, r.out, r.response = llmlog.RecordingDone, o, append([]byte(nil), o.Response...)
 	s.order = append(s.order, "finish")
+	if s.finishLost > 0 {
+		s.finishLost--
+		return errors.New("finish committed, its acknowledgement lost")
+	}
 	return nil
 }
 
@@ -881,5 +906,142 @@ func TestRecordingErrorAnswerHeldBeforeItIsWritten(t *testing.T) {
 				t.Errorf("row state %q, want open (its outcome could not be held)", r.state)
 			}
 		})
+	}
+}
+
+// postVia posts body to path over srv (a real connection: the revoker's
+// request contexts) and reads the whole answer.
+func postVia(t *testing.T, srv *httptest.Server, path, body string) chatAnswer {
+	t.Helper()
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		return chatAnswer{status: -1, body: []byte(err.Error())}
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	return chatAnswer{status: resp.StatusCode, header: resp.Header, body: b}
+}
+
+// recRoutes are the three non-streamed routes of a recording consumer, each
+// over its own engine and rig: rig builds them over store, path and body
+// are the request; answered tells the route's answer from a refusal.
+var recRoutes = []struct {
+	name, path string
+	rig        func(t *testing.T, store *recStore) *chatRig
+	body       string
+	answered   func(b []byte) bool
+}{
+	{"chat", "/v1/chat/completions", func(t *testing.T, store *recStore) *chatRig {
+		u := newUpstream(t, recChatAnswer)
+		return newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withRecordings(store))
+	}, chatBody("pub"), func(b []byte) bool { return strings.Contains(string(b), "the answer") }},
+	{"embeddings", "/v1/embeddings", func(t *testing.T, store *recStore) *chatRig {
+		e := newEmbedEngine(t, 8)
+		return newEmbedRig(t, []backends.Backend{e.row("spark-embed", backends.ProtocolOpenAI, 10)}, 4, 1, withRecordings(store))
+	}, embedBody("emb1", []string{"a"}), func(b []byte) bool { return strings.Contains(string(b), `"embedding"`) }},
+	{"rerank", "/v1/rerank", func(t *testing.T, store *recStore) *chatRig {
+		e := newRerankEngine(t)
+		return newRerankRig(t, []backends.Backend{e.row("spark-rerank", 10)}, 4, 1, withRecordings(store))
+	}, rerankBody("rrpub", "q", []string{"d1", "d2"}), func(b []byte) bool { return strings.Contains(string(b), "relevance_score") }},
+}
+
+// TestRecordingAnswerWithheldWhenRevokedAfterItsHold: a request whose key
+// stops authenticating while its answer is being held — between the commit
+// of the answer and its write — gets the 401 the revocation answers, never
+// the answer; its row ends with that 401 and its body, not with the answer
+// it held. Chat, embeddings and rerank.
+func TestRecordingAnswerWithheldWhenRevokedAfterItsHold(t *testing.T) {
+	for _, rt := range recRoutes {
+		t.Run(rt.name, func(t *testing.T) {
+			store := newRecStore(nil)
+			gate := make(chan struct{})
+			var gateOnce sync.Once
+			defer gateOnce.Do(func() { close(gate) })
+			store.set(func(s *recStore) { s.finishGate = gate })
+			rig := rt.rig(t, store)
+			rig.ca.Store(recordingConsumer(true))
+			rv := newRevoker()
+			srv := serveHTTP(t, rv.wrap(rig.router))
+			done := make(chan chatAnswer, 1)
+			go func() { done <- postVia(t, srv, rt.path, rt.body) }()
+			if !waitFor(5*time.Second, func() bool { return store.inFinish.Load() == 1 }) {
+				t.Fatal("the answer's commit did not start")
+			}
+			if n := rv.revoke(); n != 1 {
+				t.Fatalf("revoked %d running requests, want 1", n)
+			}
+			gateOnce.Do(func() { close(gate) })
+			var a chatAnswer
+			select {
+			case a = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("no answer after the revocation")
+			}
+			if a.status != http.StatusUnauthorized || !strings.Contains(string(a.body), `"code":"invalid_api_key"`) || rt.answered(a.body) {
+				t.Fatalf("answer %d %s — want 401 invalid_api_key, without the answer", a.status, a.body)
+			}
+			r := store.only(t)
+			if r.state != llmlog.RecordingDone || r.out.Status != http.StatusUnauthorized || r.out.Code != oai.CodeInvalidAPIKey ||
+				string(r.response) != string(a.body) {
+				t.Errorf("row: state %q status %d code %q answer %q — want done 401 invalid_api_key with the client's %q",
+					r.state, r.out.Status, r.out.Code, r.response, a.body)
+			}
+		})
+	}
+}
+
+// TestRecordingLostAcknowledgementLeavesNoFalseAnswer: an answer whose
+// commit went through but whose acknowledgement was lost is refused (the
+// client gets 503 recording_unavailable and retries), and the row then says
+// so — status 503, the code, no answer — instead of the 200 and the answer
+// the client never got. Chat, embeddings and rerank.
+func TestRecordingLostAcknowledgementLeavesNoFalseAnswer(t *testing.T) {
+	for _, rt := range recRoutes {
+		t.Run(rt.name, func(t *testing.T) {
+			store := newRecStore(nil)
+			store.set(func(s *recStore) { s.finishLost = 1 })
+			rig := rt.rig(t, store)
+			ca := recordingConsumer(true)
+			ca.ConsumerID = uuid.NewString()
+			rig.ca.Store(ca)
+			srv := serveHTTP(t, rig.router)
+			a := postVia(t, srv, rt.path, rt.body)
+			checkRecordingRefusal(t, a.status, a.header, a.body)
+			if rt.answered(a.body) {
+				t.Errorf("the client got the answer: %s", a.body)
+			}
+			r := store.only(t)
+			if r.state != llmlog.RecordingDone || r.out.Status != http.StatusServiceUnavailable ||
+				r.out.Code != oai.CodeRecordingUnavailable || len(r.response) != 0 {
+				t.Errorf("row: state %q status %d code %q answer %d bytes — want done 503 recording_unavailable without an answer",
+					r.state, r.out.Status, r.out.Code, len(r.response))
+			}
+			if got := statsOf(ca.ConsumerID); got.Unfinished != 0 || got.Recorded != 1 {
+				t.Errorf("counts %+v — want recorded 1, unfinished 0 (the row holds the outcome)", got)
+			}
+		})
+	}
+}
+
+// TestRecordingRefusalGoesOutWhenItsRowFails: a refusal before the walk —
+// nothing reached a backend — is held only until its row is attempted; when
+// the row cannot be written the client still gets that refusal as it is
+// (not 503 recording_unavailable), and the request counts as unrecordable.
+func TestRecordingRefusalGoesOutWhenItsRowFails(t *testing.T) {
+	u := newUpstream(t, recChatAnswer)
+	store := newRecStore(nil)
+	rig := newChatRig(t, []backends.Backend{u.row("spark", backends.TrustFull, 10)}, 4, 1, withRecordings(store))
+	ca := recordingConsumer(true)
+	ca.ConsumerID = uuid.NewString()
+	rig.ca.Store(ca)
+	store.set(func(s *recStore) { s.insertErr = errors.New("database down") })
+	a := rig.post(t, `{"model":"no-such-model","messages":[{"role":"user","content":"hi"}]}`)
+	if code, _, _ := a.envelope(t); a.status != http.StatusNotFound || code != oai.CodeModelNotFound {
+		t.Errorf("client %d %q — want the refusal as it is, 404 model_not_found: %s", a.status, code, a.body)
+	}
+	if got := statsOf(ca.ConsumerID); got.Unrecordable != 1 || got.Recorded != 0 {
+		t.Errorf("counts %+v — want unrecordable 1, recorded 0", got)
 	}
 }

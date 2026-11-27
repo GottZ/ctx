@@ -1399,6 +1399,16 @@ func (c *embedCall) success(st *embedState) embedOutcome {
 		refuseRecording(c.rec, c.w)
 		return embedOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeRecordingUnavailable}}
 	}
+	if c.recording != nil {
+		// The commit took its time: a request that stopped being served
+		// meanwhile does not get the answer (record.go).
+		if err := c.d.heldStillServes(c.ctx, t); err != nil {
+			c.recording.withhold()
+			c.cancel(err)
+			_, code := c.verdict()
+			return embedOutcome{finish: llmlog.FinishAborted, redacted: &llmlog.RedactedErr{Class: backends.ClassCanceled.String(), Code: code}}
+		}
+	}
 	// The meter's view of the request's op bucket, on the successful answer
 	// only (design/06 §4.4; lead decision M2 (c)).
 	if c.limit != nil {

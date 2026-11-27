@@ -976,6 +976,14 @@ func (c *rerankCall) success(st *rerankState) embedOutcome {
 			refuseRecording(c.rec, c.w)
 			return embedOutcome{finish: llmlog.FinishError, redacted: &llmlog.RedactedErr{Class: "admission", Code: CodeRecordingUnavailable}}
 		}
+		// The commit took its time: a request that stopped being served
+		// meanwhile does not get the answer it held.
+		if err := c.d.heldStillServes(c.ctx, t); err != nil {
+			c.recording.withhold()
+			c.cancel(err)
+			_, code := c.verdict()
+			return embedOutcome{finish: llmlog.FinishAborted, redacted: &llmlog.RedactedErr{Class: backends.ClassCanceled.String(), Code: code}}
+		}
 		held = c.recording.capture
 	}
 	if c.limit != nil {

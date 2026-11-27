@@ -99,6 +99,27 @@ func TestRecordingsRoundTrip(t *testing.T) {
 	if err := st.Finish(ctx, req.ID, llmlog.RecordedOutcome{Status: 503}); err == nil {
 		t.Errorf("a second Finish of the same row succeeded; an outcome is written once")
 	}
+	// An answer committed and then withheld from the client: the outcome
+	// the client got supersedes it on the done row — and on an open one.
+	if err := st.Finish(ctx, req.ID, llmlog.RecordedOutcome{Status: 401, Code: "invalid_api_key", Response: []byte("refusal"), Supersedes: true}); err != nil {
+		t.Fatalf("superseding finish: %v", err)
+	}
+	r = readRecording(t, ctx, q, req.ID)
+	if r.state != llmlog.RecordingDone || r.status == nil || *r.status != 401 || r.code == nil || *r.code != "invalid_api_key" ||
+		string(r.response) != "refusal" || r.respBytes != int64(len("refusal")) || !bytes.Equal(r.body, body) {
+		t.Errorf("superseded row: state %q status %v code %v answer %q (%d bytes), request kept %v — want done 401 invalid_api_key with the refusal",
+			r.state, r.status, r.code, r.response, r.respBytes, bytes.Equal(r.body, body))
+	}
+	open := llmlog.RecordedRequest{ID: recID(t), ConsumerID: gwiConsumer, Path: "/v1/chat/completions", Body: []byte("asked"), Complete: true}
+	if err := st.Open(ctx, open); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := st.Finish(ctx, open.ID, llmlog.RecordedOutcome{Status: 503, Code: "recording_unavailable", Supersedes: true}); err != nil {
+		t.Fatalf("superseding finish of an open row: %v", err)
+	}
+	if r = readRecording(t, ctx, q, open.ID); r.state != llmlog.RecordingDone || r.status == nil || *r.status != 503 || r.response != nil {
+		t.Errorf("open row after a superseding finish: state %q status %v answer %v — want done 503 without an answer", r.state, r.status, r.response)
+	}
 
 	// A request refused before its walk: done at once, with the part read.
 	refused := llmlog.RecordedRequest{ID: recID(t), ConsumerID: gwiConsumer, Path: "/v1/chat/completions", Op: llmlog.GatewayOpChat,

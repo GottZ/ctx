@@ -42,7 +42,12 @@ import (
 //     rejection whose text the gateway relays — is held from the client by
 //     the stage's writer until the request's outcome is committed with its
 //     bytes (release); one whose row cannot take it after a backend was
-//     asked is 503 recording_unavailable in its place. A
+//     asked is 503 recording_unavailable in its place. A request that
+//     stops being served while its answer is committed (a revoked key, the
+//     model API switched off — heldStillServes) gets that refusal, never the
+//     answer, and its outcome supersedes the committed answer in the row;
+//     so does the 503 of an answer whose commit failed (it may have gone
+//     through). A
 //     stream keeps every line it relays (captured before the relay takes it)
 //     and commits them when it ends; what a stream already sent cannot be
 //     taken back, so a stream whose end cannot be committed leaves its row
@@ -283,6 +288,10 @@ type requestRecording struct {
 	row, opened, ended, settled bool
 	// unfinished: the outcome of an opened row could not be committed.
 	unfinished bool
+	// withheld: an answer was committed — or may have been: its commit
+	// failed — and the client does not get it (withhold); the request's
+	// outcome supersedes it.
+	withheld bool
 
 	// capture is a stream's relayed lines or a rerank answer; held is what
 	// it takes of the account; streamed: a stream relayed at least one line.
@@ -403,10 +412,48 @@ func (rr *requestRecording) answer(ctx context.Context, body []byte) bool {
 		return false // the walk ran on an open row (ready); anything else is a defect
 	}
 	if err := rr.finish(context.WithoutCancel(ctx), llmlog.RecordedOutcome{Status: http.StatusOK, Response: body}); err != nil {
+		// The commit may have gone through all the same (its acknowledgement
+		// lost): the refusal's outcome supersedes whatever the row holds.
+		rr.withheld = true
 		slog.Warn("gateway: an answer could not be recorded — refused", "consumer_id", rr.req.ConsumerID, "error", err)
 		return false
 	}
 	return true
+}
+
+// withhold marks a committed answer the client does not get — the request
+// stopped being served between the answer's commit and its write
+// (Deps.heldStillServes): the outcome the client gets supersedes it in the
+// row (end), and a captured answer is no longer what the client gets.
+// Nil-safe.
+func (rr *requestRecording) withhold() {
+	if rr == nil {
+		return
+	}
+	rr.withheld = true
+	rr.dropCapture()
+}
+
+// heldStillServes is the check between a held answer's commit and its write
+// (D8 for the time the commit took; stillServes ran before it): the model
+// API switched off, the alias gone (in memory; the grant is read again only
+// when the alias registry moved since the entry, as a watcher tick does),
+// the key revoked or its consumer deactivated (the door's registry ended
+// the request with auth.ErrCredentialRevoked), the shutdown. A cause: the
+// answer does not go out — the route answers the cause and withholds it. A
+// request deadline that passed during the commit is none: the answer is
+// ready (answer).
+func (d Deps) heldStillServes(ctx context.Context, t watchTarget) error {
+	if _, err := d.recheck(ctx, t, t.gen, false); err != nil {
+		return err
+	}
+	if d.Lifecycle != nil && d.Lifecycle.Err() != nil {
+		return errShutdown
+	}
+	if cause := context.Cause(ctx); errors.Is(cause, auth.ErrCredentialRevoked) {
+		return cause
+	}
+	return nil
 }
 
 // finish commits o on the open row. The statement's copies of o.Response
@@ -515,14 +562,14 @@ func (rr *requestRecording) noteStatus(code int) {
 // with its copies, since the request's in-flight reservation has ended. A
 // failure is counted, never retried later.
 func (rr *requestRecording) end(code string) {
-	if rr.ended {
+	if rr.ended && !rr.withheld {
 		rr.settled = true
 		rr.dropCapture()
 		return
 	}
 	defer rr.dropCapture()
 	ctx := context.Background()
-	o := llmlog.RecordedOutcome{Status: rr.writeStatus(), Code: code}
+	o := llmlog.RecordedOutcome{Status: rr.writeStatus(), Code: code, Supersedes: rr.withheld}
 	if held := rr.heldAnswer(); held != nil {
 		o.Response = held // what the client gets: the held answer, not a capture
 	} else if len(rr.capture) > 0 {
@@ -532,8 +579,12 @@ func (rr *requestRecording) end(code string) {
 		rr.req.Body = nil // in the row since the open
 		if err := rr.finish(ctx, o); err != nil {
 			rr.unfinished = true
+			// answer_withheld: the row may hold an answer the client did not
+			// get (its commit went through before the request stopped being
+			// served, or its acknowledgement was lost) instead of staying open.
 			slog.Error("gateway: the outcome of a recorded request could not be recorded — its row stays open",
-				"consumer_id", rr.req.ConsumerID, "recording_id", rr.req.ID, "stream_answer_lost", rr.streamed, "error", err)
+				"consumer_id", rr.req.ConsumerID, "recording_id", rr.req.ID, "stream_answer_lost", rr.streamed,
+				"answer_withheld", rr.withheld, "error", err)
 			return
 		}
 		rr.settled = true

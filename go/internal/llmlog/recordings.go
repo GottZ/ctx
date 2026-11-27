@@ -85,6 +85,11 @@ type RecordedOutcome struct {
 	Code string
 	// Response is the answer as the client got it (nil: none recorded).
 	Response []byte
+	// Supersedes: this outcome replaces one committed before — an answer
+	// whose commit went through (or may have: its acknowledgement was lost)
+	// and which the client then did not get (internal/oai record.go
+	// withhold). Finish writes it over a done row as over an open one.
+	Supersedes bool
 }
 
 // Recordings writes context_llm_recordings over Pool.
@@ -150,15 +155,16 @@ func (r Recordings) Open(ctx context.Context, q RecordedRequest) error {
 
 // Finish ends the open row id with its outcome (state done); nil once the
 // update is committed. A row that is not open is an error: an outcome is
-// written once.
+// written once — unless it supersedes a withheld answer (o.Supersedes),
+// which it replaces on the done row.
 func (r Recordings) Finish(ctx context.Context, id string, o RecordedOutcome) error {
 	if r.Pool == nil {
 		return errRecordingPool
 	}
 	tag, err := r.Pool.Exec(ctx, `UPDATE context_llm_recordings
 		SET state = 'done', finished_at = now(), status = $2, code = $3, response_bytes = $4, response_body = $5
-		WHERE id = $1::uuid AND state = 'open'`,
-		id, nullStatus(o.Status), nullText(o.Code), int64(len(o.Response)), bodyBytes(o.Response))
+		WHERE id = $1::uuid AND (state = 'open' OR $6)`,
+		id, nullStatus(o.Status), nullText(o.Code), int64(len(o.Response)), bodyBytes(o.Response), o.Supersedes)
 	if err != nil {
 		return fmt.Errorf("llmlog: finish recording: %w", err)
 	}
