@@ -13,7 +13,8 @@ import (
 // record_bodies on has every request it sends through the gateway held in
 // context_llm_recordings: one row per request, keyed by the request's own
 // id, with the body as the gateway read it, byte for byte (bytea — no
-// cleaning, no cut, no seal), the answer the client got, and the outcome.
+// cleaning, no cut, no seal), the answer the client got (an embeddings
+// answer without its vectors: the input is the record), and the outcome.
 // The gateway writes the row synchronously and in order (internal/oai
 // record.go): Open commits the request BEFORE the first backend attempt —
 // a request that cannot be held is not served —, Finish ends it with its

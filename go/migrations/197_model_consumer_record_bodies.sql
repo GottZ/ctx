@@ -50,7 +50,8 @@
 --     keyed by the request's own id (the uuid v7 the answer's id carries,
 --     "chatcmpl-<id>"). state 'open' from the insert before the first
 --     backend attempt until the request ended; 'done' with the status the
---     client got, the gateway's code and the answer. A row that stays 'open'
+--     client got, the gateway's code and the answer (an embeddings answer
+--     without its vectors: the input is the record). A row that stays 'open'
 --     is unfinished: the process ended (or the database failed) between
 --     holding the request and recording its outcome — its request is there,
 --     its outcome is not known; a stream row that stays 'open' may have

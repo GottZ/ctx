@@ -374,7 +374,8 @@ type GatewayRow struct {
 	// Recorded is the consumer's recording switch as the door read it
 	// (auth.ConsumerAuth.RecordBodies, migration 197), RecordingID the
 	// request's row in context_llm_recordings (recordings.go), which holds
-	// its request and answer whole. The row here is the row of every other
+	// its request whole and its answer (an embeddings answer without its
+	// vectors). The row here is the row of every other
 	// consumer without its bodies — none under any body policy: the
 	// recording is their one place — plus metadata.gw.recorded and
 	// recording_id.

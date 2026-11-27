@@ -51,10 +51,10 @@ type ConsumerAuth struct {
 	AdmissionLane     string // 'urgent' | 'bulk' — the external lane ceiling (design/03)
 	PeerInstanceID    string // a ctx-peer's bound instance id; "" = not bound
 	// RecordBodies is the consumer's recording switch (migration 197): every
-	// gateway row of the request keeps its request and answer in full
-	// (llmlog.GatewayRow.Recorded). It is read once at the door, like every
-	// other column: a switch applies from the next request on. It changes
-	// what the row carries and nothing on the request path.
+	// request is held in full in context_llm_recordings before it is served,
+	// with the answer it got, embedding vectors excepted (internal/oai
+	// record.go). It is read once at the door, like every other column: a
+	// switch applies from the next request on.
 	RecordBodies bool
 }
 

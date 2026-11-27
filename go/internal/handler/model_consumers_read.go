@@ -41,9 +41,10 @@ type consumerView struct {
 	AdmissionLane     string     `json:"admission_lane"`
 	AllowedCIDRs      []string   `json:"allowed_cidrs"`
 	AllowPlaintext    bool       `json:"allow_plaintext"`
-	// RecordBodies: every gateway row of the consumer keeps its request and
-	// answer in full (migration 197) — shown to every reader of the
-	// consumer, its tenant-admins included.
+	// RecordBodies: every request of the consumer is held in full in
+	// context_llm_recordings with the answer it got, embedding vectors
+	// excepted (migration 197) — shown to every reader of the consumer, its
+	// tenant-admins included.
 	RecordBodies bool       `json:"record_bodies"`
 	Active       bool       `json:"active"`
 	Status       string     `json:"status"`

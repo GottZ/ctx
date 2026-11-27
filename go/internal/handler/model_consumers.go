@@ -580,8 +580,9 @@ func (d *consumerCreateRequest) grant() consumerGrant {
 // confirm_record_bodies (the confirm_trust_elevation pattern): the switch
 // stores what the consumer sends in clear text, credentials in a prompt
 // included.
-const recordConfirmRefusal = "record_bodies:true holds every request and answer of this consumer in full in context_llm_recordings — " +
-	"credentials in a prompt included, in clear text, readable in the database — requires confirm_record_bodies:true"
+const recordConfirmRefusal = "record_bodies:true holds every request of this consumer in full in context_llm_recordings, with the answer it got " +
+	"(embedding vectors excepted) — credentials in a prompt included, in clear text, readable in the database — " +
+	"requires confirm_record_bodies:true"
 
 // errRecordConfirm is the refusal of recordConfirmRefusal under the consumer
 // lock (store.UpdateConsumerChecked); it surfaces as that 400.
