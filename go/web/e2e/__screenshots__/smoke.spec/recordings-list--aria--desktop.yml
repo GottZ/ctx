@@ -1,0 +1,193 @@
+- navigation "Primary":
+  - link "ctx":
+    - /url: /status
+  - group "Corpus":
+    - paragraph: Corpus
+    - list:
+      - listitem:
+        - link "Blocks":
+          - /url: /blocks
+      - listitem:
+        - link "Graph":
+          - /url: /graph
+      - listitem:
+        - link "Chat":
+          - /url: /chat
+  - group "Tenant":
+    - paragraph: Tenant
+    - list:
+      - listitem:
+        - link "Keys & Members":
+          - /url: /tenant
+      - listitem:
+        - link "Backends":
+          - /url: /tenant/backends
+      - listitem:
+        - link "Guard Review":
+          - /url: /guard
+      - listitem:
+        - link "Model API":
+          - /url: /gateway
+  - group "Server":
+    - paragraph: Server
+    - list:
+      - listitem:
+        - link "Tenants":
+          - /url: /admin
+      - listitem:
+        - link "Settings":
+          - /url: /settings
+      - listitem:
+        - link "Status":
+          - /url: /status
+      - listitem:
+        - link "Backends":
+          - /url: /settings/backends
+  - radiogroup "Theme":
+    - radio "System theme (follow OS)"
+    - radio "Light theme"
+    - radio "Dark theme" [checked]
+  - text: smoke-key Acme Corp owner
+  - button "Log out"
+  - button "Collapse sidebar"
+- main:
+  - paragraph:
+    - link "← Recordings":
+      - /url: /gateway/recordings
+  - heading "rec-app" [level=1]
+  - paragraph:
+    - text: acme
+    - code: /[0-9a-fA-F-]+/
+    - text: · newest first · metadata and sizes only
+  - form "filter recordings":
+    - text: from (local time)
+    - textbox "from (local time)":
+      - /placeholder: YYYY-MM-DD HH:MM
+    - text: until (local time)
+    - textbox "until (local time)":
+      - /placeholder: YYYY-MM-DD HH:MM
+    - paragraph: YYYY-MM-DD, optionally with HH:MM or HH:MM:SS, in this browser's time zone; until is exclusive.
+    - group "operation":
+      - text: ""
+      - checkbox "chat"
+      - text: chat
+      - checkbox "embed"
+      - text: embed
+      - checkbox "rerank"
+      - text: rerank
+      - checkbox "none"
+      - text: none
+    - text: state
+    - combobox "state":
+      - option "any" [selected]
+      - option "open"
+      - option "done"
+    - text: status
+    - combobox "status":
+      - option "any" [selected]
+      - option "2xx"
+      - option "3xx"
+      - option "4xx"
+      - option "5xx"
+      - option "none"
+    - button "Apply"
+    - button "Reset"
+  - region "recordings":
+    - heading "recordings" [level=2]
+    - text: "7"
+    - table "recordings":
+      - rowgroup:
+        - row "time op model stream state status request response":
+          - columnheader "time"
+          - columnheader "op"
+          - columnheader "model"
+          - columnheader "stream"
+          - columnheader "state"
+          - columnheader "status"
+          - columnheader "request"
+          - columnheader "response"
+      - rowgroup:
+        - row /\d+\/\d+\/\d+, \d+:\d+:\d+ AM chat chat whole done \d+ backend_error \d+ B \d+ B/:
+          - cell /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+            - link /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+              - /url: /gateway/recordings/01900000-0000-7000-8000-00000000c575/01900000-0000-7000-8000-0000000575a1
+          - cell "chat"
+          - cell "chat"
+          - cell "whole"
+          - cell "done"
+          - cell /\d+ backend_error/:
+            - code: /\d+ backend_error/
+          - cell /\d+ B/
+          - cell /\d+ B/
+        - row /\d+\/\d+\/\d+, \d+:\d+:\d+ AM chat chat stream open none \d+ B —/:
+          - cell /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+            - link /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+              - /url: /gateway/recordings/01900000-0000-7000-8000-00000000c575/01900000-0000-7000-8000-0000000575a2
+          - cell "chat"
+          - cell "chat"
+          - cell "stream"
+          - cell "open"
+          - cell "none":
+            - code: none
+          - cell /\d+ B/
+          - cell "—"
+        - row /\d+\/\d+\/\d+, \d+:\d+:\d+ AM embed embed whole done \d+ \d+ B —/:
+          - cell /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+            - link /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+              - /url: /gateway/recordings/01900000-0000-7000-8000-00000000c575/01900000-0000-7000-8000-0000000575a3
+          - cell "embed"
+          - cell "embed"
+          - cell "whole"
+          - cell "done"
+          - cell /\d+/:
+            - code: /\d+/
+          - cell /\d+ B/
+          - cell "—"
+        - row /\d+\/\d+\/\d+, \d+:\d+:\d+ AM rerank rerank whole done \d+ \d+ B \d+ B/:
+          - cell /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+            - link /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+              - /url: /gateway/recordings/01900000-0000-7000-8000-00000000c575/01900000-0000-7000-8000-0000000575a4
+          - cell "rerank"
+          - cell "rerank"
+          - cell "whole"
+          - cell "done"
+          - cell /\d+/:
+            - code: /\d+/
+          - cell /\d+ B/
+          - cell /\d+ B/
+        - row /\d+\/\d+\/\d+, \d+:\d+:\d+ AM chat chat stream done \d+ rate_limited \d+ B \d+ B/:
+          - cell /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+            - link /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+              - /url: /gateway/recordings/01900000-0000-7000-8000-00000000c575/01900000-0000-7000-8000-0000000575a5
+          - cell "chat"
+          - cell "chat"
+          - cell "stream"
+          - cell "done"
+          - cell /\d+ rate_limited/:
+            - code: /\d+ rate_limited/
+          - cell /\d+ B/
+          - cell /\d+ B/
+        - row /\d+\/\d+\/\d+, \d+:\d+:\d+ AM chat chat whole done \d+ \d+ B cleared \d+ B cleared/:
+          - cell /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+            - link /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+              - /url: /gateway/recordings/01900000-0000-7000-8000-00000000c575/01900000-0000-7000-8000-0000000575a6
+          - cell "chat"
+          - cell "chat"
+          - cell "whole"
+          - cell "done"
+          - cell /\d+/:
+            - code: /\d+/
+          - cell /\d+ B cleared/
+          - cell /\d+ B cleared/
+        - row /\d+\/\d+\/\d+, \d+:\d+:\d+ AM none — — done \d+ invalid_request \d+ B \d+ B/:
+          - cell /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+            - link /\d+\/\d+\/\d+, \d+:\d+:\d+ AM/:
+              - /url: /gateway/recordings/01900000-0000-7000-8000-00000000c575/01900000-0000-7000-8000-0000000575a7
+          - cell "none"
+          - cell "—"
+          - cell "—"
+          - cell "done"
+          - cell /\d+ invalid_request/:
+            - code: /\d+ invalid_request/
+          - cell /\d+ B/
+          - cell /\d+ B/
